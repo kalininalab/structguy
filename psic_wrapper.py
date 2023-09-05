@@ -1,5 +1,6 @@
 import subprocess
 import os
+import sys
 import gzip
 import time
 
@@ -51,7 +52,15 @@ def getPosMap(seq):
 
 def gpwToClustal(page,debug=0):
     if not type(page) == type(b''):
-        page = page.encode('ascii')
+        try:
+            page = page.encode('ascii')
+        except:
+            lines = page.split('\n')
+            for line in lines:
+                try:
+                    line = line.encode('ascii')
+                except:
+                    print(f'Error in encoding line:\n{line}')
     lines = page.split(b'\n')
 
     seq_map = []
@@ -151,7 +160,11 @@ def psicFromGPW(gpw,outfile,config,debug=0):
         if debug >= 1:
             print('psicFromGPW called with None')
         return
+    #try:
     cl_page = gpwToClustal(gpw,debug=debug)
+    #except:
+    #    print(f'Error in gpwToClustal: {gpw}')
+    #    sys.exit()
 
     clustal_file = '%s.clustal' % outfile
     f = open(clustal_file,'wb')

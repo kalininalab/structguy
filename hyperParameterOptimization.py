@@ -1,5 +1,10 @@
 import util
 import random
+import time
+import sys
+import traceback
+import psutil
+
 import trainForest
 
 import numpy as np
@@ -10,6 +15,8 @@ from scipy.optimize import minimize
 from sklearn.preprocessing import MinMaxScaler
 
 import ray
+
+import structman.base_utils.ray_utils as ray_utils
 
 #Taken from https://github.com/thuijskens/bayesian-optimization
 def expected_improvement(x, gaussian_process, evaluated_loss, greater_is_better=False, n_params=1):
@@ -88,12 +95,41 @@ def sample_next_hyperparameter(acquisition_func, gaussian_process, evaluated_los
 
     return best_x
 
-def bayes_random_init(config, parameters, score_matrix, cv_obj, best_scores, n_pre_samples, distance_map, samples = None, fix_cat = True):
+def fill_plane(parameter_values, integer_type_params, density = 20):
+    if len(integer_type_params) == 0:
+        return []
+
+    projected_parameter_values = [[]]
+
+    for pos, parameter_value in enumerate(parameter_values):
+        if pos not in integer_type_params:
+            projections = [parameter_value]
+        else:
+            l = int(parameter_value)
+            projections = []
+            for i in range(density+1):
+                projections.append(l + (i/density))
+
+        new_projected_parameter_values = []
+        for projected_value in projections:
+            for current_parameter_values in projected_parameter_values:
+                new_projected_parameter_values.append(current_parameter_values + [projected_value])
+        projected_parameter_values = new_projected_parameter_values
+
+    return projected_parameter_values
+
+def bayes_random_init(config, parameters, score_matrix, cv_obj, best_scores, n_pre_samples, distance_map, samples = None, fix_cat = True, force_remote = False, debug = False):
     param_names = [p.name for p in parameters]
 
     bounds = np.array([p.half_step_limits for p in parameters])
 
     initial_values = [p.getValue(config) for p in parameters]
+
+    integer_type_params = set()
+
+    for parameter_number, parameter in enumerate(parameters):
+        if parameter.param_type == 'integer':
+            integer_type_params.add(parameter_number)
 
     best_params = initial_values
 
@@ -107,41 +143,68 @@ def bayes_random_init(config, parameters, score_matrix, cv_obj, best_scores, n_p
     para_eval_ret_ids = []
 
     if n_pre_samples is None:
-        n_pre_samples = min([config.proc_n,4**n_params])
+        n_pre_samples = min([config.proc_n, 2**n_params])
 
-    print('bayesian optimization:',param_names,n_pre_samples)
+    print('bayesian optimization:',param_names,n_pre_samples,force_remote)
 
-    if not 'geometric_exponent' in param_names:
+    #if not 'geometric_exponent' in param_names:
+    if force_remote:
+        randomized_parameters = np.random.uniform(bounds[:, 0], bounds[:, 1], (n_pre_samples, bounds.shape[0]))
+
+        #Always calculate one set of parameters unparalized to set the confusion maps (or other slice specific stuff that resets after each round of the HPO)
+        init_params = randomized_parameters[0]
+        for pos,para_value in enumerate(init_params):
+            parameters[pos].setValue(config, para_value)
+
+        if debug:
+            print(f'Init params: {init_params}')
+
+        scores = get_scores(config, score_matrix, cv_obj, distance_map, samples = samples, debug = debug)
+        results = [(scores, init_params)]
 
         store = ray.put((config,cv_obj, parameters, None, samples))
 
         print('after store init')
 
-        para_number = config.proc_n//n_pre_samples
+        para_number = config.proc_n//(n_pre_samples-1)
 
         # Get n_pre_samples amount of random points
-        for params in np.random.uniform(bounds[:, 0], bounds[:, 1], (n_pre_samples, bounds.shape[0])):
-            para_eval_ret_ids.append(para_eval.remote(params, store, para_number))
+        try:
+            for params in randomized_parameters[1:]:
+                para_eval_ret_ids.append(para_eval.remote(params, store, para_number))
+        except:
+            [e, f, g] = sys.exc_info()
+            g = traceback.format_exc()
+            print(f'ERROR in bayes_random_init: {n_pre_samples}, {bounds}\n{e}\n{f}\n{g}')
+            sys.exit()
 
-        print('Para random init started')
+        print(f'Para random init started: {para_number}')
 
-        results = ray.get(para_eval_ret_ids)
+        results += ray.get(para_eval_ret_ids)
 
     else:
         results = []
-
-        for params in np.random.uniform(bounds[:, 0], bounds[:, 1], (n_pre_samples, bounds.shape[0])):
-            for pos,para_value in enumerate(params):
-                parameters[pos].setValue(config, para_value)
-            scores = get_scores(config, score_matrix, cv_obj, distance_map, samples = samples)
-            results.append((scores,params))
+        try:
+            for params in np.random.uniform(bounds[:, 0], bounds[:, 1], (n_pre_samples, bounds.shape[0])):
+                for pos,para_value in enumerate(params):
+                    parameters[pos].setValue(config, para_value)
+                scores = get_scores(config, score_matrix, cv_obj, distance_map, samples = samples)
+                results.append((scores,params))
+                #projected_parameter_values = fill_plane(params, integer_type_params)
+                #for projected_param in projected_parameter_values:
+                #    results.append((scores, projected_param))
+        except:
+            [e, f, g] = sys.exc_info()
+            g = traceback.format_exc()
+            print(f'ERROR in bayes_random_init: {n_pre_samples}, {bounds}\n{e}\n{f}\n{g}')
+            sys.exit()
 
     cat_param_map = {}
 
     for scores, params in results:
         if scores.objective_value(config) is None:
             print('========= Warning: None objective score for:', param_names, params)
-            scores = util.Scores(zero=True)
+            scores = util.Scores(zero=True, n_of_features = len(cv_obj.feature_names))
         #addToScoreMatrix(scores, config, score_matrix)
         obj_sc = scores.objective_value(config)
         x_list.append(params)
@@ -153,7 +216,7 @@ def bayes_random_init(config, parameters, score_matrix, cv_obj, best_scores, n_p
         #print('Score:',obj_sc)
         #print('=============')
 
-        if util.objective_function_criterium(config,scores,best_scores):
+        if util.objective_function_criterium(config, scores, best_scores, feature_penalty = config.feature_penalty):
             best_scores = scores
             best_params = params
             new_optimimum = True
@@ -161,6 +224,9 @@ def bayes_random_init(config, parameters, score_matrix, cv_obj, best_scores, n_p
             print(params)
             scores.printOut()
             print('====================================================')
+        elif config.verbosity >= 3:
+            print(f'No new optimun ({util.get_objective_score(config, best_scores)}): {util.get_objective_score(config, scores)}')
+
 
         if fix_cat:
             for p_pos,parameter in enumerate(parameters):
@@ -204,12 +270,12 @@ def bayes_random_init(config, parameters, score_matrix, cv_obj, best_scores, n_p
 
         for p_pos in reversed(fix_parameters_pos):
             del parameters[p_pos]
-    return x_list, y_list, bounds, n_params, best_scores, best_params, initial_values, new_optimimum, len(fix_parameters_pos), param_names
+    return x_list, y_list, bounds, n_params, best_scores, best_params, initial_values, new_optimimum, len(fix_parameters_pos), param_names, integer_type_params
 
 # Taken from https://github.com/thuijskens/bayesian-optimization
 # Changed to match the specific problem
 def bayesian_optimisation(n_iters, config, parameters, score_matrix, cv_obj, best_scores, distance_map, samples = None, n_pre_samples=5,
-                          gp_params=None, random_search=False, alpha=1e-5, epsilon=1e-7):
+                          gp_params=None, random_search=False, alpha=1e-5, epsilon=1e-7, force_remote = False, debug = False):
     """ bayesian_optimisation
     Uses Gaussian Processes to optimise the loss function `sample_loss`.
     Arguments:
@@ -239,7 +305,7 @@ def bayesian_optimisation(n_iters, config, parameters, score_matrix, cv_obj, bes
     n_fixed_params = 1
 
     #while n_fixed_params > 0:
-    x_list, y_list, bounds, n_params, best_scores, best_params, initial_values, new_optimimum, n_fixed_params, param_names = bayes_random_init(config, parameters, score_matrix, cv_obj, best_scores, n_pre_samples, distance_map, samples = samples, fix_cat = False)
+    x_list, y_list, bounds, n_params, best_scores, best_params, initial_values, new_optimimum, n_fixed_params, param_names, integer_type_params = bayes_random_init(config, parameters, score_matrix, cv_obj, best_scores, n_pre_samples, distance_map, samples = samples, fix_cat = False, force_remote = force_remote, debug = debug)
 
     min_max_samples = [[],[]]
     for bound in bounds:
@@ -267,15 +333,21 @@ def bayesian_optimisation(n_iters, config, parameters, score_matrix, cv_obj, bes
     scaled_xp = scaler.transform(xp)
 
     if n_iters is None:
-        n_iters = 5**n_params
+        n_iters = 2**(n_params+1)
 
     for n in range(n_iters):
+        if config.verbosity >= 2:
+            tl0 = time.time()
         try:
             model.fit(scaled_xp, yp)
         except:
             print(xp,yp)
             print(x_list,y_list)
             raise 'None in Input'
+
+        if config.verbosity >= 3:
+            tl1 = time.time()
+            print(f'Bayesian optimisation loop part 1: {tl1-tl0}')
 
         # Sample next hyperparameter
         if random_search:
@@ -285,17 +357,39 @@ def bayesian_optimisation(n_iters, config, parameters, score_matrix, cv_obj, bes
         else:
             next_sample = sample_next_hyperparameter(expected_improvement, model, yp, greater_is_better=True, bounds=scaled_bounds, n_restarts=100)
 
+        if config.verbosity >= 3:
+            tl2 = time.time()
+            print(f'Bayesian optimisation loop part 2: {tl2-tl1}')
+
         # Duplicates will break the GP. In case of a duplicate, we will randomly sample a next query point.
         if np.any(np.abs(next_sample - xp) <= epsilon):
             next_sample = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
         else:
             next_sample = scaler.inverse_transform([next_sample])[0]
 
+        if config.verbosity >= 3:
+            tl3 = time.time()
+            print(f'Bayesian optimisation loop part 3: {tl3-tl2}')
+
         # Sample loss for new set of parameters
         for pos,para_value in enumerate(next_sample):
             parameters[pos].setValue(config, para_value)
+
+        if config.verbosity >= 3:
+            tl4 = time.time()
+            print(f'Bayesian optimisation loop part 4: {tl4-tl3}')
+
         scores = get_scores(config, score_matrix, cv_obj, distance_map, samples = samples)
+
+        if config.verbosity >= 3:
+            tl5 = time.time()
+            print(f'Bayesian optimisation loop part 5: {tl5-tl4}')
+
         cv_score = scores.objective_value(config)
+
+        if config.verbosity >= 3:
+            tl6 = time.time()
+            print(f'Bayesian optimisation loop part 6: {tl6-tl5}')
 
         print('Bayesian optimization, iteration:',n)
         #print('===========================\nBayesian optimization, iteration:',n,'\n===\n')
@@ -309,7 +403,7 @@ def bayesian_optimisation(n_iters, config, parameters, score_matrix, cv_obj, bes
         #print('Score:',cv_score)
         #print('=============')
 
-        if util.objective_function_criterium(config,scores,best_scores):
+        if util.objective_function_criterium(config, scores, best_scores, feature_penalty = config.feature_penalty):
             best_scores = scores
             best_params = next_sample
             new_optimimum = True
@@ -317,19 +411,33 @@ def bayesian_optimisation(n_iters, config, parameters, score_matrix, cv_obj, bes
             config.printParameter()
             scores.printOut()
             print('===========================')
+        elif config.verbosity >= 3:
+            print(f'No new optimun ({util.get_objective_score(config, best_scores)}): {util.get_objective_score(config, scores)}')
 
         if cv_score is None:
             print(' === cv_score is None:',next_sample)
 
+        if config.verbosity >= 3:
+            tl7 = time.time()
+            print(f'Bayesian optimisation loop part 7: {tl7-tl6}')
+
         # Update lists
         x_list.append(next_sample)
         y_list.append(cv_score)
+
+        #projected_parameter_values = fill_plane(next_sample, integer_type_params)
+        #for projected_param in projected_parameter_values:
+        #    x_list.append(projected_param)
+        #    y_list.append(cv_score)
 
         # Update xp and yp
         xp = np.array(x_list)
         yp = np.array(y_list)
         scaled_xp = scaler.transform(xp)
 
+        if config.verbosity >= 3:
+            tl8 = time.time()
+            print(f'Bayesian optimisation loop part 8: {tl8-tl7}')
 
     if new_optimimum:
         for pos, para_value in enumerate(best_params):
@@ -341,8 +449,14 @@ def bayesian_optimisation(n_iters, config, parameters, score_matrix, cv_obj, bes
 
     return new_optimimum, best_scores
 
+def max_to_n_of_features(limits, n_of_features):
+    if limits[1] != 'max':
+        return limits
+    else:
+        return [limits[0], n_of_features]
+
 class Parameter:
-    def __init__(self,name,param_type,half_step_limits = None,possible_values = None,regression_specific = False, classification_specific = False):
+    def __init__(self,name,param_type,half_step_limits = None,possible_values = None,regression_specific = False, classification_specific = False, transform_limits = None):
         self.name = name
         self.half_step_limits = half_step_limits
         self.possible_values = possible_values
@@ -352,6 +466,9 @@ class Parameter:
 
         if self.half_step_limits is None:
             self.half_step_limits = [0,(len(self.possible_values) -1)]
+        elif transform_limits is not None:
+            transform_function, additional_args = transform_limits
+            self.half_step_limits = transform_function(half_step_limits, additional_args)
 
     def setValue(self, config, val):
         if self.param_type == 'categorical' and not isinstance(val,str):
@@ -440,7 +557,7 @@ def threeDim(parameter_1, parameter_2, parameter_3, best_scores, config, score_m
         elif parameter_3.param_type == 'categorical':
             return bayesianAndCat(parameter_3, [parameter_1, parameter_2], best_scores, config, score_matrix, cv_obj, distance_map, samples = samples)
 
-    return bayesian_optimisation(None, config, [parameter_1, parameter_2, parameter_3], score_matrix, cv_obj, best_scores, distance_map, samples = samples, n_pre_samples = None)
+    return bayesian_optimisation(None, config, [parameter_1, parameter_2, parameter_3], score_matrix, cv_obj, best_scores, distance_map, samples = samples, n_pre_samples = None, force_remote = True)
 
 def halfStepAndCat(parameter_1, parameter_2, best_scores, config, score_matrix, cv_obj, distance_map, samples = None):
     print('halfStep and Cat 2D',parameter_1.name,parameter_2.name)
@@ -756,11 +873,12 @@ def halfStep2D(parameter_1, parameter_2, best_forest, best_scores, config, score
 
     return new_optimimum,best_forest,best_scores
 
-def get_scores(config, score_matrix, cv_obj, distance_map, samples = None, remote = True, para_number = None):
+def get_scores(config, score_matrix, cv_obj, distance_map, samples = None, remote = True, para_number = None, debug = False):
     if (score_matrix is not None) and parametersInScoreMatrix(config,score_matrix):
         scores = getFromScoreMatrix(config,score_matrix)
+        print('Parameter set already known, skip scores calculation')
     else:
-        forest,scores = trainForest.trainForest(config, cv_obj, distance_map = distance_map, samples = samples, repeat = config.repeat_training,cv_repeat = config.cv_hpo, remote = remote, para_number = para_number)
+        forest,scores = trainForest.trainForest(config, cv_obj, distance_map = distance_map, samples = samples, repeat = config.repeat_training,cv_repeat = config.cv_hpo, remote = remote, para_number = para_number, debug = debug)
         if score_matrix is not None:
             addToScoreMatrix(scores, config, score_matrix)
     return scores
@@ -914,42 +1032,64 @@ def probeOneDimCategorical(best_scores, parameter_name, parameter_interval, conf
     config.setByString(parameter_name,best_parameter_value)
     return new_optimimum, best_scores
 
-def initParameters(config, do_feat_selection = True, do_forest_param = True, do_sample_weighting = True):
+def initConfParameters(config, parameters):
+    parameters['confusion_rank_threshold'] = Parameter('confusion_rank_threshold', 'integer', half_step_limits = config.confusion_rank_threshold_bounds, transform_limits = (max_to_n_of_features, config.n_of_features))
+    parameters['confusion_goodwill'] = Parameter('confusion_goodwill', 'real', half_step_limits = config.confusion_goodwill_bounds)
+    parameters['err_warping_exp'] = Parameter('err_warping_exp', 'real', half_step_limits = config.err_warping_exp_bounds)
+    parameters['confusion_normalization_exp'] = Parameter('confusion_normalization_exp', 'real', half_step_limits= config.confusion_normalization_exp_bounds)
+
+    return parameters
+
+def initReguParameters(config, parameters):
+    #parameters['reg_thresh_exp'] = Parameter('reg_thresh_exp','real',half_step_limits = config.reg_thresh_exp_half_step)
+    if config.regression:
+        parameters['reg_alpha_exp'] = Parameter('reg_alpha_exp','real',half_step_limits = config.reg_alpha_exp_half_step)
+    else:
+        parameters['reg_c_exp'] = Parameter('reg_c_exp','real',half_step_limits = config.reg_c_exp_half_step)
+    return parameters
+
+def initMeanCorrParameters(config, parameters):
+    parameters['tvmb_rank_threshold'] = Parameter('tvmb_rank_threshold','integer',half_step_limits = config.tvmb_rank_half_step, transform_limits = (max_to_n_of_features, config.n_of_features))
+    #parameters['tvpmb_rank_threshold'] = Parameter('tvpmb_rank_threshold','integer',half_step_limits = config.tvpmb_rank_half_step, transform_limits = (max_to_n_of_features, config.n_of_features))
+    parameters['p_val_thresh'] = Parameter('p_val_thresh','real',half_step_limits = config.p_val_thresh_half_step, transform_limits = (max_to_n_of_features, config.n_of_features))
+    return parameters
+
+def initParameters(config, do_feat_selection = True, do_forest_param = True, do_sample_weighting = True, split_fs_parameters = False):
     parameters = {}
+    fs_parameters = {}
     if config.hpo_do_feat_selection:
         if config.feature_selection == 'meanCorrelation':
-            parameters['tvmb_rank_threshold'] = Parameter('tvmb_rank_threshold','integer',half_step_limits = config.tvmb_rank_half_step)
-            parameters['tvpmb_rank_threshold'] = Parameter('tvpmb_rank_threshold','integer',half_step_limits = config.tvpmb_rank_half_step)
-            parameters['p_val_thresh'] = Parameter('p_val_thresh','real',half_step_limits = config.p_val_thresh_half_step)
-        elif config.feature_selection == 'regularization':
-            parameters['reg_thresh_exp'] = Parameter('reg_thresh_exp','real',half_step_limits = config.reg_thresh_exp_half_step)
-            if config.regression:
-                parameters['reg_alpha_exp'] = Parameter('reg_alpha_exp','real',half_step_limits = config.reg_alpha_exp_half_step)
-            else:
-                parameters['reg_c_exp'] = Parameter('reg_c_exp','real',half_step_limits = config.reg_c_exp_half_step)
-        elif config.feature_selection == 'double':
-            parameters['tvmb_rank_threshold'] = Parameter('tvmb_rank_threshold','integer',half_step_limits = config.tvmb_rank_half_step)
-            parameters['tvpmb_rank_threshold'] = Parameter('tvpmb_rank_threshold','integer',half_step_limits = config.tvpmb_rank_half_step)
-            #parameters['p_val_thresh'] = Parameter('p_val_thresh','real',half_step_limits = config.p_val_thresh_half_step)
-            parameters['reg_thresh_exp'] = Parameter('reg_thresh_exp','real',half_step_limits = config.reg_thresh_exp_half_step)
-            if config.regression:
-                parameters['reg_alpha_exp'] = Parameter('reg_alpha_exp','real',half_step_limits = config.reg_alpha_exp_half_step)
-            else:
-                parameters['reg_c_exp'] = Parameter('reg_c_exp','real',half_step_limits = config.reg_c_exp_half_step)
-        elif config.feature_selection == 'confusion' or config.feature_selection == 'sequential_confusion':
-            parameters['confusion_rank_threshold'] = Parameter('confusion_rank_threshold', 'integer', half_step_limits = config.confusion_rank_threshold_bounds)
+            fs_parameters = initMeanCorrParameters(config, fs_parameters)
+        if config.feature_selection == 'regularization':
+            fs_parameters = initReguParameters(config, fs_parameters)
+
+        if config.feature_selection == 'double':
+            fs_parameters = initMeanCorrParameters(config, fs_parameters)
+            fs_parameters = initReguParameters(config, fs_parameters)
+
+        elif config.feature_selection == 'confusion' or config.feature_selection == 'sequential_confusion' or config.feature_selection == 'sequential_confusion_and_regu' or config.feature_selection == 'confusion_and_regu':
+            fs_parameters = initConfParameters(config, fs_parameters)
+
+            if config.feature_selection == 'sequential_confusion' or config.feature_selection == 'sequential_confusion_and_regu':
+                fs_parameters['sequential_confusion_rank_threshold'] = Parameter('sequential_confusion_rank_threshold', 'integer', half_step_limits = config.sequential_confusion_rank_threshold_bounds, transform_limits = (max_to_n_of_features, config.n_of_features))
+            if config.feature_selection == 'sequential_confusion_and_regu' or config.feature_selection == 'confusion_and_regu':
+                fs_parameters = initReguParameters(config, fs_parameters)
+
         elif config.feature_selection == 'threeStaged':
-            parameters['confusion_rank_threshold'] = Parameter('confusion_rank_threshold', 'integer', half_step_limits = config.confusion_rank_threshold_bounds)
-            '''
-            parameters['tvmb_rank_threshold'] = Parameter('tvmb_rank_threshold','integer',half_step_limits = config.tvmb_rank_half_step)
-            parameters['tvpmb_rank_threshold'] = Parameter('tvpmb_rank_threshold','integer',half_step_limits = config.tvpmb_rank_half_step)
-            #parameters['p_val_thresh'] = Parameter('p_val_thresh','real',half_step_limits = config.p_val_thresh_half_step)
-            parameters['reg_thresh_exp'] = Parameter('reg_thresh_exp','real',half_step_limits = config.reg_thresh_exp_half_step)
-            if config.regression:
-                parameters['reg_alpha_exp'] = Parameter('reg_alpha_exp','real',half_step_limits = config.reg_alpha_exp_half_step)
-            else:
-                parameters['reg_c_exp'] = Parameter('reg_c_exp','real',half_step_limits = config.reg_c_exp_half_step)
-            '''
+            fs_parameters = initConfParameters(config, fs_parameters)
+            fs_parameters = initMeanCorrParameters(config, fs_parameters)
+            fs_parameters = initReguParameters(config, fs_parameters)
+        elif config.feature_selection == 'threeStaged_listranking':
+            fs_parameters = initReguParameters(config, fs_parameters)
+            fs_parameters['confusion_goodwill'] = Parameter('confusion_goodwill', 'real', half_step_limits = config.confusion_goodwill_bounds)
+            fs_parameters['err_warping_exp'] = Parameter('err_warping_exp', 'real', half_step_limits = config.err_warping_exp_bounds)
+            fs_parameters['confusion_normalization_exp'] = Parameter('confusion_normalization_exp', 'real', half_step_limits= config.confusion_normalization_exp_bounds)
+            fs_parameters['list_ranking_thresh'] = Parameter('list_ranking_thresh', 'integer', half_step_limits = config.list_ranking_thresh_bounds, transform_limits = (max_to_n_of_features, config.n_of_features))
+
+
+    if not split_fs_parameters:
+        parameters = fs_parameters
+
     if config.hpo_do_forest_param:
         parameters['min_sample_split'] = Parameter('min_sample_split','integer',half_step_limits = config.min_sample_split_half_step)
         parameters['tree_depth'] = Parameter('tree_depth','integer',half_step_limits = config.tree_depth_half_step)
@@ -973,10 +1113,13 @@ def initParameters(config, do_feat_selection = True, do_forest_param = True, do_
             #    parameters['number_of_bins'] = Parameter('number_of_bins','integer',half_step_limits = config.number_of_bins_half_step,regression_specific = True)
             #else:
                 #pass
-            parameters['geometric_exponent'] = Parameter('geometric_exponent', 'real', half_step_limits = config.geometric_exponent_bounds)
+            #parameters['geometric_exponent'] = Parameter('geometric_exponent', 'real', half_step_limits = config.geometric_exponent_bounds)
+            pass
         else:
             parameters['class_weight'] = Parameter('class_weight','categorical',possible_values = config.class_weights,classification_specific = True)
-            
+    
+    if split_fs_parameters:
+        return fs_parameters, parameters
     return parameters
 
 def twoDimHyperOptimization(config, cv_obj, best_scores, distance_map):
@@ -1007,38 +1150,63 @@ def twoDimHyperOptimization(config, cv_obj, best_scores, distance_map):
         n += 1
     return
 
-def threeDimHyperOptimization(config, cv_obj, best_scores, distance_map = None, samples = None):
-    parameters = initParameters(config)
+def threeDimHyperOptimization(config, cv_obj, best_scores, distance_map = None, samples = None, debug = False):
+    fs_parameters, parameters = initParameters(config, split_fs_parameters = True)
     converged = False
     n = 1
     score_matrix = {}
+
+    """
+    print(f'=== Start with a brief complete bayes search (with big random init) ===')
+    #Set samples to None, should not be needed, since slice_slices got set in initial training
+    random_init_loops = max([config.proc_n, 1])
+    new_optimimum, best_scores = bayesian_optimisation(3*len(parameters), config, [parameters[p] for p in parameters], score_matrix, cv_obj, best_scores, distance_map, samples = None, n_pre_samples = random_init_loops, force_remote = True)
+    """
+    #del samples
+    #samples = None
+
+    #parameters['confusion_rank_threshold'] = fs_parameters['confusion_rank_threshold']
+
     while not converged:
         converged = True
-        param_names = list(parameters.keys())
-        random.shuffle(param_names)
+        if n > 1:
+            cv_obj.reset_confusion_maps()
 
-        while len(param_names) > 2:
-            param_trio = param_names.pop(), param_names.pop(), param_names.pop()
-            new_opti, best_scores = threeDim(parameters[param_trio[0]], parameters[param_trio[1]], parameters[param_trio[2]], best_scores, config, score_matrix, cv_obj, distance_map, samples = samples)
-            if new_opti:
-                converged = False
+        bayesian_optimisation(None, config, list(fs_parameters.values()), score_matrix, cv_obj, best_scores, distance_map, samples = samples, n_pre_samples = None, force_remote = False, debug = debug)
 
-        while len(param_names) > 1:
-            param_pair = param_names.pop(), param_names.pop()
-            new_opti, best_scores = twoDim(parameters[param_pair[0]], parameters[param_pair[1]], best_scores, config, score_matrix, cv_obj, distance_map, samples = samples)
-            if new_opti:
-                converged = False
+        for param in [parameters]:
+            param_names = list(param.keys())
+            random.shuffle(param_names)
 
-        if len(param_names) == 1:
-            new_opti, best_scores = optParam(parameters[param_names[0]], best_scores, config, score_matrix, cv_obj, distance_map, samples = samples)
-            if new_opti:
-                converged = False
+            while len(param_names) > 2:
+                param_trio = param_names.pop(), param_names.pop()#, 'confusion_rank_threshold'#param_names.pop()
+                new_opti, best_scores = threeDim(param[param_trio[0]], param[param_trio[1]], fs_parameters['confusion_rank_threshold'], best_scores, config, score_matrix, cv_obj, distance_map, samples = samples)
+                if new_opti:
+                    converged = False
+
+            while len(param_names) > 1:
+                param_pair = param_names.pop(), param_names.pop()
+                new_opti, best_scores = twoDim(param[param_pair[0]], param[param_pair[1]], best_scores, config, score_matrix, cv_obj, distance_map, samples = samples)
+                if new_opti:
+                    converged = False
+
+            if len(param_names) == 1:
+                new_opti, best_scores = optParam(param[param_names[0]], best_scores, config, score_matrix, cv_obj, distance_map, samples = samples)
+                if new_opti:
+                    converged = False
 
         print('Iteration: ',n)
         config.printParameter()
         if best_scores is not None:
             best_scores.printOut()
         n += 1
+        #ray.shutdown()
+
+        #time.sleep(60)
+
+        #ray_utils.ray_init(config.structman_config, overwrite_logging_level = 0)
+ 
+    cv_obj.reset_confusion_maps()
     return
 
 def bayesianComplete(config, cv_obj, best_scores, distance_map = None, samples = None):

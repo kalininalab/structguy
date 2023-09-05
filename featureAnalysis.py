@@ -119,8 +119,20 @@ def add_tree_CM(tree_confusion_map, pre_confusion_map):
             pre_confusion_map[feat][1] += tree_confusion_map[feat][1]
     return pre_confusion_map
 
-def calcSliceConfusion(forest, cv_slice, remote = True, para_number = None):
+def add_tree_RCM(tree_raw_confusion_map, pre_raw_confusion_map):
+    for feat in tree_raw_confusion_map:
+        if not feat in pre_raw_confusion_map:
+            pre_raw_confusion_map[feat] = tree_raw_confusion_map[feat]
+        else:
+            pre_raw_confusion_map[feat] += tree_raw_confusion_map[feat]
+    return pre_raw_confusion_map
+
+def calcSliceConfusion(forest, cv_slice, remote = True, para_number = None, err_warping_exp = 1, goodwill_interval = 0.25, norm_exp = 1.2):
     pre_confusion_map = {}
+    pre_raw_confusion_map = {}
+
+    if para_number == 1:
+        remote = False
 
     if remote:
         store = ray.put((cv_slice.test_feature_matrix, cv_slice.test_targets, cv_slice.feature_names))
@@ -135,40 +147,65 @@ def calcSliceConfusion(forest, cv_slice, remote = True, para_number = None):
         if remote:
             if i == para_number:
                 break
-            result_ids.append(trainForest.nested_ray_wrapper_for_conf_map_calculation.remote(tree, store))
+            result_ids.append(trainForest.nested_ray_wrapper_for_conf_map_calculation.remote(tree, store, err_warping_exp = err_warping_exp, goodwill_interval = goodwill_interval))
         else:
-            result_ids.append(calcConfusionMap(tree, (cv_slice.test_feature_matrix, cv_slice.test_targets, cv_slice.feature_names)))
+            result_ids.append(calcConfusionMap(tree, (cv_slice.test_feature_matrix, cv_slice.test_targets, cv_slice.feature_names), err_warping_exp = err_warping_exp, goodwill_interval=goodwill_interval))
 
     if remote:
         while True:
             ready, not_ready = ray.wait(result_ids)
             new_result_ids = []
             if len(ready) > 0:
-                for tree_confusion_map in ray.get(ready):
+                for tree_confusion_map, raw_tree_confusion_map in ray.get(ready):
                     pre_confusion_map = add_tree_CM(tree_confusion_map, pre_confusion_map)
+                    pre_raw_confusion_map = add_tree_RCM(raw_tree_confusion_map, pre_raw_confusion_map)
                     if i < n_trees:
                         tree = forest.estimators_[i]
-                        new_result_ids.append(trainForest.nested_ray_wrapper_for_conf_map_calculation.remote(tree, store))
+                        new_result_ids.append(trainForest.nested_ray_wrapper_for_conf_map_calculation.remote(tree, store, goodwill_interval = goodwill_interval, err_warping_exp = err_warping_exp))
                         i += 1
             result_ids = new_result_ids + not_ready
             if len(result_ids) == 0:
                 break
+        del result_ids
+        del store
     else:
-        for tree_confusion_map in result_ids:
+        for tree_confusion_map, raw_tree_confusion_map in result_ids:
             pre_confusion_map = add_tree_CM(tree_confusion_map, pre_confusion_map)
+            pre_raw_confusion_map = add_tree_RCM(raw_tree_confusion_map, pre_raw_confusion_map)
+
+
     confusion_map = []
-    for feat in pre_confusion_map:
-        confusion_map.append([feat,pre_confusion_map[feat][0]/pre_confusion_map[feat][1]])
+    for feat in cv_slice.feature_names:
+        if feat in pre_confusion_map:
+            confusion_map.append([feat, round(pre_confusion_map[feat][0]/(pre_confusion_map[feat][1]**norm_exp), 5)])
+            #confusion_map.append([feat,pre_confusion_map[feat][0]])
+        else:
+            confusion_map.append([feat, 1.-goodwill_interval])
 
     confusion_map = sorted(confusion_map, key=lambda x: x[1], reverse=True)
 
+    return confusion_map, pre_raw_confusion_map
+
+def confusion_map_from_raw_confusion_map(cv_slice, raw_confusion_map, goodwill_interval, err_warping_exp, norm_exp):
+    confusion_map = []
+    for feat in raw_confusion_map:
+        warped_err_sum = 0.
+        for raw_err in raw_confusion_map[feat]:
+            warped_err = calc_confusion(raw_err, goodwill_interval, err_warping_exp)
+            warped_err_sum += warped_err
+        confusion_map.append([feat, round(warped_err_sum/(len(raw_confusion_map[feat])**norm_exp), 5)])
+    for feat in cv_slice.feature_names:
+        if feat not in raw_confusion_map:
+            confusion_map.append([feat, 1.-goodwill_interval])
+    confusion_map = sorted(confusion_map, key=lambda x: x[1], reverse=True)
     return confusion_map
 
-@ray.remote(max_calls = 1)
-def calcConfusionMapWrapper(estimator, store):
-    return calcConfusionMap(estimator, store)
 
-def calcConfusionMap(estimator, store):
+@ray.remote(max_calls = 1)
+def calcConfusionMapWrapper(estimator, store, err_warping_exp = 1, goodwill_interval = 0.25):
+    return calcConfusionMap(estimator, store, err_warping_exp = err_warping_exp, goodwill_interval=goodwill_interval)
+
+def calcConfusionMap(estimator, store, err_warping_exp = 1, goodwill_interval = 0.25):
     # First let's retrieve the decision path of each sample. The decision_path
     # method allows to retrieve the node indicator functions. A non zero element of
     # indicator matrix at the position (i, j) indicates that the sample i goes
@@ -190,10 +227,14 @@ def calcConfusionMap(estimator, store):
     # a group of samples. First, let's make it for the sample.
 
     confusion_map = {}
+    raw_confusion_map = {}
 
     for sample_id, true_value in enumerate(y_test):
         node_index = node_indicator.indices[node_indicator.indptr[sample_id]:
                                             node_indicator.indptr[sample_id + 1]]
+
+        raw_err = abs(true_value - y_pred[sample_id])
+        warped_err = calc_confusion(raw_err, goodwill_interval, err_warping_exp)
 
         for node_id in node_index:
 
@@ -201,15 +242,25 @@ def calcConfusionMap(estimator, store):
                 continue
 
             feat = feature_names[feature[node_id]]
-            err = abs(true_value - y_pred[sample_id])
 
             if not feat in confusion_map:
-                confusion_map[feat] = [err,1]
+                confusion_map[feat] = [warped_err,1]
+                raw_confusion_map[feat] = [raw_err]
             else:
-                confusion_map[feat][0] += err
+                confusion_map[feat][0] += warped_err
+                #confusion_map[feat][0] += err
                 confusion_map[feat][1] += 1
-    return confusion_map
+                raw_confusion_map[feat].append(raw_err)
+    return confusion_map, raw_confusion_map
 
+def calc_confusion(raw_err, goodwill_interval, err_warping_exp):
+    err = raw_err - goodwill_interval
+    if err >= 0:
+        sign = 1
+    else:
+        sign = -1
+    warped_err = sign * (abs(err) ** err_warping_exp)
+    return warped_err
 
 def explore_tree(estimator, n_nodes, children_left,children_right, feature, threshold, X_test, y_test,
                 print_tree = False, sample_id=0, feature_names=None):

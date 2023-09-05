@@ -7,8 +7,11 @@ import random
 import pymysql as MySQLdb
 import os
 import msa
+import consts
+import util
 
-def initFeatures(samples,dbs):
+def initFeatures(samples):
+    dbs = consts.refseq_datasets
     for db in dbs:
         samples.addFeature('Wildtype AA rate %s' % db,'real',group='sequence',default_value=0.)
         samples.addFeature('Mutant AA rate %s' % db,'real',group='sequence',default_value=0.,mutation_specific=True)
@@ -87,9 +90,9 @@ def parseFromFasta(seqs_from_fasta, config, dbs):
                 entry_id = entry_id.split('|')[1]
             seq_map[entry_id] = ['']
             inside_all = True
-            for db_name in dbs:
-                filename = f'{config.custom_msa_db}/{entry_id}_{db_name}_gpw.fasta.gz'
-                if not os.path.isfile(filename):
+            for ref_db_id in dbs:
+                msa_db_filename = util.get_msa_path(config.custom_msa_db, entry_id, ref_db_id, gpw = True)
+                if not os.path.isfile(msa_db_filename):
                     inside_all = False
             if inside_all:
                 in_db.add(entry_id)
@@ -114,15 +117,14 @@ def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False, 
 
     msa_map = {}
     gpw_map = {}
-    dbs = config.search_dbs#['ref50','ref90','ref100']
 
-    initFeatures(samples, dbs)
+    initFeatures(samples)
 
     n = 0
     u_acs = set([])
     pdb_ids = set()
 
-    for u_ac, aac in samples.samples:
+    for (u_ac, aac) in samples.samples:
         if u_ac.count(':') > 0:
             pdb_ids.add(u_ac)
         else:
@@ -131,6 +133,7 @@ def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False, 
             if u_ac.count('-') > 0:
                 u_acs.add(u_ac.split('-')[0])
 
+    dbs = consts.refseq_datasets
     sequence_maps = {}
     for db in dbs:
         sequence_maps[db] = {}
@@ -148,14 +151,18 @@ def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False, 
     else:
         gene_seq_map,pdb_pos_map,in_db = sml.pdbParser.getSequences(pdb_ids,pdb_path,filtering_db=(msa_db,dbs))
 
+    if config.verbosity >= 2:
+        print(f'Query proteins that are in_db:\n{in_db}')
+
     N = 0
     mmseq_searchs = []
     mmseq_search = {}
     msa_to_process = []
     for primary_protein_id in gene_seq_map:
+        msa_to_process.append(primary_protein_id)
         if not primary_protein_id in in_db:
             mmseq_search[primary_protein_id] = gene_seq_map[primary_protein_id]
-            msa_to_process.append(primary_protein_id)
+
             N += 1
             if N == 5000:
                 mmseq_searchs.append(mmseq_search)
@@ -330,7 +337,7 @@ def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False, 
 
     return 
 
-def paraMSA(config,lock,inqueue,outqueue,debug,N,gene_seq_map,sequence_maps,update_mode,in_db):
+def paraMSA(config, lock, inqueue, outqueue, debug, N, gene_seq_map, sequence_maps, update_mode, in_db):
 
     with lock:
         inqueue.put(None)
@@ -340,39 +347,39 @@ def paraMSA(config,lock,inqueue,outqueue,debug,N,gene_seq_map,sequence_maps,upda
         if intuple == None:
             break
 
-        (u_ac,db,n) = intuple
-        if u_ac in sequence_maps[db]:
-            sequence_map = sequence_maps[db][u_ac]
+        (prot_id, db, n) = intuple
+        if prot_id in sequence_maps[db]:
+            sequence_map = sequence_maps[db][prot_id]
         else:
             sequence_map = None
             if debug >= 1:
-                print('U_ac not in sequence_map:',u_ac,db)
+                print('prot_id not in sequence_map:', prot_id, db)
         if debug >= 2:
             print('Processing Alignment number: ',n,' out of ',N)
 
-        if not u_ac in gene_seq_map:
-            if u_ac.split('-')[0] in gene_seq_map:
-                seq = gene_seq_map[u_ac.split('-')[0]][0]
-            elif u_ac in in_db:
+        if not prot_id in gene_seq_map:
+            if prot_id.split('-')[0] in gene_seq_map:
+                seq = gene_seq_map[prot_id.split('-')[0]][0]
+            elif prot_id in in_db:
                 seq = None
             else:
                 if debug >= 1:
-                    print('Skipped getMSA for:',u_ac,'It was not in the gene_seq_map')
+                    print('Skipped getMSA for:',prot_id,'It was not in the gene_seq_map')
                 continue
         else:
-            seq = gene_seq_map[u_ac][0]
+            seq = gene_seq_map[prot_id][0]
 
-        msas,gpws = msa.getMSA(config,u_ac,sequence_map=sequence_map,sequence=seq,msa_names=[],gpw_names=[db],debug=debug,update_mode=update_mode)
+        msas, gpws = msa.getMSA(config, prot_id, sequence_map=sequence_map, sequence=seq, ref_db_ids=[], gpw_ref_db_ids=[db], debug=debug, update_mode=update_mode)
 
         if len(msas) == 0 and len(gpws) == 0:
             if debug >= 1:
-                print('Results of getMSA were empty for:',u_ac)
+                print('Results of getMSA were empty for:', prot_id)
             continue
         if debug >= 2:
             print('Done Alignment number: ',n,' out of ',N)
 
         with lock:
-            outqueue.put((u_ac,msas,gpws))
+            outqueue.put((prot_id, msas, gpws))
     return
 
 def paraCalcSeqFeat(config,lock,inqueue,outqueue,debug,dbs,msa_map,gpw_map,):

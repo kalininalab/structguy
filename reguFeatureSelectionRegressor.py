@@ -1,4 +1,5 @@
 # standart imports
+import enum
 from sklearn.linear_model import Lasso
 from sklearn.pipeline import Pipeline
 from sklearn.utils._testing import ignore_warnings
@@ -20,7 +21,7 @@ def run_Lasso_single(cv_slice, config):
 
     return clf
 
-def wrapper(cv_slice, config, print_out = False, pre_filter = None, debug = False):
+def wrapper(cv_slice, config, print_out = False, pre_filter = None, debug = False, return_score_list = False):
     """Runs Lasso with numeric and categorical features in a given alpha and iterations intervall
         returns data for the single runs
     """
@@ -51,10 +52,20 @@ def wrapper(cv_slice, config, print_out = False, pre_filter = None, debug = Fals
     else:
         thresh = 0.
 
-    for i in range(0, len(coefs)):
-        if abs(coefs[i]) <= thresh:
-            filtered.append(cv_slice.feature_names[i])
-            if debug:
-                print(cv_slice.name,'Filtered by reguFS:',cv_slice.feature_names[i],'Lasso coef:',coefs[i])
+    if return_score_list:
+        score_list = []
+
+    for i, coeff in enumerate(coefs):
+        if return_score_list:
+            score_list.append((cv_slice.feature_names[i], abs(coeff)))
+        else:
+            if abs(coeff) <= thresh:
+                filtered.append(cv_slice.feature_names[i])
+                if debug or config.verbosity >= 5:
+                    print(cv_slice.name,'Filtered by reguFS:',cv_slice.feature_names[i],'Lasso coef:',coeff)
+
+    if return_score_list:
+        score_list.sort(key=lambda x:x[1])
+        return score_list
 
     return filtered

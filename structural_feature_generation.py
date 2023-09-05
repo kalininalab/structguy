@@ -13,9 +13,9 @@ def initFeatures(samples):
     samples.addFeature('Structure location','categorical',group='structural',default_value='Not mapped')
     samples.addFeature('Mainchain location','categorical',group='structural',default_value='Not mapped')
     samples.addFeature('Sidechain location','categorical',group='structural',default_value='Not mapped')
-    samples.addFeature('RSA','real',group='structural',default_value=None)
-    samples.addFeature('Mainchain RSA','real',group='structural',default_value=None)
-    samples.addFeature('Sidechain RSA','real',group='structural',default_value=None)
+    samples.addFeature('RSA','real',group='structural',default_value=2.0)
+    samples.addFeature('Mainchain RSA','real',group='structural',default_value=2.0)
+    samples.addFeature('Sidechain RSA','real',group='structural',default_value=2.0)
     samples.addFeature('Amount of mapped structures','integer',group='structural',default_value=0)
     samples.addFeature('Secondary structure assignment','categorical',group='structural',default_value='Not mapped')
     samples.addFeature('IUPred value','real',group='amino acid property',default_value=0.)
@@ -24,6 +24,9 @@ def initFeatures(samples):
     samples.addFeature('Modres probability','real',group='structural',default_value='0.')
     samples.addFeature('Phi','real',group='structural',default_value='0.')
     samples.addFeature('Psi','real',group='structural',default_value='0.')
+    samples.addFeature('RSA change score','real',group='structural',default_value='0.')
+    samples.addFeature('Mainchain RSA change score','real',group='structural',default_value='0.')
+    samples.addFeature('Sidechain RSA change score','real',group='structural',default_value='0.')
 
     for chaintype in ['mc','sc']:
         for interaction_type in ['neighbor','short','long','ligand','ion','metal','Protein','DNA','RNA','Peptide']:

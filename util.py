@@ -56,6 +56,7 @@ class Config:
         self.verbosity = 1
 
         self.crossValidation=True
+        self.crossValidation_fold = 5
         self.multiple_lopo = 1
 
         self.split_rate = 0.2
@@ -69,8 +70,11 @@ class Config:
         self.out_folder = ''
 
         self.skip_cv = False
+        self.suppress_remote_forests = True
 
-        self.feature_selection = 'confusion' #Possible key words: 'meanCorrelation', 'regularization', 'double', 'confusion'
+        self.feature_selection = 'threeStaged' #Possible key words: threeStaged, 'meanCorrelation', 'regularization', 'double', 'confusion', confusion_and_regu sequential_confusion, sequential_confusion_and_regu, 'confusion_and_regu'
+        self.select_feature_for_first_slice_only = True
+
         self.hpo_do_feat_selection = True
         self.hpo_do_forest_param = True
         self.hpo_do_sample_weighting = True
@@ -80,9 +84,14 @@ class Config:
 
         self.bfd_factor = 2.0
 
-        self.tvmb_rank_threshold = 0
+        self.tvmb_rank_threshold = 0 #2
         self.tvpmb_rank_threshold = 0
-        self.confusion_rank_threshold = 10
+
+        #Confusion feature selection
+        self.sequential_confusion_rank_threshold = 91
+        self.confusion_rank_threshold = 311
+        self.err_warping_exp = 1.584#1.9855 #4.0
+        self.confusion_normalization_exp = 1.2
 
         self.structure_threshold = None
         self.blacklist = []
@@ -118,29 +127,36 @@ class Config:
         #HPO setup
         self.hyperOptimization='twoDim'
         self.cv_hpo = False
+        self.cv_hpo_limiter = None
+        self.cv_counters = None
         self.optimize_mean = False
-        self.repeat_training = 3
+        self.repeat_training = 1
+
+        self.feature_penalty = 0.00002
+
         #Forest hyperparameters
-        self.tree_depth = 20
-        self.min_sample_split = 6
+        self.tree_depth = 194
+        self.min_sample_split = 4
         self.tree_min_leaf_samples = 1
-        self.num_of_trees = 100
+        self.num_of_trees = 382
         self.rel_max_leaf_node_pruning = None#2.
         self.max_leaf_nodes = None #int((2**(depth))/rel_max_leaf_node_pruning)
         self.class_weight = 'balanced_subsample'
         self.max_feature_parameter = 'log2'
-        self.max_feature_cont_parameter = 0.5
+        self.max_feature_cont_parameter = 0.362233199721295
         self.bootstrap_parameter = True
-        self.min_impurity_decrease_exp = 5.0
+        self.min_impurity_decrease_exp = 11.7787
         self.oob_score = False
-        self.ccp_alpha_exp = 5.0
-        self.max_sample_parameter = 1.0
+        self.ccp_alpha_exp = 30#10.365171642057746
+        self.max_sample_parameter = 0.9276380091150952
         self.number_of_bins = 2
-        self.p_val_thresh = 1.0
+        self.p_val_thresh = 0.81533
         self.sample_weight_parameter = 1.0
-        self.reg_alpha_exp = 4.
+        self.reg_alpha_exp = 3.5 #1.5215717821360353
         self.reg_c_exp = 3.
-        self.reg_thresh_exp = 1.
+        self.reg_thresh_exp = 20.
+        self.confusion_goodwill = 0.3720368#0.62#0.25
+        self.list_ranking_thresh = 150
 
         self.maximal_exp = 19.0
 
@@ -155,16 +171,22 @@ class Config:
         self.forest_size_half_step = [10,500]
         self.min_impurity_decrease_exp_half_step = [2.0,20.0]
         self.oob_scores = [True,False]
-        self.ccp_alpha_exp_half_step = [1.,20.]
+        self.ccp_alpha_exp_half_step = [1.,30.]
         self.max_sample_half_step = [0.,1.]
         self.geometric_exponent_bounds = [0.,4.]
         self.reg_alpha_exp_half_step = [0.,20.]
         self.reg_c_exp_half_step = [-1.,20.]
         self.reg_thresh_exp_half_step = [0.,20.]
 
+        self.list_ranking_thresh_bounds = [0, 'max']
+        self.confusion_goodwill_bounds = [0., 1.0]
+
         self.tvmb_rank_half_step = [0, 'max']
         self.tvpmb_rank_half_step = [0, 'max']
         self.confusion_rank_threshold_bounds = [0, 'max']
+        self.sequential_confusion_rank_threshold_bounds = [0, 'max']
+        self.err_warping_exp_bounds = [0.,4.]
+        self.confusion_normalization_exp_bounds = [0.,4.]
 
         self.number_of_bins_half_step = [1,20]
         self.p_val_thresh_half_step = [0.,1.]
@@ -433,6 +455,15 @@ class Config:
             elif opt == 'confusion_rank_threshold':
                 self.confusion_rank_threshold = int(arg)
 
+            elif opt == 'sequential_confusion_rank_threshold':
+                self.sequential_confusion_rank_threshold = int(arg)
+
+            elif opt == 'err_warping_exp':
+                self.err_warping_exp = float(arg)
+
+            elif opt == 'confusion_normalization_exp':
+                self.confusion_normalization_exp = float(arg)
+
             elif opt == 'reg_alpha_exp':
                 self.reg_alpha_exp = float(arg)
 
@@ -480,9 +511,9 @@ class Config:
             self.criterion = 'gini'
             self.criteria = ['gini','entropy']
         else:
-            self.objective_function = 'Spearman'#'MSE'
-            self.criterion = 'mse'
-            self.criteria = ['mse']#,'mae']
+            self.objective_function = 'Pearson'#'Spearman'#'MSE'
+            self.criterion = 'friedman_mse'
+            self.criteria = ['friedman_mse']#,'mae']
 
         if overwrite_objective_function != None:
             self.objective_function = overwrite_objective_function
@@ -569,6 +600,18 @@ class Config:
             self.confusion_rank_threshold = round(value)
             return
 
+        if parameter_name == 'sequential_confusion_rank_threshold':
+            self.sequential_confusion_rank_threshold = round(value)
+            return
+
+        if parameter_name == 'err_warping_exp':
+            self.err_warping_exp = value
+            return
+
+        if parameter_name == 'confusion_normalization_exp':
+            self.confusion_normalization_exp = value
+            return
+
         if parameter_name == 'criterion':
             self.criterion = value
             return
@@ -599,6 +642,14 @@ class Config:
 
         if parameter_name == 'geometric_exponent':
             self.geometric_exponent = value
+            return
+
+        if parameter_name == 'confusion_goodwill':
+            self.confusion_goodwill = value
+            return
+        
+        if parameter_name == 'list_ranking_thresh':
+            self.list_ranking_thresh = value
             return
 
     def getByString(self,parameter_name):
@@ -650,6 +701,15 @@ class Config:
         if parameter_name == 'confusion_rank_threshold':
             return self.confusion_rank_threshold
 
+        if parameter_name == 'sequential_confusion_rank_threshold':
+            return self.sequential_confusion_rank_threshold
+
+        if parameter_name == 'err_warping_exp':
+            return self.err_warping_exp
+
+        if parameter_name == 'confusion_normalization_exp':
+            return self.confusion_normalization_exp
+
         if parameter_name == 'criterion':
             return self.criterion
 
@@ -673,12 +733,20 @@ class Config:
 
         if parameter_name == 'geometric_exponent':
             return self.geometric_exponent
+        
+        if parameter_name == 'confusion_goodwill':
+            return self.confusion_goodwill
+        
+        if parameter_name == 'list_ranking_thresh':
+            return self.list_ranking_thresh
 
     def getScoreTuple(self):
         sct = (self.tree_depth,self.min_sample_split,self.num_of_trees,self.class_weight,
                 self.max_feature_parameter, self.max_feature_cont_parameter, self.bootstrap_parameter,self.min_impurity_decrease_exp,
                 self.oob_score,self.ccp_alpha_exp,self.max_sample_parameter, self.criterion,
-                self.tree_min_leaf_samples,self.tvmb_rank_threshold,self.tvpmb_rank_threshold, self.confusion_rank_threshold, self.number_of_bins,
+                self.tree_min_leaf_samples,self.tvmb_rank_threshold,self.tvpmb_rank_threshold, self.confusion_rank_threshold,
+                self.sequential_confusion_rank_threshold, self.err_warping_exp, self.confusion_normalization_exp,
+                self.number_of_bins, self.list_ranking_thresh, self.confusion_goodwill,
                 self.p_val_thresh,self.sample_weight_parameter,self.reg_alpha_exp, self.reg_c_exp, self.reg_thresh_exp, self.geometric_exponent)
         return sct
 
@@ -700,6 +768,9 @@ class Config:
         print('TVMB rank threshold:',self.tvmb_rank_threshold)
         print('TVPMB rank threshold:',self.tvpmb_rank_threshold)
         print('Confusion rank threshold:', self.confusion_rank_threshold)
+        print('Sequential confusion rank threshold:', self.sequential_confusion_rank_threshold)
+        print('Confusion error warping exponent:', self.err_warping_exp)
+        print('Confusion normalization exponent:', self.confusion_normalization_exp)
         print('Criterion:',self.criterion)
         print('Number of bins:',self.number_of_bins)
         print('p-value threshold:',self.p_val_thresh)
@@ -708,12 +779,17 @@ class Config:
         print('Regularization C exponent:', self.reg_c_exp)
         print('Regularization threshold exponent:', self.reg_thresh_exp)
         print('Geometric exponent:', self.geometric_exponent)
+        print(f'Confusion goodwill: {self.confusion_goodwill}')
+        print(f'List ranking thresh: {self.list_ranking_thresh}')
         return
 
 class Scores:
-    __slots__ = ['mse', 'wmse', 'r2', 'wr2', 'corr', 'acc', 'roc', 'precision', 'recall', 'f1', 'mcc', 'pearson_r']
+    __slots__ = ['mse', 'wmse', 'r2', 'wr2', 'corr', 'acc', 'roc', 'precision', 'recall', 'f1', 'mcc', 'pearson_r', 'n_of_features', 'mean_spearman', 'mean_pearson']
     def __init__(self, mse = None, r2 = None, corr = None, acc = None, roc = None, precision = None, recall = None,
-                 f1 = None, mcc = None, pearson_r = None, zero = False, wmse = None, wr2 = None, optimal = False):
+                 f1 = None, mcc = None, pearson_r = None, zero = False, wmse = None, wr2 = None, optimal = False, n_of_features = None,
+                 mean_spearman = None, mean_pearson = None
+                ):
+        self.n_of_features = n_of_features
         if zero:
             self.mse = float('inf')
             self.wmse = float('inf')
@@ -727,6 +803,8 @@ class Scores:
             self.f1 = 0.0
             self.mcc = -1.0
             self.pearson_r = 0.0
+            self.mean_spearman = 0.0
+            self.mean_pearson = 0.0
             return
         elif optimal:
             self.mse = 0.
@@ -741,6 +819,8 @@ class Scores:
             self.f1 = 1.0
             self.mcc = 1.0
             self.pearson_r = 1.0
+            self.mean_spearman = 1.0
+            self.mean_pearson = 1.0
             return
         self.mse = mse
         self.wmse = wmse
@@ -754,10 +834,13 @@ class Scores:
         self.f1 = f1
         self.mcc = mcc
         self.pearson_r = pearson_r
+        self.mean_spearman = mean_spearman
+        self.mean_pearson = mean_pearson
         return
 
     def printOut(self):
         print('------------Scores------------')
+        print(f'Generated for {self.n_of_features} number of features')
         if self.mse != None:
             print('-MSE:',self.mse)
         if self.wmse != None:
@@ -767,9 +850,13 @@ class Scores:
         if self.wr2 != None:
             print('-weighted R2:',self.wr2)
         if self.corr != None:
-            print('-Spearman Correlation:',self.corr)
+            print('-Spearmans Correlation:',self.corr)
+        if self.mean_spearman is not None:
+            print(f'-Mean Protein-Wise Spearmans Corr: {self.mean_spearman}')
         if self.pearson_r != None:
-            print('-Pearson Correlation:',self.pearson_r)
+            print('-Pearsons Correlation:',self.pearson_r)
+        if self.mean_pearson is not None:
+            print(f"-Mean Protein-Wise Pearsons Corr: {self.mean_pearson}")
         if self.acc != None:
             print('-Accuracy:',self.acc)
         if self.roc != None:
@@ -782,8 +869,10 @@ class Scores:
             print('-F1:',self.f1)
         if self.mcc != None:
             print('-MCC:',self.mcc)
+
         print('------------------------------')
         return
+
     def objective_value(self,config):
         if config.objective_function == 'MCC':
             return self.mcc
@@ -797,35 +886,86 @@ class Scores:
             return self.corr
         if config.objective_function == 'Pearson':
             return self.pearson_r
+        if config.objective_function == 'Mean Spearman':
+            return self.mean_spearman
+        if config.objective_function == 'Mean Pearson':
+            return self.mean_pearson
         if config.objective_function == 'R2':
             return self.r2
         if config.objective_function == 'auROC':
             return self.roc
 
-def objective_function_criterium(config,scores,best_scores):
+
+def calc_protein_wise_corr(y_test, y_pred, sample_ids, corr_function):
+    test_pred_pairs = {}
+    for sample_nr, yt_value in enumerate(y_test):
+        prot_id, _ = sample_ids[sample_nr]
+        if not prot_id in test_pred_pairs:
+            test_pred_pairs[prot_id] = [], []
+        test_pred_pairs[prot_id][0].append(yt_value)
+        test_pred_pairs[prot_id][1].append(y_pred[sample_nr])
+
+    prot_wise_corrs = []
+    corrs = []
+    for prot_id in test_pred_pairs:
+        corr, _ = corr_function(test_pred_pairs[prot_id][0], test_pred_pairs[prot_id][1])
+        corr = abs(corr)
+        prot_wise_corrs.append((prot_id, corr))
+        corrs.append(corr)
+    if len(corrs) > 0:
+        mean_corr = sum(corrs)/len(corrs)
+    else:
+        mean_corr = 0
+    return prot_wise_corrs, mean_corr
+
+def objective_function_criterium(config, scores, best_scores, feature_penalty = None):
     if best_scores is None:
         if scores is None:
             return False
         return True
     if scores is None:
         return False
+
+    return get_objective_score(config, scores, feature_penalty = feature_penalty) > get_objective_score(config, best_scores, feature_penalty = feature_penalty)
+
+def get_objective_score(config, scores, feature_penalty = None):
+    if scores is None:
+        return False
+
+    greater_is_better = True
+
     if config.objective_function == 'MCC':
-        return scores.mcc > best_scores.mcc
-    if config.objective_function == 'MSE':
-        return scores.mse < best_scores.mse
-    if config.objective_function == 'F-Score':
-        return scores.f1 > best_scores.f1
-    if config.objective_function == 'Accuracy':
-        return scores.acc > best_scores.acc
-    if config.objective_function == 'Spearman':
-        return scores.corr > best_scores.corr
-    if config.objective_function == 'Pearson':
-        return scores.pearson_r > best_scores.pearson_r
-    if config.objective_function == 'R2':
-        return scores.r2 > best_scores.r2
-    if config.objective_function == 'auROC':
-        return scores.roc > best_scores.roc
-    raise 'Unknown objective function'
+        score = scores.mcc
+    elif config.objective_function == 'MSE':
+        score = scores.mse
+        greater_is_better = False
+    elif config.objective_function == 'F-Score':
+        score = scores.f1
+    elif config.objective_function == 'Accuracy':
+        score = scores.acc
+    elif config.objective_function == 'Spearman':
+        score = scores.corr
+    elif config.objective_function == 'Mean Spearman':
+        score = scores.mean_spearman
+    elif config.objective_function == 'Mean Pearson':
+        score = scores.mean_pearson
+    elif config.objective_function == 'Pearson':
+        score = scores.pearson_r
+    elif config.objective_function == 'R2':
+        score = scores.r2
+    elif config.objective_function == 'auROC':
+        score = scores.roc
+    else:
+        raise 'Unknown objective function'
+
+    if feature_penalty is not None and scores.n_of_features is not None:
+        if greater_is_better:
+            score -= scores.n_of_features*feature_penalty
+        else:
+            score += scores.n_of_features*feature_penalty
+
+    return score
+
 
 def objective_function_delta(config,scores,scores_2):
     if scores is None:
@@ -845,8 +985,12 @@ def objective_function_delta(config,scores,scores_2):
         return abs(scores.acc-scores_2.acc)
     if config.objective_function == 'Spearman':
         return abs(scores.corr-scores_2.corr)
+    if config.objective_function == 'Mean Spearman':
+        return abs(scores.mean_spearman-scores_2.mean_spearman)
     if config.objective_function == 'Pearson':
         return abs(scores.pearson_r-scores_2.pearson_r)
+    if config.objective_function == 'Mean Pearson':
+        return abs(scores.mean_pearson-scores_2.mean_pearson)
     if config.objective_function == 'R2':
         return abs(scores.r2-scores_2.r2)
     if config.objective_function == 'auROC':
@@ -860,6 +1004,7 @@ def mean_scores(scores_list):
     mses = []
     r2s = []
     corrs = []
+    mean_spearmans = []
     accs = []
     rocs = []
     precisions = []
@@ -867,6 +1012,9 @@ def mean_scores(scores_list):
     f1s = []
     mccs = []
     pearson_rs = []
+    mean_pearsons = []
+    n_of_features_s = []
+
     for scores_obj in scores_list:
         if scores_obj.mse != None:
             mses.append(scores_obj.mse)
@@ -874,8 +1022,12 @@ def mean_scores(scores_list):
             r2s.append(scores_obj.r2)
         if scores_obj.corr != None:
             corrs.append(scores_obj.corr)
+        if scores_obj.mean_spearman is not None:
+            mean_spearmans.append(scores_obj.mean_spearman)
         if scores_obj.pearson_r != None:
             pearson_rs.append(scores_obj.pearson_r)
+        if scores_obj.mean_pearson is not None:
+            mean_pearsons.append(scores_obj.mean_pearson)
         if scores_obj.acc != None:
             accs.append(scores_obj.acc)
         if scores_obj.roc != None:
@@ -888,8 +1040,16 @@ def mean_scores(scores_list):
             f1s.append(scores_obj.f1)
         if scores_obj.mcc != None:
             mccs.append(scores_obj.mcc)
+        if scores_obj.n_of_features is not None:
+            n_of_features_s.append(scores_obj.n_of_features)
+
+    if len(n_of_features_s) == 0:
+        n_of_features = None
+    else:
+        n_of_features = mean(n_of_features_s)
+
     scores_obj = Scores(mse = mean(mses),r2 = mean(r2s),corr = mean(corrs),acc = mean(accs),roc = mean(rocs),
-                        precision = mean(precisions),recall = mean(recalls),f1 = mean(f1s),mcc = mean(mccs),pearson_r = mean(pearson_rs))
+                        precision = mean(precisions),recall = mean(recalls),f1 = mean(f1s),mcc = mean(mccs),pearson_r = mean(pearson_rs), n_of_features = n_of_features)
     return scores_obj
 
 def writeOutput(outfile,feature_names,feature_matrix,id_vector,reg_vector,seq_id_vector,prediction,test_ids,sub_file_id=None):
@@ -1308,6 +1468,33 @@ def plotMPP(config,indatafile,outfile):
     plt.savefig(outfile,bbox_inches='tight')
     return
 
+
+def get_msa_path(out_directory, prot_id, ref_db_id, gpw = False, psic = False, unpacked = False):
+    prot_id = prot_id.replace('/','_')
+    prot_id = prot_id.replace(',','_')
+
+    if gpw:
+        gpw_extension = '_gpw'
+    else:
+        gpw_extension = ''
+
+    if psic:
+        file_type = 'psic'
+    else:
+        file_type = 'fasta'
+
+    if unpacked:
+        gzip_extension = ''
+    else:
+        gzip_extension = '.gz'
+
+    filename = f'{out_directory}/{prot_id}_{ref_db_id}{gpw_extension}.{file_type}{gzip_extension}'
+
+    filename = filename.replace('(','_')
+    filename = filename.replace(')','_')
+
+    return filename
+
 def parseTVfromTags(config,tags):
     for tag in tags.split(','):
         if config.regression:
@@ -1430,6 +1617,22 @@ def median(l):
     else:
         med = l[(n-1)//2]
     return med
+
+def sanity_check_value_list(values, label_vector = None, datastructure_name = 'placeholder'):
+    insane_pos = []
+    for pos, value in enumerate(values):
+        try:
+            isfinite = np.isfinite(value)
+        except:
+            isfinite = False
+        if not isfinite:
+            insane_pos.append(pos)
+    if len(insane_pos) == 0:
+        return None
+    if label_vector is not None:
+        for pos in insane_pos:
+            print(f'Detected insane value in {datastructure_name}. At position {pos}, value: {values[pos]}, label: {label_vector[pos]}')
+    return insane_pos
 
 if __name__ == "__main__":
     disclaimer = 'Here comes the disclaimer'

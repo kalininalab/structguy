@@ -10,14 +10,14 @@ import xml.etree.ElementTree as ET
 from multiprocessing import Process, Queue, Manager, Value, Lock
 from sklearn.metrics import mutual_info_score
 from Bio import pairwise2
-from Bio.SubsMat import MatrixInfo as matlist
-matrix = matlist.blosum62
+from structman.lib.sdsc.consts import residues as residue_consts
 import time
 
 import structman.lib.uniprot as uniprot
 import structman.lib.pdbParser as pdbParser
 
 import psic_wrapper as psic
+import util
 
 search_db_sequences = {}
 
@@ -30,41 +30,41 @@ def median(l):
         med = l[(n-1)//2]
     return med
 
-def lookup(config,u_ac,msa_names=['ref50','ref90'],gpw_names=['ref50','ref90'],debug=0,update_mode=False,sequence=None,sequence_map=None,pdb_tuple=None):
+def lookup(config, prot_id, ref_db_ids=['ref50','ref90'], gpw_ref_db_ids=['ref50','ref90'],debug=0,update_mode=False,sequence=None,sequence_map=None,pdb_tuple=None):
 
-    out_directory = get_out_directory(u_ac, config, pdb_tuple = pdb_tuple)
+    out_directory = get_out_directory(prot_id, config, pdb_tuple = pdb_tuple)
 
 
     files = {}
     msas = {}
     gpws = {}
-    for msa_name in msa_names:
-        filename = f'{out_directory}/{u_ac}_{msa_name}.fasta.gz'
+    for ref_db_id in ref_db_ids:
+        filename = util.get_msa_path(out_directory, prot_id, ref_db_id)
         if os.path.isfile(filename):
-            files[msa_name] = filename
+            files[ref_db_id] = filename
             if debug >= 2:
                 print('Look-up found a msa: ',filename)
 
     gpw_files = {}
-    for gpw_name in gpw_names:
-        filename = f'{out_directory}/{u_ac}_{gpw_name}_gpw.fasta.gz'
+    for ref_db_id in gpw_ref_db_ids:
+        filename = util.get_msa_path(out_directory, prot_id, ref_db_id, gpw = True)
         if os.path.isfile(filename):
-            gpw_files[gpw_name] = filename
+            gpw_files[ref_db_id] = filename
             if debug >= 2:
                 print('Look-up found a gpw: ',filename)
 
-    for msa_name in files:
-        filename = files[msa_name]
+    for ref_db_id in files:
+        filename = files[ref_db_id]
         f = gzip.open(filename,'r')
         msa = f.read()
         f.close()
         if msa == '':
             continue
 
-        psic_name = f'{out_directory}/{u_ac}_{msa_name}.psic.gz'
+        psic_name = util.get_msa_path(out_directory, prot_id, ref_db_id, psic = True)
         if not os.path.isfile(psic_name):
             if debug >= 1:
-                print('Calc psic profiles from lookup',msa_name)
+                print('Calc psic profiles from lookup', ref_db_id)
             psic.psicFromFasta(msa,psic_name[:-3])
             
             if os.path.isfile(psic_name):
@@ -74,26 +74,30 @@ def lookup(config,u_ac,msa_names=['ref50','ref90'],gpw_names=['ref50','ref90'],d
             except:
                 pass
 
-        msas[msa_name] = msa
+        msas[ref_db_id] = msa
 
-    for gpw_name in gpw_files:
+    for ref_db_id in gpw_files:
 
-        filename = gpw_files[gpw_name]
+        filename = gpw_files[ref_db_id]
 
         if update_mode:
-            gpw = updateGPW(filename,gpw_name,sequence,sequence_map,u_ac)
+            gpw = updateGPW(filename,ref_db_id, sequence, sequence_map, prot_id)
 
         else:
-            f = gzip.open(filename,'r')
-            gpw = f.read()
-            f.close()
+            try:
+                f = gzip.open(filename,'r')
+                gpw = f.read()
+                f.close()
+            except:
+                print(f'\nERROR:\nCouldnt open: {filename}\n')
+                continue
             if gpw == '':
                 continue
 
-        psic_name = f'{out_directory}/{u_ac}_{gpw_name}_gpw.psic.gz'
+        psic_name = util.get_msa_path(out_directory, prot_id, ref_db_id, psic = True, gpw = True)
         if (not os.path.isfile(psic_name)) or update_mode:
             if debug >= 1:
-                print('Calc psic profiles from lookup',u_ac,gpw_name)
+                print('Calc psic profiles from lookup', prot_id, ref_db_id)
             psic.psicFromGPW(gpw,psic_name[:-3],config,debug=debug)
             
             if os.path.isfile(psic_name):
@@ -104,7 +108,7 @@ def lookup(config,u_ac,msa_names=['ref50','ref90'],gpw_names=['ref50','ref90'],d
                 os.system("gzip %s" % psic_name[:-3])
             except:
                 pass
-        gpws[gpw_name] = gpw
+        gpws[ref_db_id] = gpw
 
     return msas,gpws
 
@@ -345,7 +349,7 @@ def computeGPW(config,seq,u_ac,search_db='ref50',search_db_path={},debug=0,fasta
             print(target_seq)
             print(template_seq)
         try:
-            (target_aligned_sequence,template_aligned_sequence,a,b,c) = pairwise2.align.globalds(target_seq, template_seq,matrix,-10.0,-0.5,one_alignment_only=True)[0]
+            (target_aligned_sequence,template_aligned_sequence,a,b,c) = pairwise2.align.globalds(target_seq, template_seq,residue_consts.BLOSUM62,-10.0,-0.5,one_alignment_only=True)[0]
         except:
             if debug >= 1:
                 print('GPW error: ', u_ac, seq_id)
@@ -360,16 +364,16 @@ def computeGPW(config,seq,u_ac,search_db='ref50',search_db_path={},debug=0,fasta
 
     return '\n'.join(out_fasta_lines),search_db_sequences
 
-def saveMSA(config, msa, u_ac, db_name, pdb_tuple):
+def saveMSA(config, msa, prot_id, ref_db_id, pdb_tuple):
 
     if msa == None:
         return
 
-    out_directory = get_out_directory(u_ac, config, pdb_tuple = pdb_tuple)
+    out_directory = get_out_directory(prot_id, config, pdb_tuple = pdb_tuple)
 
     files = {}
 
-    filename = f'{out_directory}/{u_ac}_{db_name}.fasta'
+    filename = util.get_msa_path(out_directory, prot_id, ref_db_id, unpacked = True)
 
     f = open(filename,'w')
     f.write(msa)
@@ -381,14 +385,14 @@ def saveMSA(config, msa, u_ac, db_name, pdb_tuple):
 
     return
 
-def saveGpw(config,gpw,u_ac,db_name,pdb_tuple):
+def saveGpw(config, gpw, prot_id, ref_db_id, pdb_tuple):
 
     if gpw == None:
         return
 
-    out_directory = get_out_directory(u_ac, config, pdb_tuple = pdb_tuple)
+    out_directory = get_out_directory(prot_id, config, pdb_tuple = pdb_tuple)
 
-    filename = f'{out_directory}/{u_ac}_{db_name}_gpw.fasta'
+    filename = util.get_msa_path(out_directory, prot_id, ref_db_id, gpw = True, unpacked = True)
 
     f = open(filename,'w')
     f.write(gpw)
@@ -406,8 +410,8 @@ def parsePsicFile(infile,debug=0):
             print('Did not found psic-file: ',infile)
         return {}
 
-    f = gzip.open(infile,'rb')
-    lines = f.read().split(b'\n')
+    f = gzip.open(infile,'r')
+    lines = f.read().decode('ascii').split('\n')
     f.close()
 
     aa_key = lines[1].split()[1:-1]
@@ -415,24 +419,21 @@ def parsePsicFile(infile,debug=0):
     psic_profiles = {}
 
     for pos,line in enumerate(lines[2:]):
-        if line == b'':
+        if line == '':
             continue
         data = line.split()[1:-1]
         psic_profiles[pos] = {}
         for aa_pos,aa in enumerate(aa_key):
-            psic_profiles[pos][aa.decode('ascii')] = float(data[aa_pos].decode('ascii'))
+            psic_profiles[pos][aa] = float(data[aa_pos])
 
     return psic_profiles
 
 #called by sequence_feature_generation
-def calcPsicProfiles(config, u_ac, aacs, seq, msa_name, gpw=False, debug=0):
+def calcPsicProfiles(config, prot_id, aacs, seq, ref_db_id, gpw=False, debug=0):
 
-    out_directory = get_out_directory(u_ac, config)
+    out_directory = get_out_directory(prot_id, config)
 
-    if not gpw:
-        psic_name = f'{out_directory}/{u_ac}_{msa_name}.psic.gz'
-    else:
-        psic_name = f'{out_directory}/{u_ac}_{msa_name}_gpw.psic.gz'
+    psic_name = util.get_msa_path(out_directory, prot_id, ref_db_id, gpw = gpw, psic = True)
 
     psic_profiles = parsePsicFile(psic_name,debug=debug)
 
@@ -443,18 +444,18 @@ def calcPsicProfiles(config, u_ac, aacs, seq, msa_name, gpw=False, debug=0):
     positional_dpsic_map = {}
 
     if psic_profiles == {}:
-        print('Empty psic profiles: ',u_ac,msa_name)
+        print('Empty psic profiles: ', prot_id, ref_db_id)
         return psic_wt_map,psic_mut_map,dpsic_map
 
     positional_median_dpsics = []
     for pos,wt in enumerate(seq):
         if not pos in psic_profiles:
             if debug >= 1:
-                print('pos not in psic_profiles:',u_ac,pos)
+                print('pos not in psic_profiles:', prot_id, pos)
             continue
         if not wt in psic_profiles[pos]:
             if debug >= 1:
-                print('wt not in psic_profiles[pos]:',u_ac,pos,wt)
+                print(f'wt not in psic_profiles[pos]: {prot_id} {pos} {wt}\n{psic_profiles[pos]}')
             continue
         psic_wt = psic_profiles[pos][wt]
         positional_dpsics = []
@@ -491,7 +492,7 @@ def calcPsicProfiles(config, u_ac, aacs, seq, msa_name, gpw=False, debug=0):
 
         if not pos in psic_profiles:
             if debug >= 1:
-                print('psic error ',u_ac,aac,msa_name,gpw)
+                print('psic error ', prot_id, aac, ref_db_id, gpw)
             positional_dpsic_map[aac] = 0.
             psic_wt_map[aac] = 0.
             psic_mut_map[aac] = 0.
@@ -500,7 +501,7 @@ def calcPsicProfiles(config, u_ac, aacs, seq, msa_name, gpw=False, debug=0):
 
         if not aa_wt in psic_profiles[pos]:
             if debug >= 1:
-                print('psic error 2',u_ac,aac,msa_name,gpw)
+                print('psic error 2', prot_id, aac, ref_db_id, gpw)
             positional_dpsic_map[aac] = 0.
             psic_wt_map[aac] = 0.
             psic_mut_map[aac] = 0.
@@ -514,7 +515,7 @@ def calcPsicProfiles(config, u_ac, aacs, seq, msa_name, gpw=False, debug=0):
 
         if pos >= len(positional_median_dpsics):
             if debug >= 1:
-                print('psic error 3',u_ac,aac,msa_name,gpw)
+                print('psic error 3', prot_id, aac, ref_db_id, gpw)
             positional_dpsic_map[aac] = 0.
             psic_wt_map[aac] = 0.
             psic_mut_map[aac] = 0.
@@ -536,7 +537,7 @@ def calcPsicProfiles(config, u_ac, aacs, seq, msa_name, gpw=False, debug=0):
         psic_mut_map[aac] = psic_mut
         dpsic_map[aac] = dpsic
 
-    return psic_wt_map,psic_mut_map,dpsic_map,positional_dpsic_map,window_dpsic_map,protein_median_dpsic
+    return psic_wt_map, psic_mut_map, dpsic_map, positional_dpsic_map, window_dpsic_map, protein_median_dpsic
 
 #called by structural_feature_generation
 def getPosWiseGPW(gpw):
@@ -583,54 +584,54 @@ def get_out_directory(protein_id, config, pdb_tuple = None):
 
     return out_directory
 
-def getMSA(config,u_ac,sequence_map=None,sequence=None,msa_names=['ref50','ref90'],gpw_names=['ref50','ref90'],debug=0,update_mode=False):
+def getMSA(config, prot_id, sequence_map=None, sequence=None, ref_db_ids=['ref50','ref90'], gpw_ref_db_ids=['ref50','ref90'], debug=0, update_mode=False):
 
-    if u_ac.count(':') > 0:
-        pdb_tuple = u_ac
+    if prot_id[4] == ':' and len(prot_id) == 6:
+        pdb_tuple = prot_id
     else:
         pdb_tuple = None
 
     search_dbs = {'ref50':config.mmseqs_search_db_ref50,'ref90':config.mmseqs_search_db_ref90,'ref100':config.mmseqs_search_db_ref100}
 
     if debug >= 1:
-        print('getMSA', u_ac,msa_names,gpw_names,update_mode)
+        print('getMSA', prot_id, ref_db_ids, gpw_ref_db_ids, update_mode)
 
     #If the sequence is not given, get it
     if update_mode and sequence == None:
-        sequence = getSequence(config,u_ac,pdb_tuple)
+        sequence = getSequence(config, prot_id, pdb_tuple)
 
         if sequence == 0 or sequence == 1 or sequence == 2:
-            print('Sequence error: ',u_ac)
+            print('Sequence error: ', prot_id)
             return {},{}
 
     #Check if the protein is in the database
-    msas,gpws = lookup(config,u_ac,msa_names=msa_names,gpw_names=gpw_names,debug=debug,update_mode=update_mode,sequence=sequence,sequence_map=sequence_map,pdb_tuple=pdb_tuple)
+    msas,gpws = lookup(config, prot_id, ref_db_ids=ref_db_ids, gpw_ref_db_ids=gpw_ref_db_ids, debug=debug, update_mode=update_mode, sequence=sequence, sequence_map=sequence_map, pdb_tuple=pdb_tuple)
 
     if debug >= 2:
-        print('Lookup results: ',u_ac,list(msas.keys()),list(gpws.keys()))
+        print('Lookup results: ', prot_id, list(msas.keys()), list(gpws.keys()))
 
     #If the msa is not in the database, compute it
-    if len(msas) == len(msa_names) and len(gpws) == len(gpw_names):
+    if len(msas) == len(ref_db_ids) and len(gpws) == len(gpw_ref_db_ids):
         if debug >= 1:
             print('found msas in the db')
         return msas,gpws
 
     fasta_results = {}
 
-    out_directory = get_out_directory(u_ac, config, pdb_tuple = pdb_tuple)
+    out_directory = get_out_directory(prot_id, config, pdb_tuple = pdb_tuple)
 
     #compute the msa's
     search_db_sequences = {}
-    for msa_name in msa_names:
-        if msa_name in msas:
+    for ref_db_id in ref_db_ids:
+        if ref_db_id in msas:
             continue
-        msa,fasta_page,search_db_sequences = computeMSA(config,sequence,u_ac,search_db=msa_name,search_db_path=search_dbs[msa_name],debug=debug,sequence_map=sequence_map,search_db_sequences=search_db_sequences)
-        msas[msa_name] = msa
+        msa,fasta_page,search_db_sequences = computeMSA(config, sequence, prot_id, search_db=ref_db_id, search_db_path=search_dbs[ref_db_id], debug=debug, sequence_map=sequence_map, search_db_sequences=search_db_sequences)
+        msas[ref_db_id] = msa
 
-        psic_name = f'{out_directory}/{u_ac}_{msa_name}.psic.gz'
+        psic_name = util.get_msa_path(out_directory, prot_id, ref_db_id, psic = True)
         if not os.path.isfile(psic_name):
             if debug >= 1:
-                print('Calc psic profiles from getMSA',msa_name)
+                print('Calc psic profiles from getMSA',ref_db_id)
             psic.psicFromFasta(msa,outfile=psic_name[:-3])
             
             if os.path.isfile(psic_name):
@@ -641,30 +642,30 @@ def getMSA(config,u_ac,sequence_map=None,sequence=None,msa_names=['ref50','ref90
                 pass
 
         #save them into the database
-        saveMSA(config,msa,u_ac,msa_name,pdb_tuple)
+        saveMSA(config, msa, prot_id, ref_db_id, pdb_tuple)
 
-    for gpw_name in gpw_names:
-        if gpw_name in gpws:
+    for ref_db_id in gpw_ref_db_ids:
+        if ref_db_id in gpws:
             continue
-        if gpw_name in fasta_results:
-            fasta_page = fasta_results[gpw_name]
+        if ref_db_id in fasta_results:
+            fasta_page = fasta_results[ref_db_id]
         else:
             fasta_page = None
-        gpw,search_db_sequences = computeGPW(config,sequence,u_ac,search_db=gpw_name,search_db_path=search_dbs[gpw_name],debug=debug,
-                                                fasta_page=fasta_page,sequence_map=sequence_map,search_db_sequences=search_db_sequences)
+        gpw,search_db_sequences = computeGPW(config, sequence, prot_id, search_db=ref_db_id, search_db_path=search_dbs[ref_db_id], debug=debug,
+                                                fasta_page=fasta_page, sequence_map=sequence_map, search_db_sequences=search_db_sequences)
         if gpw == '':
             if debug >= 1:
-                print('computeGPW returned empty result:',u_ac,gpw_name)
+                print('computeGPW returned empty result:', prot_id, ref_db_id)
             continue
-        gpws[gpw_name] = gpw
+        gpws[ref_db_id] = gpw
 
         #save them into the database
-        saveGpw(config,gpw,u_ac,gpw_name,pdb_tuple)
+        saveGpw(config, gpw, prot_id, ref_db_id, pdb_tuple)
 
-        psic_name = f'{out_directory}/{u_ac}_{gpw_name}_gpw.psic.gz'
+        psic_name = util.get_msa_path(out_directory, prot_id, ref_db_id, psic = True, gpw = True)
         if not os.path.isfile(psic_name):
             if debug >= 1:
-                print('Calc psic profiles from getMSA',gpw_name)
+                print('Calc psic profiles from getMSA', ref_db_id)
             psic.psicFromGPW(gpw,psic_name[:-3],config,debug=debug)
             
             if os.path.isfile(psic_name):

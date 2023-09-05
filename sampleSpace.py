@@ -1,11 +1,21 @@
 import os
+import sys
 import numpy as np
 import math
 import random
 import ray
 import time
+import util
+
 from scipy import stats
 
+from structman.base_utils.base_utils import calculate_chunksizes
+#from scala.tree_split import tree
+from datasail.sail import datasail
+
+
+import dicts
+possible_na_values = set(['-', 'None'])
 class Feature:
     def __init__(self,name,f_type,group=None,default_value=None,mutation_specific=False):
         self.name = name
@@ -31,6 +41,33 @@ class Feature:
                 self.category_backmap[self.category_counter] = value
                 self.category_counter += 1
             self.value_map[sample_id] = self.category_map[value]
+
+    def value_from_string(self, string):
+        if self.name == 'Blosum62':
+            try:
+                value = value = float(string)
+            except:
+                try:
+                    value = dicts.BLOSUM62[(string[0],string[-1])]
+                except:
+                    value = dicts.BLOSUM62[(string[-1],string[0])]
+            return value
+
+        try:
+            if self.f_type == 'categorical':
+                value = string
+            elif self.f_type == 'real':
+                value = float(string)
+            elif self.f_type == 'integer' or self.f_type == 'binary':
+                value = int(string)
+            else:
+                print(f'Error in value_from_string: {self.f_type} {self.name} {string}')
+        except:
+            if string in possible_na_values:
+                value = self.default
+            else:
+                print(f'Error in value_from_string: {self.f_type} {self.name} {string}')
+        return value
 
     def string_convert(self,value):
         if not self.f_type == 'categorical':
@@ -85,6 +122,20 @@ class SampleSpace:
         feat = Feature(name,f_type,group=group,default_value=default_value,mutation_specific=mutation_specific)
         self.features[name] = feat
         self.feature_names.append(name)
+
+    def removeFeature(self, feat_name):
+        del self.features[feat_name]
+        self.feature_names.remove(feat_name)
+
+    def cleanse_empty_features(self, verbosity = 0):
+        n = 0
+        for feat_name in list(self.features.keys()):
+            if len(self.features[feat_name].value_map) == 0:
+                self.removeFeature(feat_name)
+                n += 1
+                if verbosity >= 1:
+                    print(f'Cleansed {feat_name}')
+        print(f'Cleansed {n} empty features')
 
     def oneHotify(self,feat_name):
         feat = self.features[feat_name]
@@ -218,6 +269,7 @@ class SampleSpace:
                 class_pos = pos
 
         for sample_id in self.samples:
+            class_name = None
             u_ac,aac = sample_id
             target_value_str = str(self.samples[sample_id].targetValue)
 
@@ -230,6 +282,8 @@ class SampleSpace:
                     class_name = feat.category_backmap[feature_value]
             outlines.append('%s\t%s\t%s\t%s\t%s\t%s' % (u_ac,aac,target_value_str,self.samples[sample_id].tags,str(self.samples[sample_id].amount_of_structures),'\t'.join(feature_vector)))
 
+            if class_name is None:
+                continue
             if not class_name in class_out_lines:
                 class_out_lines[class_name] = [header]
             class_out_lines[class_name].append('%s\t%s\t%s\t%s' % (u_ac,aac,target_value_str,'\t'.join(feature_vector)))
@@ -256,7 +310,11 @@ class SampleSpace:
         feature_vector = []
         for feat_name in self.feature_names:
             feat = self.features[feat_name]
-            feature_vector.append(feat.value_map[sample_id])
+            try:
+                feature_vector.append(feat.value_map[sample_id])
+            except:
+                print(f'Value map (length: {len(feat.value_map)}) of {feat_name} did not contain: {sample_id}')
+                sys.exit()
         return feature_vector
 
     def setGeometricDistanceMap(self,config):
@@ -295,6 +353,8 @@ class SampleSpace:
 
     def detectOutliers(self,config):
         N = len(self.samples)
+        if N==0:
+            raise Exception('Called detectOutliers with empty samples object')
         num_of_bins = int(math.log10(N)*4)
 
         min_bin_size = int(math.log10(N))
@@ -372,7 +432,24 @@ class SampleSpace:
             self.calcVectors(config)
         return self.test_feature_matrix,self.test_targets,self.train_feature_matrix,self.train_targets
 
-    def splitDataSet(self,config,specific_id=None,protein_wise=False,debug=0, skip_protein = None):
+    def get_test_data_for_feature_list(self, extern_feature_list):
+        test_feature_matrix = []
+        test_targets = []
+        sample_id_list = []
+        for sample_id in self.samples:
+            sample_id_list.append(sample_id)
+            test_targets.append(self.samples[sample_id].targetValue)
+            feature_value_vector = []
+            for feat_name in extern_feature_list:
+                if feat_name in self.features:
+                    feature_value_vector.append(self.features[feat_name].value_map[sample_id])
+                else:
+                    feature_value_vector.append(0) #Need to put default values here
+            test_feature_matrix.append(feature_value_vector)
+        return test_feature_matrix, test_targets, sample_id_list
+
+
+    def splitDataSet(self,config,specific_id=None,protein_wise=False,debug=0, skip_protein = None, ignore_samples = None):
         split_rate = config.split_rate
         total_size = self.getSize()
         test_size = max([1,int(total_size*split_rate)])
@@ -424,6 +501,10 @@ class SampleSpace:
                 if skip_protein is not None:
                     if u_ac == skip_protein:
                         continue
+                if ignore_samples is not None:
+                    if (u_ac, aac) in ignore_samples:
+                        continue
+
                 if u_ac in test_proteins:
                     test_ids.append((u_ac,aac))
                 else:
@@ -432,7 +513,14 @@ class SampleSpace:
             #print 'Protein Id based sample splitting:\nTest set Ids: ',test_proteins,'\nTestset size: ',test_set_sum
             if debug >= 1:
                 print('Train size: ',train_size,' ,Test size: ',test_size)
-
+        if len(test_ids) == 0:
+            if ignore_samples is not None:
+                ignored_prots = set()
+                for (prot_id, aac) in ignore_samples:
+                    ignored_prots.add(prot_id)
+            else:
+                ignored_prots = None
+            print(f'Splitted into empty test set: {specific_id}, {ignored_prots}')
         return test_ids, train_ids
 
     def filterSamplesByMappedStructures(self,config):
@@ -517,6 +605,10 @@ class CrossValidation:
 
     def reset(self):
         self.cv_counter = 0
+
+    def reset_confusion_maps(self):
+        for slice_id in self.slices:
+            self.slices[slice_id].reset_confusion_maps()
 
 class Tag_nested_cv(CrossValidation):
     def __init__(self, sampleSpace, config):
@@ -618,16 +710,24 @@ class X_fold_cv(CrossValidation):
             self.slices[cv_counter] = cv_slice
 
 @ray.remote(max_calls = 1)
-def init_lopo_slice(store, prot):
-    config, sampleSpace, prots = store
+def init_lopo_slice(store, test_prots, cv_counter = None):
+    config, sampleSpace, all_prots = store
 
-    prots = prots.copy()
+    train_prots = all_prots - test_prots
 
-    prots.remove(prot)
+    test_ids, train_ids = sampleSpace.splitDataSet(config, specific_id=test_prots, protein_wise=True)
 
-    test_ids, train_ids = sampleSpace.splitDataSet(config,specific_id=prot,protein_wise=True)
-    cv_slice = CrossValidationSlice(test_ids, train_ids, sampleSpace, config, name = prot, train_prots = prots)
-    return (prot, cv_slice)
+    if cv_counter is None:
+        for name in test_prots:
+            break
+    else:
+        name = cv_counter
+
+    if config.verbosity >= 2:
+        print(f'Init LOPO slice: {name}: Test set size: {len(test_ids)}, Train set size: {len(train_ids)}')
+
+    cv_slice = CrossValidationSlice(test_ids, train_ids, sampleSpace, config, name = name, train_prots = train_prots, test_prots = test_prots)
+    return (name, cv_slice)
 
 class LOPO(CrossValidation):
     def __init__(self, sampleSpace, config):
@@ -642,7 +742,7 @@ class LOPO(CrossValidation):
 
         init_ids = []
 
-        print('Put sample space into store')
+        print(f'Put sample space into store: {prots}')
 
         store = ray.put((config, sampleSpace, prots))
 
@@ -650,7 +750,7 @@ class LOPO(CrossValidation):
         print('Start paralell slice init, with number of processes:',config.proc_n,',time:',t1-t0)
 
         for prot in self.prots:
-            init_ids.append(init_lopo_slice.remote(store, prot))
+            init_ids.append(init_lopo_slice.remote(store, set([prot])))
 
         init_results = ray.get(init_ids)
 
@@ -661,8 +761,110 @@ class LOPO(CrossValidation):
             self.slices[prot] = cv_slice
             self.slice_ids.append(prot)
 
+def write_weight_map(weight_map, outfile):
+    lines = []
+    for prot_id in weight_map:
+        lines.append(f'{prot_id}\t{weight_map[prot_id]}\n')
+    f = open(outfile,'w')
+    f.write(''.join(lines))
+    f.close()
+
+class DataSAIL_cv(CrossValidation):
+    def __init__(self, sampleSpace, config):
+        super().__init__()
+
+        weight_map = {}
+        prots = set()
+        for (prot_id, aac) in sampleSpace.samples:
+            if prot_id not in weight_map:
+                weight_map[prot_id] = 0
+                prots.add(prot_id)
+            weight_map[prot_id] += 1
+
+        self.prots = list(prots)
+
+
+        datasail_test_size = 100 // config.crossValidation_fold
+        datasail_train_size = 100 - datasail_test_size
+
+        splits = [datasail_test_size] * config.crossValidation_fold
+
+        names = [f'split_{x}' for x in range(config.crossValidation_fold)]
+
+        if config.verbosity >= 3:
+            print(f'Call of datasail with: e_data: {config.path_to_sequence_fasta}, e_weights: {weight_map} ({len(weight_map)}), splits: {splits}, names: {names}')
+
+            write_weight_map(weight_map, 'weight_map_for_datasail.tsv')
+
+        raw_datasail_splits = datasail(e_data = config.path_to_sequence_fasta, e_weights = weight_map, splits = splits, techniques = ['CCSe'], names = names, e_type = 'P', solver = 'SCIP')
+
+        datasail_splits = raw_datasail_splits[0]['CCS'][0]
+        print(datasail_splits)
+
+        train_test_pairs = {}
+        for cv_counter in range(config.crossValidation_fold):
+            train_test_pairs[cv_counter] = [[], [], []]
+
+        for prot_id in datasail_splits:
+            split_name = datasail_splits[prot_id]
+            cv_counter = int(split_name.split('_')[1])
+            subslice_counter = cv_counter + 1
+            if subslice_counter == config.crossValidation_fold:
+                subslice_counter = 0
+            for cv in train_test_pairs:
+                if cv == cv_counter:
+                    train_test_pairs[cv][1].append(prot_id)
+                else:
+                    train_test_pairs[cv][0].append(prot_id)
+                    if cv == subslice_counter:
+                        train_test_pairs[cv][2].append(prot_id)
+
+
+        if config.verbosity >= 2:
+            print(f'Init datasail:\nSplits: {train_test_pairs}\n')
+
+        store = ray.put((config, sampleSpace, prots))
+
+        init_ids = []
+        for cv_counter in train_test_pairs:
+            train_set, test_set, subslice = train_test_pairs[cv_counter]
+
+            if config.verbosity >= 2:
+                print(f'Init datasail slice {cv_counter}: {test_set}')
+
+            init_ids.append(init_lopo_slice.remote(store, set(test_set), cv_counter = cv_counter))
+
+        init_results = ray.get(init_ids)
+
+        for cv_counter, cv_slice in init_results:
+
+            self.slices[cv_counter] = cv_slice
+            self.slice_ids.append(cv_counter)
+            if train_test_pairs[cv_counter][2] is not None:
+                self.slices[cv_counter].subslice = train_test_pairs[cv_counter][2]
+            else:
+                train_set = train_test_pairs[cv_counter][0]
+                if len(train_set) == 1:
+                    self.slices[cv_counter].subslice = []
+                else:
+                    self.slices[cv_counter].subslice = train_set[0]
+
+@ray.remote(max_calls = 1)
+def distance_weighting_subroutine(store, package):
+    target_value_map, rounded_exp, set_size, subsamplesize = store
+    random_samples = random.sample(range(set_size),subsamplesize)
+    outputs = []
+    for target_value_1, pos_1 in package:
+        d_sum = 0.
+        for pos_2 in random_samples:
+            target_value_2 = target_value_map[pos_2]
+            d = abs(target_value_1-target_value_2)
+            d_sum += d**rounded_exp
+        outputs.append((pos_1, d_sum/subsamplesize))
+    return outputs
+
 class CrossValidationSlice:
-    def __init__(self, test_ids, train_ids, sampleSpace, config, name = '', train_prots = None, train_equal_test = False):
+    def __init__(self, test_ids, train_ids, sampleSpace, config, name = '', train_prots = None, test_prots = None, train_equal_test = False, para_number = None, feature_names = None):
         self.isSlice = True
         self.test_feature_matrix = []
         self.test_targets = []
@@ -670,16 +872,38 @@ class CrossValidationSlice:
         self.train_feature_matrix = []
         self.train_targets = []
         self.train_sample_ids = [x for x in train_ids]
-        self.feature_names = [x for x in sampleSpace.feature_names]
+        features_to_remove = []
+        if feature_names is None:
+            keep_features = None
+        else:
+            keep_features = set(feature_names)
+        self.feature_names = []
+        for feat_name in sampleSpace.feature_names:
+            self.feature_names.append(feat_name)
+            if keep_features is not None:
+                if feat_name not in keep_features:
+                    features_to_remove.append(feat_name)
+
         self.name = name
         if train_prots is None:
             self.train_prots =  set([])
-            for (u_ac,aac) in sampleSpace.samples:
-                self.train_prots.add(u_ac)
+            test_samples = set(self.test_sample_ids)
+            for (prot_id, aac) in sampleSpace.samples:
+                if (prot_id, aac) in test_samples:
+                    continue
+                self.train_prots.add(prot_id)
         else:
             self.train_prots = train_prots
 
+        self.test_prots = test_prots
+
+        self.train_equal_test = train_equal_test
+
         self.slice_slice = None
+        self.slice_slices = None
+        self.subslice = None
+        self.subslices = None
+        self.random_subslice = None
 
         self.features = {}
         for pos,feat in enumerate(self.feature_names):
@@ -703,12 +927,25 @@ class CrossValidationSlice:
         self.ranked_tvpmb = None
         self.active_tvpmb_threshold = None
         self.current_number_of_bins = None
-
+        self.active_exp = None
         self.active_reg = None
         self.alpha_map = {}
         self.c_map = {}
 
-        self.checkCircularity(remove_t2=config.remove_t2,print_out=True)
+        self.confusion_map = None
+
+        if config.verbosity >= 2:
+            t0 = time.time()
+
+        if not self.train_equal_test:
+            self.checkCircularity(remove_t2=config.remove_t2,print_out=True)
+
+        if config.verbosity >= 2:
+            t1 = time.time()
+            print(f'Init CV slice part 1: {t1-t0}')
+
+        if config.verbosity >=3:
+            print(f'In CVSLice init of {self.name}: train equal test: {train_equal_test}, train prots: {train_prots}, Test set: {len(self.test_sample_ids)}, Train set: {len(self.train_sample_ids)}')
 
         if not train_equal_test:
             for sample_id in self.test_sample_ids:
@@ -719,32 +956,67 @@ class CrossValidationSlice:
                 self.test_feature_matrix.append(feature_vector)
                 self.slice_specific_features[sample_id] = {}
 
+        if config.verbosity >= 2:
+            t2 = time.time()
+            print(f'Init CV slice part 2 {train_equal_test}: {t2-t1}')
+
         for sample_id in self.train_sample_ids:
             sample = sampleSpace.samples[sample_id]
             self.train_targets.append(sample.targetValue)
             feature_vector = sampleSpace.getFeatureVector(sample_id)
+
+            if config.verbosity >= 4:
+                util.sanity_check_value_list(feature_vector, label_vector = self.feature_names, datastructure_name = f'Feature vector of {sample_id}')
+
             self.train_feature_matrix.append(feature_vector)
             self.slice_specific_features[sample_id] = {}
-            if not train_equal_test:
+            if train_equal_test:
                 self.test_feature_matrix.append([x for x in feature_vector])
                 self.test_targets.append(sample.targetValue)
+
+        if config.verbosity >= 2:
+            t3 = time.time()
+            print(f'Init CV slice part 3: {t3-t2}')
 
         if train_equal_test:
             self.test_sample_ids = [x for x in self.train_sample_ids]
 
+        if config.verbosity >= 2:
+            t4 = time.time()
+            print(f'Init CV slice part 4: {t4-t3}')
+
         if config.addBias:
             self.setProteinBias(config)
+
+        if config.verbosity >= 2:
+            t5 = time.time()
+            print(f'Init CV slice part 5: {t5-t4}')
 
         if config.balanceSubsampling != None:
             self.balanceSubSampleTrainSet(config)
 
+        if config.verbosity >= 2:
+            t6 = time.time()
+            print(f'Init CV slice part 6: {t6-t5}')
+
         self.printBalance(config)
+
+        if config.verbosity >= 2:
+            t7 = time.time()
+            print(f'Init CV slice part 7: {t7-t6}')
 
         if config.regression:
             if config.geometric_weighting:
                 self.calcSampleWeights(config, sampleSpace.geometric_distance_map)
             else:
-                self.calcSubsampleDistanceWeights(config)
+                self.calcSubsampleDistanceWeights(config, para_number = para_number)
+
+        for feat_name in features_to_remove:
+            self.removeFeature(feat_name)
+
+        if config.verbosity >= 2:
+            t8 = time.time()
+            print(f'Init CV slice part 8: {t8-t7}')
 
     def mirrorTrainSamples(self):
         self.test_feature_matrix = []
@@ -955,9 +1227,10 @@ class CrossValidationSlice:
 
         return
 
-    def printBalance(self,config):
+    def printBalance(self, config):
         if config.regression:
-            print('Mean target value: ',sum(self.train_targets)/len(self.train_targets))
+            print(f'{self.name} Mean target value: {sum(self.train_targets)/len(self.train_targets)}')
+            print(f'{self.name} Test set size: {len(self.test_targets)}, Train set size: {len(self.train_targets)}')
             return
         balance_map = {}
         for ttv in self.train_targets:
@@ -1027,42 +1300,117 @@ class CrossValidationSlice:
         if complete:
             self.class_weight_vector = self.train_class_weight_vector + self.test_class_weight_vector
 
-    def calcSubsampleDistanceWeights(self, config):
+    def calcSubsampleDistanceWeights(self, config, para_number = None):
         rounded_exp = round(10*config.geometric_exponent)/10
         if rounded_exp in self.weight_vector_store:
             self.train_class_weight_vector, self.test_class_weight_vector = self.weight_vector_store[rounded_exp]
-            return
+            return False
 
-        print('Calc subsample distance weights:',self.name,'with exponent:',rounded_exp)
+        set_size = len(self.train_targets)
+        raw_subsamplesize = set_size * 0.005
 
-        subsamplesize = 0.005
+        subsamplesize = min([set_size,max([100,round(raw_subsamplesize)])])
 
-        N = len(self.train_targets)
-        r = min([N,max([100,round(N * subsamplesize)])])
+        store = ray.put((self.train_targets, rounded_exp, set_size, subsamplesize))
+
+        if para_number is None:
+            proc_n = config.proc_n
+        else:
+            proc_n = para_number
+
+        if config.verbosity >= 2:
+            print(f'Calc subsample distance weights: {self.name}, with exponent: {rounded_exp}, train_set_size: {set_size}, test_set_size: {len(self.test_targets)}, proc_n: {proc_n}')
+
+        small_chunksize, big_chunksize, n_of_small_chunks, n_of_big_chunks = calculate_chunksizes(proc_n, len(self.train_targets))
+
+        subroutine_results = []
+
+        package = []
+        started_big_procs = 0
+        if n_of_big_chunks > 0:
+            for pos, tv_1 in enumerate(self.train_targets):
+                package.append((tv_1, pos))
+                if len(package) == big_chunksize:
+                    subroutine_results.append(distance_weighting_subroutine.remote(store, package))
+                    package = []
+                    started_big_procs += 1
+                    if started_big_procs == n_of_big_chunks:
+                        break
+
+        border = n_of_big_chunks*big_chunksize
+
+        for pos, tv_1 in enumerate(self.train_targets[border:]):
+            package.append((tv_1, border + pos))
+            if len(package) == small_chunksize:
+                subroutine_results.append(distance_weighting_subroutine.remote(store, package))
+                package = []
+
+        if config.verbosity >= 2:
+            print(f'Calc distance weighting remote info: started remotes: {len(subroutine_results)}, {small_chunksize}, {big_chunksize}, {n_of_small_chunks}, {n_of_big_chunks}')
 
         self.train_class_weight_vector = []
-        for pos,tv_1 in enumerate(self.train_targets):
-            d_sum = 0.
-            random_samples = random.sample(range(N),r)
-            for pos_2 in random_samples:
-                tv_2 = self.train_targets[pos_2]
-                d = abs(tv_1-tv_2)
-                d_sum += d**rounded_exp
-            self.train_class_weight_vector.append(d_sum/r)
 
-        N = len(self.test_targets)
-        r = min([N,max([100,round(N * subsamplesize)])])
+        outputs = ray.get(subroutine_results)
+        pos_dict = {}
+        for vector_entries in outputs:
+            for pos, vector_entry in vector_entries:
+                pos_dict[pos] = vector_entry
+        for i in range(len(pos_dict)):
+            self.train_class_weight_vector.append(pos_dict[i])
+
+        if config.verbosity >= 2:
+            print(f'Finished calculating weights for trainset, size: {len(self.train_class_weight_vector)}')
+
+        set_size = len(self.test_targets)
+        subsamplesize = min([set_size,max([100,round(set_size * raw_subsamplesize)])])
+
+        store = ray.put((self.test_targets, rounded_exp, set_size, subsamplesize))
+
+        small_chunksize, big_chunksize, n_of_small_chunks, n_of_big_chunks = calculate_chunksizes(proc_n, len(self.test_targets))
+
+        subroutine_results = []
+
+        package = []
+        started_big_procs = 0
+        if n_of_big_chunks > 0:
+            for pos, tv_1 in enumerate(self.test_targets):
+                package.append((tv_1, pos))
+                if len(package) == big_chunksize:
+                    subroutine_results.append(distance_weighting_subroutine.remote(store, package))
+                    package = []
+                    started_big_procs += 1
+                    if started_big_procs == n_of_big_chunks:
+                        break
+
+        border = n_of_big_chunks*big_chunksize
+
+        for pos, tv_1 in enumerate(self.test_targets[border:]):
+            package.append((tv_1, pos + border))
+            if len(package) == small_chunksize:
+                subroutine_results.append(distance_weighting_subroutine.remote(store, package))
+                package = []
+
+        if config.verbosity >= 2:
+            print(f'Calc distance weighting remote info for test set: started remotes: {len(subroutine_results)}, {small_chunksize}, {big_chunksize}, {n_of_small_chunks}, {n_of_big_chunks}')
 
         self.test_class_weight_vector = []
-        for pos,tv_1 in enumerate(self.test_targets):
-            d_sum = 0.
-            random_samples = random.sample(range(N),r)
-            for pos_2 in random_samples:
-                tv_2 = self.test_targets[pos_2]
-                d = abs(tv_1-tv_2)
-                d_sum += d**rounded_exp
-            self.test_class_weight_vector.append(d_sum/r)
+
+        outputs = ray.get(subroutine_results)
+        pos_dict = {}
+        for vector_entries in outputs:
+            for pos, vector_entry in vector_entries:
+                pos_dict[pos] = vector_entry
+        for i in range(len(pos_dict)):
+            self.test_class_weight_vector.append(pos_dict[i])
+
+        if config.verbosity >= 2:
+            print(f'Finished calculating weights for testset, size: {len(self.test_class_weight_vector)}')
+
         self.weight_vector_store[rounded_exp] = self.train_class_weight_vector, self.test_class_weight_vector
+        del subroutine_results
+        del store
+
+        return True
 
     def setProteinBias(self, config):
         if 'Protein bias' not in self.slice_specific_feature_map:
@@ -1277,6 +1625,17 @@ class CrossValidationSlice:
         for pos,sample_id in enumerate(self.test_sample_ids):
             self.test_feature_matrix[pos].append(0)
 
+    def reset_confusion_maps(self):
+        if self.slice_slice is not None:
+            self.slice_slice.confusion_map = None
+        if self.slice_slices is not None:
+            for slice_slice in self.slice_slices:
+                slice_slice.confusion_map = None
+        if not self.isSlice:
+            for cv_counter in self.slices:
+                cv_slice = self.slices[cv_counter]
+                cv_slice.reset_confusion_maps()
+
     def reorderByNames(self, feature_names):
         snap_shot = list(self.feature_names)
         for feat_name in snap_shot:
@@ -1291,26 +1650,32 @@ class CrossValidationSlice:
         try:
             target_corr,target_p_val = self.featureTargetCorr(feat_name,config)
         except:
+            self.removeFeature(feat_name)
             print('Error: cant get feature target corr for:',feat_name)
+            return
         mean_value_corr,p_val = self.featureCorr(feat_name,'Protein bias',slice_specific_feature = True)
         if mean_value_corr != mean_value_corr:
-            mean_value_corr = 0.0
-            p_val = 1.0
+            self.removeFeature(feat_name)
+            print(self.name,'Removed feature:',feat_name,'due to nan mean_value_corr')
+            return
         tvmb_score = abs(mean_value_corr)-abs(target_corr) #target value mean bias score
         if tvmb_score != tvmb_score: #test for 'nan'
             self.removeFeature(feat_name)
             print(self.name,'Removed feature:',feat_name,'due to nan tvmb score')
-
-        self.tvmb_map[feat_name] = tvmb_score,target_p_val
+            return
+        else:
+            self.tvmb_map[feat_name] = tvmb_score,target_p_val
 
     def rank_tvmb(self,config):
         self.ranked_tvmb = []
-        for feat_name in self.feature_names:
+        for feat_name in list(self.feature_names):
             if not feat_name in self.tvmb_map:
                 self.addToTvmbMap(feat_name,config)
+                if not feat_name in self.tvmb_map:
+                    continue
             if not feat_name in self.tvmb_map:
                 print('Error debug out:',self.name,len(self.feature_names),len(self.features),len(self.test_feature_matrix[0]),len(self.train_feature_matrix[0]))
-            tvmb_score,target_p_val = self.tvmb_map[feat_name]
+            tvmb_score,_ = self.tvmb_map[feat_name]
             self.ranked_tvmb.append((feat_name,tvmb_score))
         self.ranked_tvmb.sort(key=lambda x:x[1],reverse=True)
 
@@ -1324,7 +1689,6 @@ class CrossValidationSlice:
         if tvpmb_score != tvpmb_score: #test for 'nan'
             self.removeFeature(feat_name)
             print(self.name,'Removed feature:',feat_name,'due to nan tvpmb score')
-            return
 
         self.tvpmb_map[feat_name] = tvpmb_score
 

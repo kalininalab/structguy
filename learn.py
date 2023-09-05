@@ -8,8 +8,6 @@ from sklearn.metrics import precision_score
 from sklearn.metrics import recall_score
 from sklearn.metrics import matthews_corrcoef
 
-#from sklearn.externals import joblib
-
 from scipy import stats
 import resource
 import sys
@@ -23,6 +21,8 @@ import featureGenerator
 import hyperParameterOptimization as hpo
 import sampleSpace
 import trainForest
+from results_analysis import Results, write_protein_wise_pearsons
+import featureAnalysis
 
 import cProfile
 import pstats
@@ -77,9 +77,8 @@ def calcFeatureImportances(forest, samples, cv_slice, config, print_them=False):
     return feature_importance_map
 
 
-def learn(config, effectRegressor=None, datafile=None, indatafile=None):
+def learn(config, effectRegressor=None):
     crossValidation = config.crossValidation
-    debug = config.debug
 
     print('================================ Start Learn ==============================================')
     print('Protein-based randomization: ',config.prot_based_separation)
@@ -91,23 +90,16 @@ def learn(config, effectRegressor=None, datafile=None, indatafile=None):
     print('filter structural features: ',config.filterStructuralFeatures)
     print('filter samples with no mapped structures: ',config.structure_threshold)
     print('Clean type-2 circularity from training set: ',config.remove_t2)
-    print('Trainset subsampling: ',config.balanceSubsampling,' (filter single variant proteins: ',config.filter_single_variant_prots,')')
+    print('Trainset subsampling: ', config.balanceSubsampling,' (filter single variant proteins: ',config.filter_single_variant_prots,')')
     print('===========================================================================================')
-    print('Writing features to feature file: ',datafile)
-    print('Using precomputed feature file: ',indatafile)
-    print('Writing output to feature file: ',config.pred_file)
+    if config.path_structural_feature_table is not None:
+        print(f'Using feature file: {config.path_structural_feature_table}')
+        print(f'Writing processed features to processed feature file: {config.path_structural_feature_table.rsplit(".",1)[0]}_processed.tsv')
+    elif config.path_to_processed_feature_file is not None:
+        print(f'Using feature file: {config.path_to_processed_feature_file}')
+    print(f'Writing output to: {config.outfolder}')
 
-    pred_file = config.pred_file
-
-    samples = featureGenerator.createTrainingSet(config,config.session,outfile=datafile,infile=indatafile,debug=debug)
-
-    for session,indatafile in config.add_more_sample_files:
-        samples = featureGenerator.createTrainingSet(config,session,outfile=datafile,infile=indatafile,debug=debug,samples=samples)
-
-    if config.filterStructuralFeatures:
-        samples.removeFeaturesByType('structural')
-
-    samples.oneHotifyAll()
+    samples = featureGenerator.createTrainingSet(config)
 
     if config.geometric_weighting and config.regression:
         samples.setGeometricDistanceMap(config)
@@ -119,6 +111,8 @@ def learn(config, effectRegressor=None, datafile=None, indatafile=None):
 
         if crossValidation == 'LOPO':
             cross_val_obj = sampleSpace.LOPO(samples, config)
+        elif crossValidation == 'DataSAIL':
+            cross_val_obj = sampleSpace.DataSAIL_cv(samples, config)
         else:
             cross_val_obj = sampleSpace.X_fold_cv(samples, config, crossValidation)
 
@@ -128,7 +122,7 @@ def learn(config, effectRegressor=None, datafile=None, indatafile=None):
         print('Testset length: ',len(cv_slice.test_targets))
 
         debug = False
-        if config.feature_selection == 'confusion' or config.feature_selection == 'sequential_confusion' or config.feature_selection == 'threeStaged':
+        if config.feature_selection == 'confusion' or config.feature_selection == 'confusion_and_regu' or config.feature_selection == 'sequential_confusion' or config.feature_selection == 'threeStaged' or config.feature_selection == 'sequential_confusion_and_regu' or config.feature_selection == 'threeStaged_listranking':
             samples_store_id = ray.put(samples)
         else:
             samples_store_id = None
@@ -143,7 +137,7 @@ def learn(config, effectRegressor=None, datafile=None, indatafile=None):
             hpo.bayesianComplete(config, initial_training_input, scores, samples = samples_store_id, distance_map = distance_map)
         elif config.hyperOptimization == 'threeDim':
             forest, scores = trainForest.trainForest(config, initial_training_input, samples = samples_store_id, distance_map = distance_map, repeat = config.repeat_training, cv_repeat = config.cv_hpo, print_out = True, debug = debug)
-            hpo.threeDimHyperOptimization(config, initial_training_input, scores, samples = samples_store_id, distance_map = distance_map)
+            hpo.threeDimHyperOptimization(config, initial_training_input, scores, samples = samples_store_id, distance_map = distance_map, debug = debug)
         else:
             if debug:
                 forest,scores = trainForest.trainForest(config, initial_training_input, samples = samples_store_id, distance_map = distance_map, repeat = config.repeat_training, cv_repeat = config.cv_hpo, print_out = True, debug = debug)
@@ -167,9 +161,15 @@ def learn(config, effectRegressor=None, datafile=None, indatafile=None):
         
         forests = {}
 
+        append = False
+
+        if samples_store_id is None:
+            samples_store_id = ray.put(samples)
 
         for cv_counter in cross_val_obj.slices:
             cv_slice = cross_val_obj.slices[cv_counter]
+
+            full_model_subslice = cv_slice.test_prots
 
             print(cv_counter, len(cv_slice.train_targets))
             print('Testset length: ',len(cv_slice.test_targets))
@@ -197,10 +197,17 @@ def learn(config, effectRegressor=None, datafile=None, indatafile=None):
                 accum_y_pred.append(pred)
             for true_value in cv_slice.test_targets:
                 accum_true_vals.append(true_value)
-            if pred_file != None:
+
+            #if config.regression:
+            #    confusion_map, raw_conf_map = featureAnalysis.calcSliceConfusion(forest, cv_slice, remote = True, err_warping_exp = config.err_warping_exp, goodwill_interval = config.confusion_goodwill)
+            #    print('Top 10 confusing features:')
+            #    for i in range(10):
+            #        print(confusion_map[i])
+
+            if config.outfolder != None:
 
                 if config.produce_scatterplot and config.regression and config.crossValidation == 'LOPO':
-                    base_name,f_type = pred_file.rsplit('.',1)
+                    base_name = f'{config.outfolder}/{config.dataset_name}'
                     scatterfile = '%s_%s.png' % (base_name,str(cv_counter))
                     hexbinfile = '%s_%s_hexbin.png' % (base_name,str(cv_counter))
 
@@ -210,7 +217,9 @@ def learn(config, effectRegressor=None, datafile=None, indatafile=None):
                                      cv_slice.test_targets, config.target_values, y_pred_median, tv_median, scatterfile)
                     util.hexbinplot(y_pred, cv_slice.test_targets, config.target_values, hexbinfile)
 
-                writeOutput(config,pred_file,y_pred,cv_slice,samples,append=True)
+                writeOutput(config, y_pred, cv_slice, samples, append=append)
+                if not append: #Append is only False in the first loop iteration
+                    append = True
 
         if config.regression:
             util.printMean(mses,'MSE')
@@ -220,8 +229,8 @@ def learn(config, effectRegressor=None, datafile=None, indatafile=None):
             util.printMean(accs,'ACC')
             util.printMean(fs,'F-Score')
 
-        if pred_file != None and config.produce_scatterplot and config.regression:
-            base_name,f_type = pred_file.rsplit('.',1)
+        if config.outfolder != None and config.produce_scatterplot and config.regression:
+            base_name = f'{config.outfolder}/{config.dataset_name}'
             scatterfile = '%s.png' % (base_name)
             hexbinfile = '%s_hexbin.png' % (base_name)
 
@@ -242,13 +251,13 @@ def learn(config, effectRegressor=None, datafile=None, indatafile=None):
                 radarfile = '%s_radar.png' % (base_name)
                 util.radar(labels,values,title,radarfile)
 
-    if pred_file != None:
-        base_name,f_type = pred_file.rsplit('.',1)
+    if config.outfolder != None:
+        base_name = f'{config.outfolder}/{config.dataset_name}'
         modelfile = '%s_forest.dump' % (base_name)
 
         filtered_features_file = '%s_filtered_features.tsv' % (base_name)
 
-        buildFinalModel(samples,config,outfile = modelfile, filtered_features_file = filtered_features_file)
+        buildFinalModel(samples, config, full_model_subslice, outfile = modelfile, filtered_features_file = filtered_features_file)
 
         if not config.skip_cv:
             cv_file = '%s_full_cv_forests.dump' % (base_name)
@@ -256,52 +265,67 @@ def learn(config, effectRegressor=None, datafile=None, indatafile=None):
 
     return forest,cv_slice.feature_names
 
-def evaluate_dataset(config,forest_file,datafile= None ,indatafile= None ,debug = 0,pred_file = None):
-    samples = featureGenerator.createTrainingSet(config,config.session,outfile=datafile,infile=indatafile,debug=debug)
-    samples.oneHotifyAll()
+def evaluate_dataset(config):
+    samples = featureGenerator.createTrainingSet(config)
 
     for sample_id in samples.samples:
         samples.samples[sample_id].testtrain = 'test'
 
-    forest,feature_names_list = joblib.load(forest_file)
-    feature_names = set(feature_names_list)
-    for feat_name in samples.feature_names:
-        if not feat_name in feature_names:
-            samples.removeFeature(feat_name)
+    forest, extern_feature_names_list, model_config = loadModel(config.path_to_model)
 
-    samples.feature_names = feature_names_list
+    test_feature_matrix, test_targets, sample_id_list = samples.get_test_data_for_feature_list(extern_feature_names_list)
 
-    samples.calcVectors(config)
-    print('Shape of the feature matrix:',len(samples.test_feature_matrix),len(samples.test_feature_matrix[0]))
-    y_pred = forest.predict(samples.test_feature_matrix)
+
+    print('Shape of the feature matrix:',len(test_feature_matrix),len(test_feature_matrix[0]))
+    y_pred = forest.predict(test_feature_matrix)
+
+    protein_info = {}
+    protein_wise_results = {}
+    for pos, sample_id in enumerate(sample_id_list):
+        true_value = test_targets[pos]
+        pred_value = y_pred[pos]
+        prot_id, aac = sample_id
+        protein_size = samples.features['Protein Size'].value_map[sample_id]
+
+        if true_value is not None:
+            if prot_id not in protein_info:
+                protein_info[prot_id] = [protein_size, 0]
+            protein_info[prot_id][1] += 1
+
+        if not prot_id in protein_wise_results:
+            protein_wise_results[prot_id] = Results()
+
+        protein_wise_results[prot_id].add_result(aac, true_value, pred_value)
 
     if config.regression:
-        samples.calcSampleWeights(config,forceWeighting=True,complete=True)
-        r2 = r2_score(samples.test_targets,y_pred)
-        r2_weighted = r2_score(samples.test_targets,y_pred,sample_weight = samples.test_class_weight_vector)
-        mse = mean_squared_error(samples.test_targets,y_pred)
-        mse_weighted = mean_squared_error(samples.test_targets,y_pred,sample_weight = samples.test_class_weight_vector)
-        corr,p_value = stats.spearmanr(samples.test_targets,y_pred)
+        r2 = r2_score(test_targets,y_pred)
+        mse = mean_squared_error(test_targets,y_pred)
+        corr,p_value = stats.spearmanr(test_targets,y_pred)
 
         print('R2-Score: ',r2)
         print('MSE: ',mse)
-        print('R2-Score weighted: ',r2_weighted)
-        print('MSE weighted: ',mse_weighted)
         print('Spearman correlation and p-value: ',corr,p_value)
 
-        if pred_file != None and config.produce_scatterplot and config.regression:
-            base_name,f_type = pred_file.rsplit('.',1)
-            scatterfile = '%s.png' % (base_name)
-            hexbinfile = '%s_hexbin.png' % (base_name)
+        prot_wise_spearmans, mean_spearman = util.calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.spearmanr)
+        prot_wise_pearsons, mean_pearson = util.calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.pearsonr)
+
+        print(f'Prot-wise mean pearson: {mean_pearson}')
+        print(f'Prot-wise mean spearman: {mean_spearman}')
+
+        write_protein_wise_pearsons(f'{config.outfolder}/protein_wise_results.tsv', protein_wise_results, protein_info)
+
+        if config.produce_scatterplot:
+            scatterfile = f'{config.outfolder}/predicted_value_scatterplot.png'
+            hexbinfile = f'{config.outfolder}/predicted_value_hexbinplot.png'
 
             y_pred_median = util.median(y_pred)
-            tv_median = util.median(samples.test_targets)
-            util.scatterplot(y_pred,samples.test_feature_matrix,samples.feature_names,samples.test_targets,config.target_values,y_pred_median,tv_median,scatterfile)
-            util.hexbinplot(y_pred,samples.test_targets,config.target_values,hexbinfile)
+            tv_median = util.median(test_targets)
+            util.scatterplot(y_pred, test_feature_matrix, extern_feature_names_list, test_targets, config.target_values, y_pred_median, tv_median, scatterfile)
+            util.hexbinplot(y_pred, test_targets, config.target_values, hexbinfile)
 
     else:
-        acc = accuracy_score(samples.test_targets,y_pred)
-        int_targets = classToInt(samples.test_targets,samples)
+        acc = accuracy_score(test_targets, y_pred)
+        int_targets = classToInt(test_targets, samples)
         int_preds = classToInt(y_pred,samples)
         roc = roc_auc_score(int_targets,int_preds)
 
@@ -319,11 +343,13 @@ def evaluate_dataset(config,forest_file,datafile= None ,indatafile= None ,debug 
         print('MCC:',mcc)
     return
 
-def writeOutput(config,filename,y_pred,cv_slice,sampleSpace,append=False):
+def writeOutput(config, y_pred, cv_slice, sampleSpace, append=False):
 
     feature_names = cv_slice.feature_names
 
-    header = 'Uniprot Ac\tAAC\tTarget value\tPredicted value\tError\t%s' % '\t'.join(feature_names)
+    long_feat_name_string = "\t".join(feature_names)
+
+    header = f'Protein Identifier\tAmino Acid Change\tTarget value\tPredicted value\tError\t{long_feat_name_string}\n'
     if not append:
         outlines = [header]
     else:
@@ -332,7 +358,7 @@ def writeOutput(config,filename,y_pred,cv_slice,sampleSpace,append=False):
     color_map = {}
     for pos,sample_id in enumerate(cv_slice.test_sample_ids):
         u_ac,aac = sample_id
-        target_value = cv_slice.test_targets
+        target_value = cv_slice.test_targets[pos]
         aac_base = aac[:-1]
         if not u_ac in color_map:
             color_map[u_ac] = {}
@@ -353,12 +379,13 @@ def writeOutput(config,filename,y_pred,cv_slice,sampleSpace,append=False):
             feature_value = feat.value_map[sample_id]
             feature_vector.append(feat.string_convert(feature_value))
 
-        outlines.append('%s\t%s\t%s\t%s\t%s\t%s' % (u_ac,aac,str(target_value),str(y_pred[pos]),str(error),'\t'.join(feature_vector)))
+        outlines.append('%s\t%s\t%s\t%s\t%s\t%s\n' % (u_ac,aac,str(target_value),str(y_pred[pos]),str(error),'\t'.join(feature_vector)))
+    outfile = f'{config.outfolder}/{config.dataset_name}_stratified_predictions.tsv'
     if not append :
-        f = open(filename,'w')
+        f = open(outfile,'w')
     else:
-        f = open(filename,'a')
-    f.write('\n'.join(outlines))
+        f = open(outfile,'a')
+    f.write(''.join(outlines))
     f.close()
 
     """
@@ -414,9 +441,10 @@ def loadModel(fn):
     print('\n============\nLoaded model from %s\n============\n' % fn)
     return model, feature_names, config
 
-def buildFinalModel(samples, config, outfile = None, filtered_features_file = None):
-    cross_val_obj = sampleSpace.FullSlice(samples, config)
+def buildFinalModel(samples, config, subslice, outfile = None, filtered_features_file = None):
+    cross_val_obj = sampleSpace.FullSlice(samples, config, subslice)
     cv_slice = cross_val_obj.slices[0]
+    cv_slice.subslice = subslice
     cv_slice.printBalance(config)
 
     forest,scores = trainForest.trainForest(config, cv_slice, samples = samples, distance_map = samples.geometric_distance_map, print_out = True,skip_scoring = True)

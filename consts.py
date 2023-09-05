@@ -5,3 +5,5 @@ FEAT_NAME_SYNONYMS = {
     'Mainchain Location' : 'Mainchain location',
     'Sidechain Location' : 'Sidechain location'
 }
+
+refseq_datasets = ['ref50','ref90']
