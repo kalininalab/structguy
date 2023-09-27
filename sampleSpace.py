@@ -783,6 +783,8 @@ class DataSAIL_cv(CrossValidation):
 
         self.prots = list(prots)
 
+        sequence_map = util.generate_sequence_file(prots, config)
+        sampleSpace.sequence_map = sequence_map
 
         datasail_test_size = 100 // config.crossValidation_fold
         datasail_train_size = 100 - datasail_test_size
@@ -798,26 +800,27 @@ class DataSAIL_cv(CrossValidation):
 
         raw_datasail_splits = datasail(e_data = config.path_to_sequence_fasta, e_weights = weight_map, splits = splits, techniques = ['CCSe'], names = names, e_type = 'P', solver = 'SCIP')
 
-        datasail_splits = raw_datasail_splits[0]['CCS'][0]
+        #print(raw_datasail_splits)
+
+        datasail_splits = raw_datasail_splits[0]['CCSe'][0]
         print(datasail_splits)
 
         train_test_pairs = {}
         for cv_counter in range(config.crossValidation_fold):
-            train_test_pairs[cv_counter] = [[], [], []]
+            train_test_pairs[cv_counter] = [[], [], {}]
 
         for prot_id in datasail_splits:
             split_name = datasail_splits[prot_id]
             cv_counter = int(split_name.split('_')[1])
-            subslice_counter = cv_counter + 1
-            if subslice_counter == config.crossValidation_fold:
-                subslice_counter = 0
+
             for cv in train_test_pairs:
                 if cv == cv_counter:
                     train_test_pairs[cv][1].append(prot_id)
                 else:
                     train_test_pairs[cv][0].append(prot_id)
-                    if cv == subslice_counter:
-                        train_test_pairs[cv][2].append(prot_id)
+                    if cv_counter not in train_test_pairs[cv][2]:
+                        train_test_pairs[cv][2][cv_counter] = set()
+                    train_test_pairs[cv][2][cv_counter].add(prot_id)
 
 
         if config.verbosity >= 2:
@@ -827,7 +830,7 @@ class DataSAIL_cv(CrossValidation):
 
         init_ids = []
         for cv_counter in train_test_pairs:
-            train_set, test_set, subslice = train_test_pairs[cv_counter]
+            train_set, test_set, _ = train_test_pairs[cv_counter]
 
             if config.verbosity >= 2:
                 print(f'Init datasail slice {cv_counter}: {test_set}')
@@ -841,13 +844,9 @@ class DataSAIL_cv(CrossValidation):
             self.slices[cv_counter] = cv_slice
             self.slice_ids.append(cv_counter)
             if train_test_pairs[cv_counter][2] is not None:
-                self.slices[cv_counter].subslice = train_test_pairs[cv_counter][2]
-            else:
-                train_set = train_test_pairs[cv_counter][0]
-                if len(train_set) == 1:
-                    self.slices[cv_counter].subslice = []
-                else:
-                    self.slices[cv_counter].subslice = train_set[0]
+                self.slices[cv_counter].subslices = []
+                for subslice_counter in train_test_pairs[cv_counter][2]:
+                    self.slices[cv_counter].subslices.append(train_test_pairs[cv_counter][2][subslice_counter])
 
 @ray.remote(max_calls = 1)
 def distance_weighting_subroutine(store, package):

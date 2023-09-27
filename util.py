@@ -1548,6 +1548,29 @@ def parseFeatureList(featureFile):
         feature_list.append(line.strip())
     return feature_list
 
+def generate_sequence_file(prot_ids, config):
+    cols = ['Primary_Protein_Id', 'Sequence']
+    results = structman.lib.database.database.select(config.structman_config, cols, 'Protein', in_rows = {'Primary_Protein_Id': prot_ids})
+    sequence_map = {}
+    fasta_lines = []
+    for row in results:
+        prot_id = row[0]
+        seq = row[1]
+        fasta_lines.append(f'>{prot_id}\n')
+        fasta_lines.append(f'{seq}\n')
+        sequence_map[prot_id] = seq
+
+    base_name = f'{config.outfolder}/{config.dataset_name}'
+    tmp_seq_file = '%s_sequences.fasta' % (base_name)
+
+    f = open(tmp_seq_file, 'w')
+    f.write(''.join(fasta_lines))
+    f.close()
+
+    config.path_to_sequence_fasta = tmp_seq_file
+    return sequence_map
+
+
 def calculateCorrelationMatrix(config,indatafile,outfile,list_of_features,addTargetValue=False):
     samples = learn.createTrainingSet(config,config.session,infile=indatafile,debug=config.debug)
     samples.oneHotifyAll()
