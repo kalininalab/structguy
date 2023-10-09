@@ -90,6 +90,7 @@ class Config:
         #Confusion feature selection
         self.sequential_confusion_rank_threshold = 91
         self.confusion_rank_threshold = 311
+        self.confusion_goodwill = 0.3720368#0.62#0.25        
         self.err_warping_exp = 1.584#1.9855 #4.0
         self.confusion_normalization_exp = 1.2
 
@@ -155,7 +156,6 @@ class Config:
         self.reg_alpha_exp = 3.5 #1.5215717821360353
         self.reg_c_exp = 3.
         self.reg_thresh_exp = 20.
-        self.confusion_goodwill = 0.3720368#0.62#0.25
         self.list_ranking_thresh = 150
 
         self.maximal_exp = 19.0
@@ -517,7 +517,7 @@ class Config:
             self.criterion = 'gini'
             self.criteria = ['gini','entropy']
         else:
-            self.objective_function = 'Pearson'#'Spearman'#'MSE'
+            self.objective_function = 'Mean Spearman'#'Pearson'#'Spearman'#'MSE'
             self.criterion = 'friedman_mse'
             self.criteria = ['friedman_mse']#,'mae']
 

@@ -4,6 +4,10 @@ import sampleSpace
 import numpy as np
 import ray
 import trainForest
+import statistics
+import time
+
+from structman.base_utils.base_utils import calculate_chunksizes, pack, unpack
 
 def findAndAnalyseInterestingSample(forest, cv_slice, config):
     worst_sample, best_effect_sample = findInterestingSamples(forest, cv_slice, config)
@@ -73,6 +77,137 @@ def findRepresentativeTree(forest, feat_vec):
             repr_tree = tree_id
 
     return forest.estimators_[repr_tree]
+
+@ray.remote(max_calls = 1)
+def calculate_tree_weights(store, chunk):
+    forest = store
+
+    output = []
+
+    for sample_id, pred_x, feat_vec in chunk:
+        weight_vector = []
+        tree_preds = []
+        for tree in forest.estimators_:
+            tree_pred = tree.predict([feat_vec])[0]
+            tree_preds.append(tree_pred)
+            weight = max([0, abs(pred_x - tree_pred)])
+            weight_vector.append(weight)
+
+        pred_std = statistics.stdev(tree_preds)
+        output.append((sample_id, weight_vector, pred_std))
+    return output
+
+def explain_decisions(config, forest, prediction_vector, feat_vecs, feature_names):
+    t0 = time.time()
+
+    weight_vectors = [0]*len(feat_vecs)
+    weighted_feat_threshs = []
+    pred_std_vector = [0]*len(feat_vecs)
+    store = ray.put(forest)
+
+    small_chunksize, big_chunksize, n_of_small_chunks, n_of_big_chunks = calculate_chunksizes(config.proc_n, len(feat_vecs))
+
+    chunk_process_ids = []
+    chunk = []
+
+    for sample_id, feat_vec in enumerate(feat_vecs):
+        weighted_feat_threshs.append({}) #just for initialization
+        chunk.append((sample_id, prediction_vector[sample_id], feat_vec))
+        if n_of_small_chunks > 0 and len(chunk_process_ids) < n_of_small_chunks:
+            if len(chunk) == small_chunksize:
+                chunk_process_ids.append(calculate_tree_weights.remote(store, chunk))
+                chunk = []
+                continue
+        else:
+            if len(chunk) == big_chunksize:
+                chunk_process_ids.append(calculate_tree_weights.remote(store, chunk))
+                chunk = []
+                continue
+
+    para_results = ray.get(chunk_process_ids)
+
+    for chunk_result in para_results:
+        for (sample_id, weight_vector, pred_std) in chunk_result:
+            weight_vectors[sample_id] = weight_vector
+            pred_std_vector[sample_id] = pred_std
+
+
+    t1 = time.time()
+    print(f'Explain decisions part 1: {t1-t0}')
+
+    small_chunksize, big_chunksize, n_of_small_chunks, n_of_big_chunks = calculate_chunksizes(config.proc_n, len(forest.estimators_))
+
+    chunk_process_ids = []
+    chunk = []
+    store = ray.put((feat_vecs, feature_names))
+
+    for tree_id, tree in enumerate(forest.estimators_):
+        chunk.append((tree_id, tree))
+        if n_of_small_chunks > 0 and len(chunk_process_ids) < n_of_small_chunks:
+            if len(chunk) == small_chunksize:
+                chunk_process_ids.append(calc_thresh_maps.remote(chunk, store))
+                chunk = []
+                continue
+        else:
+            if len(chunk) == big_chunksize:
+                chunk_process_ids.append(calc_thresh_maps.remote(chunk, store))
+                chunk = []
+                continue
+
+    t2 = time.time()
+    print(f'Explain decisions part 2: {t2-t1}')
+
+    para_results = ray.get(chunk_process_ids)
+
+    t3 = time.time()
+    print(f'Explain decisions part 3: {t3-t2}, {len(para_results)}')
+
+    for packed_chunk_result in para_results:
+        chunk_result = unpack(packed_chunk_result)
+        for tree_id, threshold_maps in chunk_result:
+            for sample_id, threshold_map in enumerate(threshold_maps):
+                weight = weight_vectors[sample_id][tree_id]
+                for feat_name in threshold_map:
+                    threshs = threshold_map[feat_name]
+                    if feat_name not in weighted_feat_threshs[sample_id]:
+                        weighted_feat_threshs[sample_id][feat_name] = [0, []]
+                    weighted_feat_threshs[sample_id][feat_name][0] += weight*len(threshs)
+                    weighted_feat_threshs[sample_id][feat_name][1] += threshs
+
+    feat_name_backmap = {}
+    for feat_number, feat_name in enumerate(feature_names):
+        feat_name_backmap[feat_name] = feat_number
+
+    t4 = time.time()
+    print(f'Explain decisions part 4: {t4-t3}')
+
+    decisions = []
+    for sample_id, weighted_feat_thresh_map in enumerate(weighted_feat_threshs):
+        processed_feat_thresh_vector = []
+        for feat_name in weighted_feat_thresh_map:
+            feat_value = feat_vecs[sample_id][feat_name_backmap[feat_name]]
+            total_weight, all_threshs = weighted_feat_thresh_map[feat_name]
+            l = None
+            r = None
+            for thresh in all_threshs:
+                if thresh <= feat_value:
+                    if l is None:
+                        l = thresh
+                    elif thresh > l:
+                        l = thresh
+                else:
+                    if r is None:
+                        r = thresh
+                    elif thresh < r:
+                        r = thresh
+            processed_feat_thresh_vector.append((feat_name, total_weight, l, r))
+        processed_feat_thresh_vector.sort(key=lambda x:x[1],reverse=True)
+        decisions.append(processed_feat_thresh_vector)
+
+    t5 = time.time()
+    print(f'Explain decisions part 5: {t5-t4}')
+    return decisions, pred_std_vector
+
 
 def tracebackTree(t, feat_vec, feature_names, true_value):
     #indicator, n_nodes_ptr = forest.decision_path([feat_vec])
@@ -261,6 +396,35 @@ def calc_confusion(raw_err, goodwill_interval, err_warping_exp):
         sign = -1
     warped_err = sign * (abs(err) ** err_warping_exp)
     return warped_err
+
+def calc_tree_threshold_maps(tree, feat_vecs, feature_names):
+    node_indicator = tree.decision_path(feat_vecs)
+    leave_id_vector = tree.apply(feat_vecs)
+
+    threshold_maps = []
+    for sample_id, feat_vec in enumerate(feat_vecs):
+        node_index = node_indicator.indices[node_indicator.indptr[sample_id]:
+                                            node_indicator.indptr[sample_id + 1]]
+        threshold_map = {}
+        for node_id in node_index:
+            if leave_id_vector[sample_id] == node_id:
+                continue
+            feat_name = feature_names[tree.tree_.feature[node_id]]
+            thresh = tree.tree_.threshold[node_id]
+            if feat_name not in threshold_map:
+                threshold_map[feat_name] = []
+            threshold_map[feat_name].append(thresh)
+        threshold_maps.append(threshold_map)
+    return threshold_maps
+
+@ray.remote(max_calls = 1)
+def calc_thresh_maps(trees, store):
+    feat_vecs, feature_names = store
+    output = []
+    for tree_id, tree in trees:
+        threshold_maps = calc_tree_threshold_maps(tree, feat_vecs, feature_names)
+        output.append((tree_id, threshold_maps))
+    return pack(output)
 
 def explore_tree(estimator, n_nodes, children_left,children_right, feature, threshold, X_test, y_test,
                 print_tree = False, sample_id=0, feature_names=None):
