@@ -314,6 +314,32 @@ def evaluate_dataset(config):
 
         write_protein_wise_pearsons(f'{config.outfolder}/protein_wise_results.tsv', protein_wise_results, protein_info)
 
+        decisions, pred_std_vector = featureAnalysis.explain_decisions(config, forest, y_pred, test_feature_matrix, extern_feature_names_list)
+
+        header = 'Protein ID\tSAV\tPredicted effect value\tTree-wise standard deviation\tFeature 1\tFeature 2\t Feature 3\t Feature 4\t Feature 5\n'
+        lines = [header]
+        for pos, sample_id in enumerate(sample_id_list):
+            pred_value = y_pred[pos]
+            prot_id, aac = sample_id
+            pred_std = pred_std_vector[pos]
+            feature_decisions = decisions[pos]
+            words = [prot_id, aac, str(pred_value), str(pred_std)]
+            for feat_name, weight, left_thresh, right_thresh in feature_decisions[:5]:
+                if left_thresh is None:
+                    decision_string = f'{feat_name} < {right_thresh}'
+                elif right_thresh is None:
+                    decision_string = f'{feat_name} >= {left_thresh}'
+                else:
+                    decision_string = f'{feat_name} in [{left_thresh}, {right_thresh}]'
+                words.append(decision_string)
+            line = '\t'.join(words) + '\n'
+            lines.append(line)
+
+        predictions_file = f'{config.outfolder}/predictions.tsv'
+        f = open(predictions_file, 'w')
+        f.write(''.join(lines))
+        f.close()
+
         if config.produce_scatterplot:
             scatterfile = f'{config.outfolder}/predicted_value_scatterplot.png'
             hexbinfile = f'{config.outfolder}/predicted_value_hexbinplot.png'
@@ -342,6 +368,7 @@ def evaluate_dataset(config):
         print('Recall:',recall)
         print('MCC:',mcc)
     return
+
 
 def writeOutput(config, y_pred, cv_slice, sampleSpace, append=False):
 

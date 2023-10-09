@@ -1172,8 +1172,10 @@ def threeDimHyperOptimization(config, cv_obj, best_scores, distance_map = None, 
         if n > 1:
             cv_obj.reset_confusion_maps()
 
-        bayesian_optimisation(None, config, list(fs_parameters.values()), score_matrix, cv_obj, best_scores, distance_map, samples = samples, n_pre_samples = None, force_remote = False, debug = debug)
-
+        new_opti, best_scores = bayesian_optimisation(None, config, list(fs_parameters.values()), score_matrix, cv_obj, best_scores, distance_map, samples = samples, n_pre_samples = None, force_remote = False, debug = debug)
+        if new_opti:
+            converged = False
+            
         for param in [parameters]:
             param_names = list(param.keys())
             random.shuffle(param_names)
