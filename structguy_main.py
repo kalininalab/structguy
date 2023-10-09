@@ -1,4 +1,6 @@
 #!/usr/bin/python
+# python ../structguy/structguy_main.py generate_features -f Output/envision_tr_correct/envision_tr_correct.features.tsv -c envision_config.txt --sm_conf config.txt -o structGuy_feature_output
+# python ../structguy/structguy_main.py build_model -f structGuy_feature_output/envision_tr_correct.features_structguy_features.tsv -c envision_config.txt --sm_conf config.txt -o structGuy_feature_output
 import sys
 import getopt
 import os
@@ -19,8 +21,10 @@ def parse_arguments(argument_start = 2):
     argv = sys.argv[argument_start:]
     try:
         long_paras = [
-            'verbosity=',
-            'sm_conf='
+            'verbosity=', #from 1 to 5
+            'sm_conf=',
+            'hp=',
+            'nocv' # Skip Cross Validation
         ]
         opts, args = getopt.getopt(argv, "p:f:c:o:s:n:m:", long_paras)
 
@@ -35,7 +39,10 @@ def parse_arguments(argument_start = 2):
     path_to_sequence_fasta = None
     verbosity_overwrite = None
     path_to_processed_feature_file = None
+    path_to_hyperparameters_file = None
     path_to_model = None
+
+    skip_cv = False
 
     overwrite_proc_n = None
 
@@ -76,8 +83,14 @@ def parse_arguments(argument_start = 2):
         if opt == '-p':
             path_to_processed_feature_file = arg
 
+        if opt == '--hp':
+            path_to_hyperparameters_file = arg
+
         if opt == '-n':
             overwrite_proc_n = int(arg)
+            
+        if opt == '--nocv':
+            skip_cv = True
 
     if path_to_processed_feature_file is not None:
         primary_dataset_file_path = path_to_processed_feature_file
@@ -95,7 +108,7 @@ def parse_arguments(argument_start = 2):
     if outfolder is None:
         outfolder = _outfolder
 
-    config = util.Config(path_to_config)
+    config = util.Config(path_to_config, path_to_hyperparameters_file)
 
     config.outfolder = outfolder
     config.dataset_name = dataset_name
@@ -105,6 +118,9 @@ def parse_arguments(argument_start = 2):
     config.path_to_sequence_fasta = path_to_sequence_fasta
     config.path_to_processed_feature_file = path_to_processed_feature_file
     config.path_to_model = path_to_model
+    print('pre SKIP', config.skip_cv)
+    config.skip_cv = skip_cv
+    print('pre SKIP', config.skip_cv)
 
     if overwrite_proc_n is not None:
         config.proc_n = overwrite_proc_n
@@ -123,6 +139,10 @@ def feature_generator_main():
 
 def build_model_main():
     config = parse_arguments()
+    print('fun SKIP', config.skip_cv)
+    # if config.verbosity > 0:
+    #     print(config.printHyperParameter())
+
     config.structman_config = str_main.Config(config.path_to_structman_config, external_call = True, verbosity = config.verbosity, num_of_cores = config.proc_n)
 
     import structman.base_utils.ray_utils as ray_utils

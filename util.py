@@ -18,7 +18,7 @@ from matplotlib.projections import register_projection
 import structman
 
 class Config:
-    def __init__(self,config_path):
+    def __init__(self,config_path, hyperparameters_path):
 
         self.profiling = False
         self.db_adress = ""
@@ -208,8 +208,9 @@ class Config:
             if len(words) < 2:
                 continue
 
-            opt = words[0]
-            arg = words[1].replace("\n","")
+            # Set config values and remove leading/trailling whitespaces
+            opt = words[0].strip()
+            arg = words[1].replace("\n","").strip()
 
             if opt == 'proc_n':
                 self.proc_n = int(arg)
@@ -477,7 +478,12 @@ class Config:
                 self.geometric_exponent = float(arg)
 
             elif opt == 'skip_cv':
-                self.skip_cv = True
+                print("arg SKIP CV", opt, arg)
+                if arg == 'True':
+                    self.skip_cv = True
+                elif arg == 'False':
+                    self.skip_cv = False
+                print("config SKIP CV", self.skip_cv)
 
             elif opt == 'hpo_do_feat_selection':
                 if arg == 'True':
@@ -517,6 +523,113 @@ class Config:
 
         if overwrite_objective_function != None:
             self.objective_function = overwrite_objective_function
+
+        #Hyperparameters setup if an HP file is provided
+        if hyperparameters_path is not None:
+            f_hp = open(hyperparameters_path, 'r')
+            lines_hp = f_hp.read().split('\n')
+            f_hp.close()
+
+            for line in lines_hp:
+                if len(line) == 0:
+                    continue
+                if line[0] == '#':
+                    continue
+                
+                words = line.split('=')
+                # CHeck the 'param = value' format
+                if len(words) != 2:
+                    continue
+                
+                # Set hyperparameter value
+                opt = words[0].strip()
+                arg = words[1].replace("\n","").strip()
+
+                if opt == 'tree_depth':
+                    self.tree_depth = int(arg)
+                    continue
+                if opt == 'min_sample_split':
+                    self.min_sample_split = int(arg)
+                    continue
+                if opt == 'tree_min_leaf_samples':
+                    self.tree_min_leaf_samples = int(arg)
+                    continue
+                if opt == 'num_of_trees':
+                    self.num_of_trees = int(arg)
+                    continue
+                # if opt == 'rel_max_leaf_node_pruning':
+                #     self.rel_max_leaf_node_pruning = None
+                #     continue
+                if opt == 'max_leaf_nodes':
+                    try:
+                        self.max_leaf_nodes = int(arg)
+                    except:
+                        pass
+                    continue
+                if opt == 'class_weight':
+                    if arg == "None":
+                        self.class_weight = None
+                    elif arg in ('balanced','balanced_subsample'):
+                        self.class_weight = arg
+                    continue
+                if opt == 'max_feature_parameter':
+                    if arg in ('auto','log2','sqrt'):
+                        self.max_feature_parameter = arg
+                    continue
+                if opt == 'max_feature_cont_parameter':
+                    flarg = float(arg)
+                    if flarg >= 0 and flarg <= 1:
+                        self.max_feature_cont_parameter = flarg
+                    continue
+                if opt == 'bootstrap_parameter':
+                    if arg == "True":
+                        self.bootstrap_parameter = True
+                    if arg == "False":
+                        self.bootstrap_parameter = False
+                    continue
+                if opt == 'min_impurity_decrease_exp':
+                    self.min_impurity_decrease_exp = float(arg)
+                    continue
+                if opt == 'oob_score':
+                    if arg == "True":
+                        self.oob_score = True
+                    if arg == "False":
+                        self.oob_score = False
+                    continue
+                if opt == 'ccp_alpha_exp':
+                    self.ccp_alpha_exp = float(arg)
+                    continue
+                if opt == 'max_sample_parameter':
+                    flarg = float(arg)
+                    if flarg >= 0 and flarg <= 1:
+                        self.max_sample_parameter = flarg
+                    continue
+                if opt == 'number_of_bins':
+                    self.number_of_bins = int(arg)
+                    continue
+                if opt == 'p_val_thresh':
+                    self.p_val_thresh = float(arg)
+                    continue
+                if opt == 'sample_weight_parameter':
+                    self.sample_weight_parameter = float(arg)
+                    continue
+                if opt == 'reg_alpha_exp':
+                    self.reg_alpha_exp = float(arg)
+                    continue
+                if opt == 'reg_c_exp':
+                    self.reg_c_exp = float(arg)
+                    continue
+                if opt == 'reg_thresh_exp':
+                    self.reg_thresh_exp = float(arg)
+                    continue
+                if opt == 'confusion_goodwill':
+                    flarg = float(arg)
+                    if flarg >= 0 and flarg <= 1:
+                        self.confusion_goodwill = flarg
+                    continue
+                if opt == 'list_ranking_thresh':
+                    self.list_ranking_thresh = int(arg)
+                    continue
 
         #self.blacklist = ['P28482']#set(['P28482','P42212','P38398','P06654','Q9UK59','P04386','P00552'])
     
@@ -781,6 +894,30 @@ class Config:
         print('Geometric exponent:', self.geometric_exponent)
         print(f'Confusion goodwill: {self.confusion_goodwill}')
         print(f'List ranking thresh: {self.list_ranking_thresh}')
+        return
+
+    def printHyperParameter(self):
+        print("tree_depth", self.tree_depth)
+        print("min_sample_split", self.min_sample_split)
+        print("tree_min_leaf_samples", self.tree_min_leaf_samples)
+        print("num_of_trees", self.num_of_trees)
+        print("max_leaf_nodes", self.max_leaf_nodes)
+        print("class_weight", self.class_weight)
+        print("max_feature_parameter", self.max_feature_parameter)
+        print("max_feature_cont_parameter", self.max_feature_cont_parameter)
+        print("bootstrap_parameter", self.bootstrap_parameter)
+        print("min_impurity_decrease_exp", self.min_impurity_decrease_exp)
+        print("oob_score", self.oob_score)
+        print("ccp_alpha_exp", self.ccp_alpha_exp)
+        print("max_sample_parameter", self.max_sample_parameter)
+        print("number_of_bins", self.number_of_bins)
+        print("p_val_thresh", self.p_val_thresh)
+        print("sample_weight_parameter", self.sample_weight_parameter)
+        print("reg_alpha_exp", self.reg_alpha_exp)
+        print("reg_c_exp", self.reg_c_exp)
+        print("reg_thresh_exp", self.reg_thresh_exp)
+        print("confusion_goodwill", self.confusion_goodwill)
+        print("list_ranking_thresh", self.list_ranking_thresh)
         return
 
 class Scores:
