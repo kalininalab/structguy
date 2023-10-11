@@ -921,12 +921,18 @@ class Config:
         return
 
 class Scores:
-    __slots__ = ['mse', 'wmse', 'r2', 'wr2', 'corr', 'acc', 'roc', 'precision', 'recall', 'f1', 'mcc', 'pearson_r', 'n_of_features', 'mean_spearman', 'mean_pearson']
-    def __init__(self, mse = None, r2 = None, corr = None, acc = None, roc = None, precision = None, recall = None,
-                 f1 = None, mcc = None, pearson_r = None, zero = False, wmse = None, wr2 = None, optimal = False, n_of_features = None,
-                 mean_spearman = None, mean_pearson = None
+    __slots__ = [
+                    'mse', 'wmse', 'r2', 'wr2', 'corr', 'acc', 'roc', 'precision', 'recall', 'f1',
+                    'mcc', 'pearson_r', 'n_of_features', 'mean_spearman', 'mean_pearson', 'feature_penalty'
+                ]
+    def __init__(
+                    self, mse = None, r2 = None, corr = None, acc = None, roc = None, precision = None,
+                    recall = None, f1 = None, mcc = None, pearson_r = None, zero = False, wmse = None,
+                    wr2 = None, optimal = False, n_of_features = None, mean_spearman = None, 
+                    mean_pearson = None, feature_penalty = None
                 ):
         self.n_of_features = n_of_features
+        self.feature_penalty = feature_penalty
         if zero:
             self.mse = float('inf')
             self.wmse = float('inf')
@@ -1006,6 +1012,8 @@ class Scores:
             print('-F1:',self.f1)
         if self.mcc != None:
             print('-MCC:',self.mcc)
+        if self.feature_penalty != None:
+            print(f'Feature penalty term: {self.feature_penalty}')
 
         print('------------------------------')
         return
@@ -1096,10 +1104,12 @@ def get_objective_score(config, scores, feature_penalty = None):
         raise 'Unknown objective function'
 
     if feature_penalty is not None and scores.n_of_features is not None:
+        scores.feature_penalty = scores.n_of_features*feature_penalty
         if greater_is_better:
-            score -= scores.n_of_features*feature_penalty
+            score -= scores.feature_penalty
         else:
-            score += scores.n_of_features*feature_penalty
+            score += scores.feature_penalty
+        
 
     return score
 

@@ -204,7 +204,7 @@ def bayes_random_init(config, parameters, score_matrix, cv_obj, best_scores, n_p
     for scores, params in results:
         if scores.objective_value(config) is None:
             print('========= Warning: None objective score for:', param_names, params)
-            scores = util.Scores(zero=True, n_of_features = len(cv_obj.feature_names))
+            scores = util.Scores(zero=True)
         #addToScoreMatrix(scores, config, score_matrix)
         obj_sc = scores.objective_value(config)
         x_list.append(params)
