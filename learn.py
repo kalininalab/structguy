@@ -109,6 +109,7 @@ def learn(config, effectRegressor=None):
 
     print("SKIP CV", config.skip_cv)
     if not config.skip_cv:
+        print("SKIP CV IN")
 
         if crossValidation == 'LOPO':
             cross_val_obj = sampleSpace.LOPO(samples, config)

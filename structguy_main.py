@@ -4,6 +4,7 @@
 import sys
 import getopt
 import os
+import time
 
 import featureGenerator
 import util
@@ -42,7 +43,7 @@ def parse_arguments(argument_start = 2):
     path_to_hyperparameters_file = None
     path_to_model = None
 
-    skip_cv = False
+    skip_cv = None
 
     overwrite_proc_n = None
 
@@ -119,7 +120,8 @@ def parse_arguments(argument_start = 2):
     config.path_to_processed_feature_file = path_to_processed_feature_file
     config.path_to_model = path_to_model
     print('pre SKIP', config.skip_cv)
-    config.skip_cv = skip_cv
+    if skip_cv is not None:
+        config.skip_cv = True
     print('pre SKIP', config.skip_cv)
 
     if overwrite_proc_n is not None:
@@ -162,6 +164,7 @@ def predict_main():
 
 def main():
 
+    start_time = time.time()
     possible_key_words = set(['generate_features', 'build_model', 'predict'])
 
     key_word = sys.argv[1]
@@ -178,6 +181,8 @@ def main():
 
     if key_word == 'predict':
         predict_main()
+
+    print("--- %s seconds ---" % (time.time() - start_time))
 
 if __name__ == "__main__":
     main()
