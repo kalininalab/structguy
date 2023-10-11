@@ -644,13 +644,19 @@ class Tag_nested_cv(CrossValidation):
         """
 
 class FullSlice(CrossValidation):
-    def __init__(self, sampleSpace, config, train_equal_test = False):
+    def __init__(self, sampleSpace, config, internal_cv = None, train_equal_test = False):
         super().__init__()
         
         self.slice_ids.append(0)
 
-        cv_slice = CrossValidationSlice([], list(sampleSpace.samples.keys()), sampleSpace, config, train_equal_test = train_equal_test)
-        self.slices[0] = cv_slice
+        full_slice_obj = CrossValidationSlice([], list(sampleSpace.samples.keys()), sampleSpace, config, train_equal_test = train_equal_test)
+
+        if internal_cv is not None:
+            full_slice_obj.slice_slices = []
+            for slice_id in internal_cv.slices:
+                full_slice_obj.slice_slices.append(internal_cv.slices[slice_id])
+
+        self.slices[0] = full_slice_obj
 
 class X_fold_cv(CrossValidation):
     def __init__(self, sampleSpace, config, x_fold):

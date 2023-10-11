@@ -170,8 +170,6 @@ def learn(config, effectRegressor=None):
         for cv_counter in cross_val_obj.slices:
             cv_slice = cross_val_obj.slices[cv_counter]
 
-            full_model_subslice = cv_slice.test_prots
-
             print(cv_counter, len(cv_slice.train_targets))
             print('Testset length: ',len(cv_slice.test_targets))
 
@@ -251,6 +249,15 @@ def learn(config, effectRegressor=None):
                 title = 'Pearson\'s correlation'
                 radarfile = '%s_radar.png' % (base_name)
                 util.radar(labels,values,title,radarfile)
+    elif config.feature_selection == 'confusion' or config.feature_selection == 'confusion_and_regu' or config.feature_selection == 'sequential_confusion' or config.feature_selection == 'threeStaged' or config.feature_selection == 'sequential_confusion_and_regu' or config.feature_selection == 'threeStaged_listranking':
+        if crossValidation == 'LOPO':
+            cross_val_obj = sampleSpace.LOPO(samples, config)
+        elif crossValidation == 'DataSAIL':
+            cross_val_obj = sampleSpace.DataSAIL_cv(samples, config)
+        else:
+            cross_val_obj = sampleSpace.X_fold_cv(samples, config, crossValidation)
+    else:
+        cross_val_obj = None
 
     if config.outfolder != None:
         base_name = f'{config.outfolder}/{config.dataset_name}'
@@ -258,13 +265,12 @@ def learn(config, effectRegressor=None):
 
         filtered_features_file = '%s_filtered_features.tsv' % (base_name)
 
-        buildFinalModel(samples, config, full_model_subslice, outfile = modelfile, filtered_features_file = filtered_features_file)
+        forest = buildFinalModel(samples, config, internal_cv = cross_val_obj, outfile = modelfile, filtered_features_file = filtered_features_file)
 
         if not config.skip_cv:
             cv_file = '%s_full_cv_forests.dump' % (base_name)
             storeCV(forests, config, cross_val_obj, cv_file)
 
-    return forest,cv_slice.feature_names
 
 def evaluate_dataset(config):
     samples = featureGenerator.createTrainingSet(config)
@@ -469,21 +475,25 @@ def loadModel(fn):
     print('\n============\nLoaded model from %s\n============\n' % fn)
     return model, feature_names, config
 
-def buildFinalModel(samples, config, subslice, outfile = None, filtered_features_file = None):
-    cross_val_obj = sampleSpace.FullSlice(samples, config, subslice)
-    cv_slice = cross_val_obj.slices[0]
-    cv_slice.subslice = subslice
-    cv_slice.printBalance(config)
+def buildFinalModel(samples, config, internal_cv = None, outfile = None, filtered_features_file = None):
+    #Some feature selection strategies require an internal cross validation-like slicing
+    #An example is the confusion-based feature section
+    cross_val_obj = sampleSpace.FullSlice(samples, config, internal_cv = internal_cv)
+    full_slice = cross_val_obj.slices[0]
 
-    forest,scores = trainForest.trainForest(config, cv_slice, samples = samples, distance_map = samples.geometric_distance_map, print_out = True,skip_scoring = True)
+    full_slice.printBalance(config)
 
-    feat_importance_map = calcFeatureImportances(forest, samples, cv_slice, config, print_them=True)
+    forest,scores = trainForest.trainForest(config, full_slice, samples = samples, distance_map = samples.geometric_distance_map, print_out = True,skip_scoring = True)
+
+    feat_importance_map = calcFeatureImportances(forest, samples, full_slice, config, print_them=True)
 
     if outfile != None:
-        storeModel(forest, cv_slice.feature_names, config, outfile)
+        storeModel(forest, full_slice.feature_names, config, outfile)
 
     if filtered_features_file != None:
-        cv_slice.write(filtered_features_file)
+        full_slice.write(filtered_features_file)
+
+    return forest
 
 if __name__ == "__main__":
     disclaimer = 'Here comes the disclaimer'

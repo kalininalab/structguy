@@ -149,7 +149,7 @@ def build_model_main():
 
     ray_utils.ray_init(config.structman_config, overwrite_logging_level = 0)
 
-    model,feature_names = learn.learn(config)
+    learn.learn(config)
 
 def predict_main():
     config = parse_arguments()
