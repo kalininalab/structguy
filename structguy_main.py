@@ -119,10 +119,9 @@ def parse_arguments(argument_start = 2):
     config.path_to_sequence_fasta = path_to_sequence_fasta
     config.path_to_processed_feature_file = path_to_processed_feature_file
     config.path_to_model = path_to_model
-    print('pre SKIP', config.skip_cv)
+    
     if skip_cv is not None:
         config.skip_cv = True
-    print('pre SKIP', config.skip_cv)
 
     if overwrite_proc_n is not None:
         config.proc_n = overwrite_proc_n
@@ -141,7 +140,6 @@ def feature_generator_main():
 
 def build_model_main():
     config = parse_arguments()
-    print('fun SKIP', config.skip_cv)
     # if config.verbosity > 0:
     #     print(config.printHyperParameter())
 
