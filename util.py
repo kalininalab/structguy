@@ -18,7 +18,7 @@ from matplotlib.projections import register_projection
 import structman
 
 class Config:
-    def __init__(self,config_path, hyperparameters_path):
+    def __init__(self,config_path, hyperparameters_path = None):
 
         self.profiling = False
         self.db_adress = ""
@@ -627,6 +627,18 @@ class Config:
                     continue
                 if opt == 'list_ranking_thresh':
                     self.list_ranking_thresh = int(arg)
+                    continue
+                if opt == 'sequential_confusion_rank_threshold':
+                    self.sequential_confusion_rank_threshold = int(arg)
+                    continue
+                if opt == 'confusion_rank_threshold':
+                    self.confusion_rank_threshold = int(arg)
+                    continue
+                if opt == 'err_warping_exp':
+                    self.err_warping_exp = float(arg)
+                    continue
+                if opt == 'confusion_normalization_exp':
+                    self.confusion_normalization_exp = float(arg)
                     continue
 
         #self.blacklist = ['P28482']#set(['P28482','P42212','P38398','P06654','Q9UK59','P04386','P00552'])

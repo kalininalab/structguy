@@ -109,7 +109,7 @@ def parse_arguments(argument_start = 2):
     if outfolder is None:
         outfolder = _outfolder
 
-    config = util.Config(path_to_config, path_to_hyperparameters_file)
+    config = util.Config(path_to_config, hyperparameters_path = path_to_hyperparameters_file)
 
     config.outfolder = outfolder
     config.dataset_name = dataset_name
