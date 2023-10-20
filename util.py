@@ -1103,13 +1103,12 @@ def get_objective_score(config, scores, feature_penalty = None):
     else:
         raise 'Unknown objective function'
 
-    if feature_penalty is not None and scores.n_of_features is not None:
+    if feature_penalty is not None and scores.n_of_features is not None and score is not None:
         scores.feature_penalty = scores.n_of_features*feature_penalty
         if greater_is_better:
             score -= scores.feature_penalty
         else:
             score += scores.feature_penalty
-        
 
     return score
 
@@ -1195,8 +1194,10 @@ def mean_scores(scores_list):
     else:
         n_of_features = mean(n_of_features_s)
 
-    scores_obj = Scores(mse = mean(mses),r2 = mean(r2s),corr = mean(corrs),acc = mean(accs),roc = mean(rocs),
-                        precision = mean(precisions),recall = mean(recalls),f1 = mean(f1s),mcc = mean(mccs),pearson_r = mean(pearson_rs), n_of_features = n_of_features)
+    scores_obj = Scores(mse = mean(mses), r2 = mean(r2s), corr = mean(corrs), acc = mean(accs), roc = mean(rocs),
+                        precision = mean(precisions), recall = mean(recalls), f1 = mean(f1s), mcc = mean(mccs),
+                        pearson_r = mean(pearson_rs), mean_pearson = mean(mean_pearsons), mean_spearman = mean(mean_spearmans),
+                        n_of_features = n_of_features)
     return scores_obj
 
 def writeOutput(outfile,feature_names,feature_matrix,id_vector,reg_vector,seq_id_vector,prediction,test_ids,sub_file_id=None):

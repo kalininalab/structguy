@@ -146,6 +146,9 @@ def bayes_random_init(config, parameters, score_matrix, cv_obj, best_scores, n_p
         n_pre_samples = min([config.proc_n, 2**n_params])
 
     print('bayesian optimization:',param_names,n_pre_samples,force_remote)
+    print('Current best scores:')
+    best_scores.printOut()
+    print(f'Objective score: {best_scores.objective_value(config)}')
 
     #if not 'geometric_exponent' in param_names:
     if force_remote:
@@ -202,11 +205,12 @@ def bayes_random_init(config, parameters, score_matrix, cv_obj, best_scores, n_p
     cat_param_map = {}
 
     for scores, params in results:
-        if scores.objective_value(config) is None:
-            print('========= Warning: None objective score for:', param_names, params)
-            scores = util.Scores(zero=True)
-        #addToScoreMatrix(scores, config, score_matrix)
         obj_sc = scores.objective_value(config)
+        if obj_sc is None or obj_sc != obj_sc:
+            print('========= Warning: None or NaN objective score for:', param_names, params)
+            scores = util.Scores(zero=True)
+            obj_sc = scores.objective_value(config)
+
         x_list.append(params)
         y_list.append(obj_sc)
 
@@ -1180,22 +1184,17 @@ def threeDimHyperOptimization(config, cv_obj, best_scores, distance_map = None, 
             param_names = list(param.keys())
             random.shuffle(param_names)
 
-            while len(param_names) > 2:
+            while len(param_names) > 1:
                 param_trio = param_names.pop(), param_names.pop()#, 'confusion_rank_threshold'#param_names.pop()
                 new_opti, best_scores = threeDim(param[param_trio[0]], param[param_trio[1]], fs_parameters['confusion_rank_threshold'], best_scores, config, score_matrix, cv_obj, distance_map, samples = samples)
                 if new_opti:
                     converged = False
 
-            while len(param_names) > 1:
-                param_pair = param_names.pop(), param_names.pop()
-                new_opti, best_scores = twoDim(param[param_pair[0]], param[param_pair[1]], best_scores, config, score_matrix, cv_obj, distance_map, samples = samples)
+            while len(param_names) == 1:
+                new_opti, best_scores = twoDim(param_names.pop(), fs_parameters['confusion_rank_threshold'], best_scores, config, score_matrix, cv_obj, distance_map, samples = samples)
                 if new_opti:
                     converged = False
 
-            if len(param_names) == 1:
-                new_opti, best_scores = optParam(param[param_names[0]], best_scores, config, score_matrix, cv_obj, distance_map, samples = samples)
-                if new_opti:
-                    converged = False
 
         print('Iteration: ',n)
         config.printParameter()
