@@ -107,7 +107,6 @@ def learn(config, effectRegressor=None):
     else:
         distance_map = None
 
-    print("SKIP CV", config.skip_cv)
     if not config.skip_cv:
 
         if crossValidation == 'LOPO':

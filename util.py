@@ -478,12 +478,10 @@ class Config:
                 self.geometric_exponent = float(arg)
 
             elif opt == 'skip_cv':
-                print("arg SKIP CV", opt, arg)
                 if arg == 'True':
                     self.skip_cv = True
                 elif arg == 'False':
                     self.skip_cv = False
-                print("config SKIP CV", self.skip_cv)
 
             elif opt == 'hpo_do_feat_selection':
                 if arg == 'True':
