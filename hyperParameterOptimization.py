@@ -1148,6 +1148,7 @@ def twoDimHyperOptimization(config, cv_obj, best_scores, distance_map):
                 converged = False
 
         print('Iteration: ',n)
+        config.saveHyperParameter(f"hyperparameters_TwoDim_epoch_{n}.conf")
         config.printParameter()
         if best_scores is not None:
             best_scores.printOut()
@@ -1198,6 +1199,7 @@ def threeDimHyperOptimization(config, cv_obj, best_scores, distance_map = None, 
 
         print('Iteration: ',n)
         config.printParameter()
+        config.saveHyperParameter(f"hyperparameters_ThreeDim_epoch_{n}.conf")
         if best_scores is not None:
             best_scores.printOut()
         n += 1

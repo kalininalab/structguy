@@ -144,12 +144,15 @@ def build_model_main():
     #     print(config.printHyperParameter())
 
     config.structman_config = str_main.Config(config.path_to_structman_config, external_call = True, verbosity = config.verbosity, num_of_cores = config.proc_n)
+    config.saveHyperParameter()
 
     import structman.base_utils.ray_utils as ray_utils
 
     ray_utils.ray_init(config.structman_config, overwrite_logging_level = 0)
 
     learn.learn(config)
+
+    config.saveHyperParameter()
 
 def predict_main():
     config = parse_arguments()

@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-import sys
+import sys, os
 import getopt
 import statistics
 import learn
@@ -16,6 +16,19 @@ from matplotlib.projections.polar import PolarAxes
 from matplotlib.projections import register_projection
 
 import structman
+
+class OutputCapture:
+    def __init__(self):
+        self.captured_output = ""
+
+    def write(self, text):
+        self.captured_output += text
+
+    def replace(self, ReplaceFrom, replaceTo):
+        self.captured_output.replace(ReplaceFrom, replaceTo)
+
+    def __str__(self):
+        return self.captured_output
 
 class Config:
     def __init__(self,config_path, hyperparameters_path = None):
@@ -78,6 +91,8 @@ class Config:
         self.hpo_do_feat_selection = True
         self.hpo_do_forest_param = True
         self.hpo_do_sample_weighting = True
+
+        self.hp_outputFile = "hyperparameters.conf"
 
         #reguFS stuff
         self.maxIter = 1000
@@ -659,209 +674,19 @@ class Config:
         #self.remove_t2 = True
 
     def setByString(self,parameter_name,value):
-        if parameter_name == 'min_sample_split':
-            self.min_sample_split = round(value)
-            return
+        attributs = vars(self)
+        attributs_types = {attribut: type(valeur).__name__ for attribut, valeur in attributs.items()}
 
-        if parameter_name == 'tree_depth':
-            self.tree_depth = round(value)
-            return
+        if parameter_name in attribute_names:
+            if isinstance(value, attribute_names[parameter_name]) or isinstance(value, type(None)) or (value == None):
+                setattr(self, parameter_name, value)
+            else:
+                raise TypeError(f"Value for {parameter_name} should be typed as a {attribute_names[parameter_name]}")
+        else:
+            raise ValueError(f"Parameter {parameter_name} not known.")
 
-        if parameter_name == 'tree_min_leaf_samples':
-            self.tree_min_leaf_samples = round(value)
-            return
-
-        if parameter_name == 'max_leaf_nodes':
-            self.max_leaf_nodes = round(value)
-            return
-
-        if parameter_name == 'class_weight':
-            self.class_weight = value
-            return
-
-        if parameter_name == 'num_of_trees':
-            self.num_of_trees = round(value)
-            return
-
-        if parameter_name == 'max_feature_parameter':
-            self.max_feature_parameter = value
-            return
-
-        if parameter_name == 'bootstrap_parameter':
-            self.bootstrap_parameter = value
-            return
-
-        if parameter_name == 'min_impurity_decrease_exp':
-            self.min_impurity_decrease_exp = value
-            return
-
-        if parameter_name == 'oob_score':
-            self.oob_score = value
-            return
-
-        if parameter_name == 'ccp_alpha_exp':
-            self.ccp_alpha_exp = value
-            return
-
-        if parameter_name == 'max_sample_parameter':
-            self.max_sample_parameter = value
-            return
-
-        if parameter_name == 'max_feature_cont_parameter':
-            self.max_feature_cont_parameter = value
-            return
-
-        if parameter_name == 'tvmb_rank_threshold':
-            self.tvmb_rank_threshold = round(value)
-            return
-
-        if parameter_name == 'tvpmb_rank_threshold':
-            self.tvpmb_rank_threshold = round(value)
-            return
-
-        if parameter_name == 'confusion_rank_threshold':
-            self.confusion_rank_threshold = round(value)
-            return
-
-        if parameter_name == 'sequential_confusion_rank_threshold':
-            self.sequential_confusion_rank_threshold = round(value)
-            return
-
-        if parameter_name == 'err_warping_exp':
-            self.err_warping_exp = value
-            return
-
-        if parameter_name == 'confusion_normalization_exp':
-            self.confusion_normalization_exp = value
-            return
-
-        if parameter_name == 'criterion':
-            self.criterion = value
-            return
-
-        if parameter_name == 'number_of_bins':
-            self.number_of_bins = round(value)
-            return
-
-        if parameter_name == 'p_val_thresh':
-            self.p_val_thresh = value
-            return
-
-        if parameter_name == 'sample_weight_parameter':
-            self.sample_weight_parameter = value
-            return
-
-        if parameter_name == 'reg_alpha_exp':
-            self.reg_alpha_exp = value
-            return
-
-        if parameter_name == 'reg_c_exp':
-            self.reg_c_exp = value
-            return
-
-        if parameter_name == 'reg_thresh_exp':
-            self.reg_thresh_exp = value
-            return
-
-        if parameter_name == 'geometric_exponent':
-            self.geometric_exponent = value
-            return
-
-        if parameter_name == 'confusion_goodwill':
-            self.confusion_goodwill = value
-            return
-        
-        if parameter_name == 'list_ranking_thresh':
-            self.list_ranking_thresh = value
-            return
-
-    def getByString(self,parameter_name):
-        if parameter_name == 'min_sample_split':
-            return self.min_sample_split
-
-        if parameter_name == 'tree_depth':
-            return self.tree_depth
-
-        if parameter_name == 'tree_min_leaf_samples':
-            return self.tree_min_leaf_samples
-
-        if parameter_name == 'max_leaf_nodes':
-            return self.max_leaf_nodes
-
-        if parameter_name == 'class_weight':
-            return self.class_weight
-
-        if parameter_name == 'num_of_trees':
-            return self.num_of_trees
-
-        if parameter_name == 'max_feature_parameter':
-            return self.max_feature_parameter
-
-        if parameter_name == 'max_feature_cont_parameter':
-            return self.max_feature_cont_parameter
-
-        if parameter_name == 'bootstrap_parameter':
-            return self.bootstrap_parameter
-
-        if parameter_name == 'min_impurity_decrease_exp':
-            return self.min_impurity_decrease_exp
-
-        if parameter_name == 'oob_score':
-            return self.oob_score
-
-        if parameter_name == 'ccp_alpha_exp':
-            return self.ccp_alpha_exp
-
-        if parameter_name == 'max_sample_parameter':
-            return self.max_sample_parameter
-
-        if parameter_name == 'tvmb_rank_threshold':
-            return self.tvmb_rank_threshold
-
-        if parameter_name == 'tvpmb_rank_threshold':
-            return self.tvpmb_rank_threshold
-
-        if parameter_name == 'confusion_rank_threshold':
-            return self.confusion_rank_threshold
-
-        if parameter_name == 'sequential_confusion_rank_threshold':
-            return self.sequential_confusion_rank_threshold
-
-        if parameter_name == 'err_warping_exp':
-            return self.err_warping_exp
-
-        if parameter_name == 'confusion_normalization_exp':
-            return self.confusion_normalization_exp
-
-        if parameter_name == 'criterion':
-            return self.criterion
-
-        if parameter_name == 'number_of_bins':
-            return self.number_of_bins
-
-        if parameter_name == 'p_val_thresh':
-            return self.p_val_thresh
-
-        if parameter_name == 'sample_weight_parameter':
-            return self.sample_weight_parameter
-
-        if parameter_name == 'reg_alpha_exp':
-            return self.reg_alpha_exp
-
-        if parameter_name == 'reg_thresh_exp':
-            return self.reg_thresh_exp
-
-        if parameter_name == 'reg_c_exp':
-            return self.reg_c_exp
-
-        if parameter_name == 'geometric_exponent':
-            return self.geometric_exponent
-        
-        if parameter_name == 'confusion_goodwill':
-            return self.confusion_goodwill
-        
-        if parameter_name == 'list_ranking_thresh':
-            return self.list_ranking_thresh
+    def getByString(self, parameter_name):
+        return getattr(self, parameter_name, None)
 
     def getScoreTuple(self):
         sct = (self.tree_depth,self.min_sample_split,self.num_of_trees,self.class_weight,
@@ -928,7 +753,26 @@ class Config:
         print("reg_thresh_exp", self.reg_thresh_exp)
         print("confusion_goodwill", self.confusion_goodwill)
         print("list_ranking_thresh", self.list_ranking_thresh)
+        print("sequential_confusion_rank_threshold", self.sequential_confusion_rank_threshold)
+        print("confusion_rank_threshold", self.confusion_rank_threshold)
+        print("err_warping_exp", self.err_warping_exp)
+        print("confusion_normalization_exp", self.confusion_normalization_exp)
         return
+
+    def saveHyperParameter(self, outputFileName = None):
+        if outputFileName is None:
+            outputFileName = self.hp_outputFile
+
+        capture = OutputCapture()
+        sys.stdout = capture  # Redirige la sortie standard vers la variable capture
+        self.printHyperParameter()
+        sys.stdout = sys.__stdout__  # Restaure la sortie standard
+
+        capture.replace(" ", "=")
+
+        with open(f"{self.outfolder}/./{outputFileName}", "w") as hpfo:
+            print(capture, file = hpfo)
+            return
 
 class Scores:
     __slots__ = [
