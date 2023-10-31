@@ -68,6 +68,7 @@ class Config:
         self.dataset_name = ''
         self.path_to_sequence_fasta = None
         self.path_to_features_file = None
+        self.path_to_processed_features_file = None
         self.path_structural_feature_table = None
         self.outfolder = None
 
@@ -508,6 +509,9 @@ class Config:
 
             elif opt == 'path_to_features_file':
                 self.path_to_features_file = arg
+
+            elif opt == 'path_to_processed_features_file':
+                self.path_to_processed_features_file = arg
 
             elif opt == 'outfolder':
                 self.outfolder = arg

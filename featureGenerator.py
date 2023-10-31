@@ -243,7 +243,7 @@ def createTrainingSet(config):
     strfg.initFeatures(samples)
     seqfg.initFeatures(samples)
 
-    if config.path_to_processed_feature_file == None:
+    if config.path_to_processed_features_file == None:
 
         parse_feature_table(config.path_to_features_file, samples, config)
 
@@ -276,14 +276,14 @@ def createTrainingSet(config):
 
         samples.oneHotifyAll()
 
-        config.path_to_processed_feature_file = f'{config.outfolder}/{config.dataset_name}_structguy_features_processed.tsv'
+        config.path_to_processed_features_file = f'{config.outfolder}/{config.dataset_name}_structguy_features_processed.tsv'
 
-        samples.write(config.path_to_processed_feature_file)
+        samples.write(config.path_to_processed_features_file)
 
-        config.add_entry_to_project_file('path_to_processed_feature_file', config.path_to_processed_feature_file)
+        config.add_entry_to_project_file('path_to_processed_features_file', config.path_to_processed_features_file)
 
     else:
-        parse_feature_table(config.path_to_processed_feature_file, samples, config)
+        parse_feature_table(config.path_to_processed_features_file, samples, config)
         #Propably call some stuff here, TODO
     config.n_of_features = len(samples.feature_names)
     return samples
