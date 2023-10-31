@@ -13,6 +13,7 @@ from structman.base_utils.base_utils import calculate_chunksizes
 #from scala.tree_split import tree
 from datasail.sail import datasail
 
+import sequence_feature_generation
 
 import dicts
 possible_na_values = set(['-', 'None'])
@@ -117,6 +118,10 @@ class SampleSpace:
 
         if config.addBias:
             self.addFeature('Protein bias','real',group='amino acid property',default_value='0.5')
+
+        seq_map , _ = sequence_feature_generation.parseFromFasta(config.path_to_sequence_fasta)
+
+        self.sequence_map = seq_map
 
     def addFeature(self,name,f_type,group=None,default_value=None,mutation_specific=False):
         feat = Feature(name,f_type,group=group,default_value=default_value,mutation_specific=mutation_specific)
@@ -788,9 +793,6 @@ class DataSAIL_cv(CrossValidation):
             weight_map[prot_id] += 1
 
         self.prots = list(prots)
-
-        sequence_map = util.generate_sequence_file(prots, config)
-        sampleSpace.sequence_map = sequence_map
 
         datasail_test_size = 100 // config.crossValidation_fold
         datasail_train_size = 100 - datasail_test_size

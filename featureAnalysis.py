@@ -78,6 +78,16 @@ def findRepresentativeTree(forest, feat_vec):
 
     return forest.estimators_[repr_tree]
 
+
+def get_base_stats(forest):
+    n_of_trees = len(forest.estimators_)
+    total_nodes = 0
+    for tree in forest.estimators_:
+        n_nodes = tree.tree_.node_count
+        total_nodes += n_nodes
+    return n_of_trees, total_nodes
+
+
 @ray.remote(max_calls = 1)
 def calculate_tree_weights(store, chunk):
     forest = store

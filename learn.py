@@ -260,11 +260,13 @@ def learn(config, effectRegressor=None):
 
     if config.outfolder != None:
         base_name = f'{config.outfolder}/{config.dataset_name}'
-        modelfile = '%s_forest.dump' % (base_name)
+        modelfile = f'{config.outfolder}/StructGuy_trained_on_{config.dataset_name}.dump'
 
         filtered_features_file = '%s_filtered_features.tsv' % (base_name)
 
         forest = buildFinalModel(samples, config, internal_cv = cross_val_obj, outfile = modelfile, filtered_features_file = filtered_features_file)
+
+        config.add_entry_to_project_file('path_trained_model', modelfile)
 
         if not config.skip_cv:
             cv_file = '%s_full_cv_forests.dump' % (base_name)
@@ -421,35 +423,6 @@ def writeOutput(config, y_pred, cv_slice, sampleSpace, append=False):
     f.write(''.join(outlines))
     f.close()
 
-    """
-    db_adress = config.db_adress
-    db_user_name = config.db_user_name
-    db_password = config.db_password
-    db_name = config.db_name
-
-    db = MySQLdb.connect(db_adress,db_user_name,db_password,db_name)
-    cursor = db.cursor()
-
-    if config.color_structures:
-        pred_file = config.pred_file
-        for u_ac in color_map:
-            aac_bases = color_map[u_ac].keys()
-            pdb_id,chain,sub_infos = database.getMajorityRecommendedStructure(u_ac,aac_bases,db,cursor,config.pdb_path)
-            value_map = {}
-
-            for aac_base in color_map[u_ac]:
-                max_error = max(color_map[u_ac][aac_base])
-                if not aac_base in sub_infos:
-                    continue
-                res_nr = sub_infos[aac_base][0]
-                value_map[res_nr] = min((max_error*100.0,100.0))+10.
-            base_name,f_type = pred_file.rsplit('.',1)
-            outfile = '%s_%s_%s:%s_colorized.pdb' % (base_name,u_ac,pdb_id,chain)
-            combi_file = '%s_all_structures_colorized.pdb' % (base_name)
-            util.colorStructure(config,pdb_id,chain,config.pdb_path,value_map,outfile,combi_file=combi_file)
-
-    db.close()
-    """
 
 def storeCV(forests, config, cross_val_obj, cv_file):
     with open(cv_file, 'wb') as output:
@@ -493,112 +466,3 @@ def buildFinalModel(samples, config, internal_cv = None, outfile = None, filtere
         full_slice.write(filtered_features_file)
 
     return forest
-
-if __name__ == "__main__":
-    disclaimer = 'Here comes the disclaimer'
-    argv = sys.argv[1:]
-    try:
-        opts,args = getopt.getopt(argv,"c:i:o:f:n:h",['help','overwrite'])
-    except getopt.GetoptError:
-        print("Illegal Input\n\n",disclaimer)
-        sys.exit(2)
-
-    indatafile = ''
-    config_path = ''
-    overwrite = False
-    forest_file = None
-    overwrite_proc_n = None
-
-    for opt,arg in opts:
-        if opt == '-c':
-            config_path = arg
-        if opt == '-i':
-            indatafile = arg
-        if opt == '-o':
-            pred_file = arg
-        if opt == '--overwrite':
-            overwrite = True
-        if opt == '-n':
-            overwrite_proc_n = int(arg)
-        if opt == '-h' or opt == '--help':
-            print(disclaimer)
-            sys.exit(0)
-        if opt == '-f':
-            forest_file = arg
-
-    if overwrite:
-        datafile = indatafile
-        indatafile = None
-    else:
-        if not os.path.isfile(indatafile):
-            datafile = indatafile
-            indatafile = None
-        else:
-            datafile = None
-
-    config = util.Config(config_path)
-
-    if overwrite_proc_n is not None:
-        config.proc_n = overwrite_proc_n
-
-    sys.path.append(config.structman_source)
-
-    config.pred_file = pred_file
-
-    import database
-    import uniprot
-    import MMseqs2
-
-    sys.path.append(config.msa_source)
-    import msa
-
-    if forest_file != None:
-        evaluate_dataset(config,forest_file,datafile=datafile,indatafile=indatafile,pred_file = pred_file)
-        sys.exit()
-
-    ray.init(num_cpus=config.proc_n, include_dashboard=False, ignore_reinit_error=True)
-
-    model,feature_names = learn(config, datafile=datafile, indatafile=indatafile)
-    sys.exit()
-
-    #ignore everything below for now
-
-    config.hyperOptimization=True
-    #"""
-    bools = [False,True]
-    for b1 in bools:
-        config.remove_t2 = b1
-        for b2 in [True,False]:
-            config.filterStructuralFeatures = b2
-            for b3 in [False]:
-                config.addBias = b3
-                for b4 in [None]:
-                    config.structure_threshold = b4
-                    for b5 in [None,'pure','balanced']:
-                        config.balanceSubsampling = b5
-                        for b6 in bools:
-                            config.filter_single_variant_prots = b6
-                            if b5 == None and b6 == True:
-                                continue
-                            model,feature_names = learn(config,manager,lock,datafile=datafile,indatafile=indatafile)
-    sys.exit()
-    #"""
-    bools = [False,True]
-    for b1 in bools:
-        config.prot_based_separation = b1
-        for b2 in [False]:
-            config.filterStructuralFeatures = b2
-            for b3 in [False]:
-                config.addBias = b3
-                for b4 in [None]:
-                    config.structure_threshold = b4
-                    for b5 in [None,'pure','balanced']:
-                        config.balanceSubsampling = b5
-                        for b6 in bools:
-                            config.filter_single_variant_prots = b6
-                            if b5 == None and b6 == True:
-                                continue
-                            model,feature_names = learn(config,manager,lock,datafile=datafile,indatafile=indatafile)
-
-    print('Peak memory consumption: ',resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1000.,' MB')
-

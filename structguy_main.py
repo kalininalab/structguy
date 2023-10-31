@@ -9,12 +9,13 @@ import time
 import featureGenerator
 import util
 import learn
+import featureAnalysis
 
 import structman.structman_main as str_main
 
 disclaimer = """
-structguy_main.py generate_features [-f -c -o -s --verbosity --sm_conf]\n
-structguy_main.py build_model [(-f or -p) -c -o -s --verbosity --sm_conf]\n
+structguy_main.py generate_features [-i -o --verbosity]\n
+structguy_main.py build_model [-i -o --verbosity]\n
 MORE TODO\n
 """
 
@@ -23,23 +24,18 @@ def parse_arguments(argument_start = 2):
     try:
         long_paras = [
             'verbosity=', #from 1 to 5
-            'sm_conf=',
             'hp=',
             'nocv' # Skip Cross Validation
         ]
-        opts, args = getopt.getopt(argv, "p:f:c:o:s:n:m:", long_paras)
+        opts, args = getopt.getopt(argv, "i:n:m:", long_paras)
 
     except getopt.GetoptError:
         print("Illegal Input\n\n", disclaimer)
         return
 
-    path_structural_feature_table = None
-    path_to_config = None
-    path_to_structman_config = None
+    path_to_project_file = None
 
-    path_to_sequence_fasta = None
     verbosity_overwrite = None
-    path_to_processed_feature_file = None
     path_to_hyperparameters_file = None
     path_to_model = None
 
@@ -48,22 +44,10 @@ def parse_arguments(argument_start = 2):
     overwrite_proc_n = None
 
     for opt, arg in opts:
-        if opt == '-f':
-            path_structural_feature_table = arg
-            if not os.path.isfile(path_structural_feature_table):
-                print('ERROR: path to structural feature table is invalid')
-                return
-
-        if opt == '-c':
-            path_to_config = arg
-            if not os.path.isfile(path_to_config):
-                print('ERROR: path to config file is invalid')
-                return
-
-        if opt == '-s':
-            path_to_sequence_fasta = arg
-            if not os.path.isfile(path_to_sequence_fasta):
-                print('ERROR: path to sequence fasta file is invalid')
+        if opt == '-i':
+            path_to_project_file = arg
+            if not os.path.isfile(path_to_project_file):
+                print(f'Error: {path_to_project_file} is not a valid file path')
                 return
 
         if opt == '-m':
@@ -72,17 +56,8 @@ def parse_arguments(argument_start = 2):
                 print('ERROR: path to model file is invalid')
                 return
 
-        if opt == '-o':
-            outfolder = arg
-
         if opt == '--verbosity':
             verbosity_overwrite = int(arg)
-
-        if opt == '--sm_conf':
-            path_to_structman_config = arg
-
-        if opt == '-p':
-            path_to_processed_feature_file = arg
 
         if opt == '--hp':
             path_to_hyperparameters_file = arg
@@ -93,32 +68,20 @@ def parse_arguments(argument_start = 2):
         if opt == '--nocv':
             skip_cv = True
 
-    if path_to_processed_feature_file is not None:
-        primary_dataset_file_path = path_to_processed_feature_file
+
+    if path_to_model is not None:
+        if path_to_model.count('/') > 0:
+            model_name = path_to_model.rsplit("/",1)[1].rsplit('.',1)[0]
+        else:
+            model_name = path_to_model.rsplit('.',1)[0]
     else:
-        primary_dataset_file_path = path_structural_feature_table
+        model_name = None
 
-    if primary_dataset_file_path.count('/') > 0:
-        _outfolder, primary_dataset_filename = primary_dataset_file_path.rsplit("/",1)
-    else:
-        _outfolder = os.getcwd()
-        primary_dataset_filename = primary_dataset_file_path
 
-    dataset_name = primary_dataset_filename.rsplit('.',1)[0]
+    config = util.Config(path_to_project_file, hyperparameters_path = path_to_hyperparameters_file)
 
-    if outfolder is None:
-        outfolder = _outfolder
-
-    config = util.Config(path_to_config, hyperparameters_path = path_to_hyperparameters_file)
-
-    config.outfolder = outfolder
-    config.dataset_name = dataset_name
-    config.path_structural_feature_table = path_structural_feature_table
-    config.path_to_config = path_to_config
-    config.path_to_structman_config = path_to_structman_config
-    config.path_to_sequence_fasta = path_to_sequence_fasta
-    config.path_to_processed_feature_file = path_to_processed_feature_file
     config.path_to_model = path_to_model
+    config.model_name = model_name
     
     if skip_cv is not None:
         config.skip_cv = True
@@ -135,7 +98,6 @@ def feature_generator_main():
     config = parse_arguments()
 
     if config.path_structural_feature_table is not None:
-        config.structman_config = str_main.Config(config.path_to_structman_config, external_call = True, verbosity = config.verbosity, num_of_cores = config.proc_n)
         featureGenerator.expand_structural_feature_table(config)
 
 def build_model_main():
@@ -143,12 +105,11 @@ def build_model_main():
     # if config.verbosity > 0:
     #     print(config.printHyperParameter())
 
-    config.structman_config = str_main.Config(config.path_to_structman_config, external_call = True, verbosity = config.verbosity, num_of_cores = config.proc_n)
     config.saveHyperParameter()
 
     import structman.base_utils.ray_utils as ray_utils
 
-    ray_utils.ray_init(config.structman_config, overwrite_logging_level = 0)
+    ray_utils.ray_init(config, overwrite_logging_level = 0)
 
     learn.learn(config)
 
@@ -156,17 +117,26 @@ def build_model_main():
 
 def predict_main():
     config = parse_arguments()
-    config.structman_config = str_main.Config(config.path_to_structman_config, external_call = True, verbosity = config.verbosity, num_of_cores = config.proc_n)
 
     import structman.base_utils.ray_utils as ray_utils
 
-    ray_utils.ray_init(config.structman_config, overwrite_logging_level = 0)
+    ray_utils.ray_init(config, overwrite_logging_level = 0)
     learn.evaluate_dataset(config)
+
+def generate_info():
+    config = parse_arguments()
+
+    forest, extern_feature_names_list, model_config = learn.loadModel(config.path_to_model)
+    n_of_trees, n_of_nodes = featureAnalysis.get_base_stats(forest)
+
+    print(f'Random Forest model consits of {n_of_trees} trees and a total of {n_of_nodes} Nodes')
+
+    model_config.saveHyperParameter(f'{config.model_name}_hyperparameter.conf')
 
 def main():
 
     start_time = time.time()
-    possible_key_words = set(['generate_features', 'build_model', 'predict'])
+    possible_key_words = set(['generate_features', 'build_model', 'predict', 'info'])
 
     key_word = sys.argv[1]
 
@@ -182,6 +152,9 @@ def main():
 
     if key_word == 'predict':
         predict_main()
+
+    if key_word == 'info':
+        generate_info()
 
     print("--- %s seconds ---" % (time.time() - start_time))
 

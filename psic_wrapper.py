@@ -176,9 +176,9 @@ def psicFromGPW(gpw,outfile,config,debug=0):
     if debug >= 1:
         if not os.path.isfile(outfile):
             print('callPSIC produced no output: ',clustal_file,' cl_page_size ',len(cl_page))
-        else:
+        elif os.path.isfile(clustal_file):
             os.remove(clustal_file)
-    elif os.path.isfile(outfile):
+    elif os.path.isfile(outfile) and os.path.isfile(clustal_file):
         os.remove(clustal_file)
     return
 

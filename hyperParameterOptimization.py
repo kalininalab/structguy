@@ -1203,11 +1203,6 @@ def threeDimHyperOptimization(config, cv_obj, best_scores, distance_map = None, 
         if best_scores is not None:
             best_scores.printOut()
         n += 1
-        #ray.shutdown()
-
-        #time.sleep(60)
-
-        #ray_utils.ray_init(config.structman_config, overwrite_logging_level = 0)
  
     cv_obj.reset_confusion_maps()
     return

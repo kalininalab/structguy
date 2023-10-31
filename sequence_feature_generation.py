@@ -62,15 +62,16 @@ def geneSeqMapToFasta(prot_seq_map, outfile, verbosity = 0):
     else: 
         return 'Empty fasta file'
 
-def parseFromFasta(seqs_from_fasta, config, dbs):
+def parseFromFasta(seqs_from_fasta, config = None, dbs = []):
 
-    fasta_file_name_base = seqs_from_fasta.split('/')[-1].rsplit('.',1)[0]
-    config.custom_msa_db = f'{config.msa_db}/{fasta_file_name_base}'
+    if config is not None:
+        fasta_file_name_base = seqs_from_fasta.split('/')[-1].rsplit('.',1)[0]
+        config.custom_msa_db = f'{config.msa_db}/{fasta_file_name_base}'
 
-    config.fasta_mode = True
+        config.fasta_mode = True
 
-    if not os.path.exists(config.custom_msa_db):
-        os.mkdir(config.custom_msa_db)
+        if not os.path.exists(config.custom_msa_db):
+            os.mkdir(config.custom_msa_db)
 
     f = open(seqs_from_fasta, 'r')
     lines = f.readlines()
@@ -100,11 +101,7 @@ def parseFromFasta(seqs_from_fasta, config, dbs):
             seq_map[entry_id][0] += line.replace('\n', '').replace('/','').replace('*','').upper()
     return seq_map, in_db 
 
-def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False, seqs_from_fasta = None):
-    msa_db = config.msa_db
-    pdb_path = config.pdb_path
-
-    import structman.lib as sml
+def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False):
 
     if config.verbosity >= 2:
         t0 = time.time()
@@ -142,15 +139,11 @@ def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False, 
 
     n_mapped_sequences = 0
 
-    if seqs_from_fasta is not None:
-        gene_seq_map, in_db = parseFromFasta(seqs_from_fasta, config, dbs)
-        if config.verbosity >= 2:
-            print(f'Parsed protein sequences from: {seqs_from_fasta}\nLength of the map:{len(gene_seq_map)}, Length of in_db: {len(in_db)}')
-    elif len(u_acs) > 0:
-        gene_seq_map,in_db = sml.uniprot.getSequencesPlain(u_acs, config.structman_config, filtering_db=(msa_db,dbs))
-    else:
-        gene_seq_map,pdb_pos_map,in_db = sml.pdbParser.getSequences(pdb_ids,pdb_path,filtering_db=(msa_db,dbs))
-
+    
+    gene_seq_map, in_db = parseFromFasta(config.path_to_sequence_fasta, config = config, dbs = dbs)
+    if config.verbosity >= 2:
+        print(f'Parsed protein sequences from: {config.path_to_sequence_fasta}\nLength of the map:{len(gene_seq_map)}, Length of in_db: {len(in_db)}')
+    
     if config.verbosity >= 2:
         print(f'Query proteins that are in_db:\n{in_db}')
 
@@ -216,7 +209,7 @@ def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False, 
                 f.close()
 
                 if len(lines) == 0:
-                    return(entries)
+                    return
 
                 for line in lines:
                     if line == '':
@@ -384,8 +377,7 @@ def paraMSA(config, lock, inqueue, outqueue, debug, N, gene_seq_map, sequence_ma
 
 def paraCalcSeqFeat(config,lock,inqueue,outqueue,debug,dbs,msa_map,gpw_map,):
     msa_db = config.msa_db
-    sys.path.append(config.msa_source)
-    import msa
+
     with lock:
         inqueue.put(None)
 

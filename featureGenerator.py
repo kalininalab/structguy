@@ -15,13 +15,15 @@ def expand_structural_feature_table(config):
     strfg.initFeatures(samples)
     seqfg.initFeatures(samples)
 
-    parse_feature_table(samples, config, non_feature_cols = [0,1,2,4,7,19], primary_protein_id_col = 1, aac_col_s = [3,4,5], tags_col = 7, amount_of_struct_col = 19, effect_col = None)
+    parse_structural_features(samples, config)
 
-    seqfg.getSequenceFeatures(config, samples, n_of_processes=config.seq_feat_processes, seqs_from_fasta = config.path_to_sequence_fasta)
+    seqfg.getSequenceFeatures(config, samples, n_of_processes=config.seq_feat_processes)
 
     outfile = f'{config.outfolder}/{config.dataset_name}_structguy_features.tsv'
 
     samples.write(outfile)
+
+    config.add_entry_to_project_file('path_to_features_file', outfile)
     return
 
 @ray.remote(max_calls = 1)
@@ -148,16 +150,20 @@ def parseLines(store, left, right):
     return output
 
 
-def parse_feature_table(samples, config, non_feature_cols = [0,1,2,3,4], primary_protein_id_col = 0, aac_col_s = [1], tags_col = 3, amount_of_struct_col = 4, effect_col = 2, take_processed_file = False):
-    print(f'Reading feature file: {config.path_structural_feature_table}, Processed: {take_processed_file}, non_feature_cols: {non_feature_cols}, primary_protein_id_col: {primary_protein_id_col}, aac_col_s: {aac_col_s}, effect_col: {effect_col}')
+def parse_structural_features(samples, config, non_feature_cols = [0,1,2,4,7,19], primary_protein_id_col = 1, aac_col_s = [3,4,5], tags_col = 7, amount_of_struct_col = 19, effect_col = None):
+    file_path = config.path_structural_feature_table
+    parse_feature_table(file_path, samples, config,
+            non_feature_cols = non_feature_cols, primary_protein_id_col = primary_protein_id_col, aac_col_s = aac_col_s,
+            tags_col = tags_col, amount_of_struct_col = amount_of_struct_col, effect_col = effect_col
+            )
 
-    if not take_processed_file:
-        f = open(config.path_structural_feature_table,'r')
-    else:
-        f = open(config.path_to_processed_feature_file,'r')
+
+def parse_feature_table(file_path, samples, config, non_feature_cols = [0,1,2,3,4], primary_protein_id_col = 0, aac_col_s = [1], tags_col = 3, amount_of_struct_col = 4, effect_col = 2):
+    print(f'Reading feature file: {file_path}, non_feature_cols: {non_feature_cols}, primary_protein_id_col: {primary_protein_id_col}, aac_col_s: {aac_col_s}, effect_col: {effect_col}')
+
+    f = open(file_path,'r')
     lines = f.read().split('\n')
     f.close()
-
 
     if config.verbosity >= 1:
         t0 = time.time()
@@ -171,8 +177,6 @@ def parse_feature_table(samples, config, non_feature_cols = [0,1,2,3,4], primary
         if feat_name in consts.FEAT_NAME_SYNONYMS:
             feat_name = consts.FEAT_NAME_SYNONYMS[feat_name]
         if feat_name not in samples.features:
-            if take_processed_file is None:
-                print('Warning: Parsed unknown feature:', feat_name)
             samples.addFeature(feat_name,'binary',group='structural',default_value=0)
 
     if config.verbosity >= 1:
@@ -241,11 +245,10 @@ def createTrainingSet(config):
 
     if config.path_to_processed_feature_file == None:
 
-        parse_feature_table(samples, config)
+        parse_feature_table(config.path_to_features_file, samples, config)
 
         for additonal_infile in config.add_more_sample_files:
-            config.path_to_processed_feature_file = additonal_infile
-            parse_feature_table(samples, config)
+            parse_feature_table(additonal_infile, samples, config)
 
         if config.fusePositions:
             config.regression = False
@@ -273,12 +276,14 @@ def createTrainingSet(config):
 
         samples.oneHotifyAll()
 
-        config.path_to_processed_feature_file = f'{config.path_structural_feature_table.rsplit(".",1)[0]}_processed.tsv'
+        config.path_to_processed_feature_file = f'{config.outfolder}/{config.dataset_name}_structguy_features_processed.tsv'
 
         samples.write(config.path_to_processed_feature_file)
 
+        config.add_entry_to_project_file('path_to_processed_feature_file', config.path_to_processed_feature_file)
+
     else:
-        parse_feature_table(samples, config, take_processed_file = True)
+        parse_feature_table(config.path_to_processed_feature_file, samples, config)
         #Propably call some stuff here, TODO
     config.n_of_features = len(samples.feature_names)
     return samples

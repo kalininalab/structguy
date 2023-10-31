@@ -5,6 +5,7 @@ import statistics
 import learn
 import radarplot
 import numpy as np
+from psutil import virtual_memory
 
 import matplotlib
 # Force matplotlib to not use any Xwindows backend.
@@ -15,7 +16,7 @@ from matplotlib.spines import Spine
 from matplotlib.projections.polar import PolarAxes
 from matplotlib.projections import register_projection
 
-import structman
+from structman.base_utils.base_utils import Errorlog
 
 class OutputCapture:
     def __init__(self):
@@ -30,18 +31,45 @@ class OutputCapture:
     def __str__(self):
         return self.captured_output
 
+def parse_conf(filepath):
+    f = open(filepath, 'r')
+    lines = f.read().split('\n')
+    f.close()
+
+    opt_args = []
+
+    for line in lines:
+        if len(line) == 0:
+            continue
+        if line[0] == '#':
+            continue
+        
+        words = line.split('=')
+        if len(words) < 2:
+            continue
+
+        # Set config values and remove leading/trailling whitespaces
+        opt = words[0].strip()
+        arg = words[1].replace("\n","").strip()
+        opt_args.append((opt, arg))
+    return opt_args
+
 class Config:
-    def __init__(self,config_path, hyperparameters_path = None):
+    def __init__(self, path_to_project_file, hyperparameters_path = None):
 
         self.profiling = False
-        self.db_adress = ""
-        self.db_user_name = ""
-        self.db_password = ""
-        self.db_name = ""
-        self.id_mapping_db = ''
-        self.session = None
 
-        self.structman_config_path = ''
+        self.iupred_path = ""
+        self.ray_local_mode = False
+        mem = virtual_memory()
+        self.gigs_of_ram = mem.total / 1024 / 1024 / 1024
+        self.errorlog = Errorlog()
+
+        self.dataset_name = ''
+        self.path_to_sequence_fasta = None
+        self.path_to_features_file = None
+        self.path_structural_feature_table = None
+        self.outfolder = None
 
         self.debug = 1
         self.proc_n = 48
@@ -55,17 +83,12 @@ class Config:
         self.mmseqs_search_db_ref90 = ''
         self.mmseqs_search_db_ref100 = ''
 
-        self.blast_search_db_ref50 = ''
-        self.blast_search_db_ref90 = ''
-
         self.mmseqs_tmp_folder = ''
 
-        self.msa_source = ''
         self.msa_db = ''
-        self.structman_source = ''
+
         self.fasta_mode = False
 
-        self.verbose=False
         self.verbosity = 1
 
         self.crossValidation=True
@@ -80,7 +103,7 @@ class Config:
         self.blosum_path = ''
 
         self.pdb_path = ''
-        self.out_folder = ''
+
 
         self.skip_cv = False
         self.suppress_remote_forests = True
@@ -119,7 +142,7 @@ class Config:
         self.tag_based_crossValidation = None
         self.targetFilter = set(['nan'])
         self.target_values = None
-        self.binary_thresh = None
+        self.binary_thresh = 0.5
         self.protein_filter = set([])
 
         self.print_scores_greater_than = 0.005
@@ -209,24 +232,10 @@ class Config:
 
         overwrite_objective_function = None
 
-        f = open(config_path,'r')
-        lines = f.read().split('\n')
-        f.close()
+        self.path_to_project_file = path_to_project_file
 
-        for line in lines:
-            if len(line) == 0:
-                continue
-            if line[0] == '#':
-                continue
-            
-            words = line.split('=')
-            if len(words) < 2:
-                continue
-
-            # Set config values and remove leading/trailling whitespaces
-            opt = words[0].strip()
-            arg = words[1].replace("\n","").strip()
-
+        opt_args = parse_conf(path_to_project_file)
+        for opt, arg in opt_args:
             if opt == 'proc_n':
                 self.proc_n = int(arg)
 
@@ -249,39 +258,11 @@ class Config:
                 self.mmseqs_search_db_ref90 = arg
             elif opt == 'mmseqs_search_db_ref100':
                 self.mmseqs_search_db_ref100 = arg
-            elif opt == 'blast_search_db_ref50':
-                self.blast_search_db_ref50 = arg
-            elif opt == 'blast_search_db_ref90':
-                self.blast_search_db_ref90 = arg
-            elif opt == 'msa_source':
-                self.msa_source = arg
+
             elif opt == 'msa_db':
                 self.msa_db = arg
-            elif opt == 'structman_source':
-                self.structman_source = arg
-
-            elif opt == 'structman_config_path':
-                self.structman_config_path = arg
-                self.structman_config = structman.Config(self.structman_config_path)
-
-            elif opt == 'db_adress':
-                self.db_adress = arg
-            elif opt == 'db_user_name':
-                self.db_user_name = arg
-            elif opt == 'db_password':
-                self.db_password = arg
-            elif opt == 'db_name':
-                self.db_name = arg
-            elif opt == 'id_mapping_db':
-                self.id_mapping_db = arg
-            elif opt == 'session':
-                self.session = int(arg)
-
-            elif opt == 'verbose':
-                if arg == 'True':
-                    self.verbose = True
-                elif arg == 'False':
-                    self.verbose = False
+                if not os.path.isdir(self.msa_db):
+                    os.mkdir(self.msa_db)
 
             elif opt == 'crossValidation':
                 try:
@@ -321,9 +302,6 @@ class Config:
 
             elif opt == 'pdb_path':
                 self.pdb_path = arg
-
-            elif opt == 'out_folder':
-                self.out_folder = arg
 
             elif opt == 'produce_scatterplot':
                 if arg == 'True':
@@ -429,8 +407,8 @@ class Config:
                         continue
                     self.protein_filter.add(u_ac)
             elif opt == 'additional_samples':
-                session,datafile = arg.split(',')
-                self.add_more_sample_files.append((session,datafile))
+                datafile = arg
+                self.add_more_sample_files.append(datafile)
 
             elif opt == 'tree_depth':
                 self.tree_depth = int(arg)
@@ -516,6 +494,24 @@ class Config:
                 elif arg == 'False':
                     self.hpo_do_sample_weighting = False
 
+            elif opt == 'Path_to_dataset_file':
+                self.path_to_dataset = arg
+
+            elif opt == 'Path_to_structman_features_file':
+                self.path_structural_feature_table = arg
+
+            elif opt == 'Path_to_sequences_file':
+                self.path_to_sequence_fasta = arg
+
+            elif opt == 'dataset_name':
+                self.dataset_name = arg
+
+            elif opt == 'path_to_features_file':
+                self.path_to_features_file = arg
+
+            elif opt == 'outfolder':
+                self.outfolder = arg
+
         if self.mmseqs_search_db_ref50 != '':
             self.search_dbs.append('ref50')
         if self.mmseqs_search_db_ref90 != '':
@@ -538,10 +534,14 @@ class Config:
             self.objective_function = overwrite_objective_function
 
         #Hyperparameters setup if an HP file is provided
+        self.hyperparameters_path = hyperparameters_path
         if hyperparameters_path is not None:
-            f_hp = open(hyperparameters_path, 'r')
-            lines_hp = f_hp.read().split('\n')
-            f_hp.close()
+            try:
+                f_hp = open(hyperparameters_path, 'r')
+                lines_hp = f_hp.read().split('\n')
+                f_hp.close()
+            except:
+                lines_hp = []
 
             for line in lines_hp:
                 if len(line) == 0:
@@ -770,9 +770,33 @@ class Config:
 
         capture.replace(" ", "=")
 
-        with open(f"{self.outfolder}/./{outputFileName}", "w") as hpfo:
+
+        hp_file_outpath = f"{self.outfolder}/./{outputFileName}"
+        print(f'Saving HP file to {hp_file_outpath}')
+
+        with open(hp_file_outpath, "w") as hpfo:
             print(capture, file = hpfo)
             return
+
+    def add_entry_to_project_file(self, field, value):
+        new_lines = []
+        
+        opt_args = parse_conf(self.path_to_project_file)
+        overwritten = False
+
+        for opt, arg in opt_args:
+            if opt == field:
+                new_lines.append(f'{opt} = {value}\n')
+                overwritten = True
+            else:
+                new_lines.append(f'{opt} = {arg}\n')
+
+        if not overwritten:
+            new_lines.append(f'{field} = {value}\n')
+
+        f = open(self.path_to_project_file, 'w')
+        f.write(''.join(new_lines))
+        f.close()
 
 class Scores:
     __slots__ = [
@@ -1080,53 +1104,6 @@ def writeOutput(outfile,feature_names,feature_matrix,id_vector,reg_vector,seq_id
     f.write('\n'.join(outlines))
     f.close()
 
-def colorStructure(config,pdb_id,chain,pdb_path,value_map,outfile,combi_file=None):
-    #print(value_map)
-    AU = False
-    if pdb_id.count('_AU') == 1:
-        pdb_id = pdb_id[0:4]
-        AU = True
-
-    sys.path.append(config.structman_source)
-    import pdbParser as pdb
-    buf = pdb.getPDBBuffer(pdb_id,pdb_path,AU=AU,obsolete_check=False)
-
-    if buf == None:
-        return ""#,'',"Did not find the PDB-file: %s" % pdb_id
-
-    newlines = []
-
-    for line in buf:
-        if len(line) >= 27:
-            record_name = line[0:6].rstrip()
-            line = line.rstrip(b'\n')
-
-            if record_name == b'ENDMDL':
-                newlines.append(line)
-                break
-            elif record_name == b'ATOM' or record_name == b'MODRES' or record_name == b'HETATM':
-                chain_id = line[21:22].decode('ascii')
-                res_nr = line[22:27].strip().decode('ascii')
-                if chain_id == chain and res_nr in value_map:
-                    value = value_map[res_nr]
-                    color_code = b'%2.2f' %(value)
-                elif chain_id == chain:
-                    color_code = b'00.00'
-                else:
-                    color_code = b'120.00'
-                line = line[:60] + color_code + line[66:]
-
-        newlines.append(line)
-
-
-    f = open(outfile,'wb')
-    f.write(b'\n'.join(newlines))
-    f.close()
-
-    if combi_file != None:
-        f = open(combi_file,'ab')
-        f.write(b'\n'.join(newlines))
-        f.close()
 
 def hexbinplot(prediction_values,true_values,target_value_name,outfile):
     fig = plt.figure()
@@ -1550,29 +1527,9 @@ def parseFeatureList(featureFile):
         feature_list.append(line.strip())
     return feature_list
 
-def generate_sequence_file(prot_ids, config):
-    cols = ['Primary_Protein_Id', 'Sequence']
-    results = structman.lib.database.database.select(config.structman_config, cols, 'Protein', in_rows = {'Primary_Protein_Id': prot_ids})
-    sequence_map = {}
-    fasta_lines = []
-    for row in results:
-        prot_id = row[0]
-        seq = row[1]
-        fasta_lines.append(f'>{prot_id}\n')
-        fasta_lines.append(f'{seq}\n')
-        sequence_map[prot_id] = seq
 
-    base_name = f'{config.outfolder}/{config.dataset_name}'
-    tmp_seq_file = '%s_sequences.fasta' % (base_name)
-
-    f = open(tmp_seq_file, 'w')
-    f.write(''.join(fasta_lines))
-    f.close()
-
-    config.path_to_sequence_fasta = tmp_seq_file
-    return sequence_map
-
-
+#Needs to be updated
+"""
 def calculateCorrelationMatrix(config,indatafile,outfile,list_of_features,addTargetValue=False):
     samples = learn.createTrainingSet(config,config.session,infile=indatafile,debug=config.debug)
     samples.oneHotifyAll()
@@ -1618,6 +1575,7 @@ def calculateCorrelationMatrix(config,indatafile,outfile,list_of_features,addTar
     f.write(''.join(lines))
     f.close()
     return
+"""
 
 def printMean(score_list,name):
     N = len(score_list)

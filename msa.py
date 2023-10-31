@@ -112,25 +112,6 @@ def lookup(config, prot_id, ref_db_ids=['ref50','ref90'], gpw_ref_db_ids=['ref50
 
     return msas,gpws
 
-def getSequence(config,u_ac,pdb_tuple):
-    db_adress = config.db_adress
-    db_user_name = config.db_user_name
-    db_password = config.password
-    try:
-        db = MySQLdb.connect(db_adress,db_user_name,db_password,'struct_man_db_uniprot')
-        cursor = db.cursor()
-    except:
-        db = None
-        cursor = None
-    if pdb_tuple == None:
-        gene_sequence_map = uniprot.getSequencesPlain([u_ac],db,cursor)
-    else:
-        pdb,chain = pdb_tuple.split(':')
-        return pdbParser.getSequencePlain(pdb,chain,pdb_path)
-        
-    if db != None:
-        db.close()
-    return gene_sequence_map[u_ac]
 
 def parseFasta(path,lines=None):
     if lines == None:
@@ -598,11 +579,8 @@ def getMSA(config, prot_id, sequence_map=None, sequence=None, ref_db_ids=['ref50
 
     #If the sequence is not given, get it
     if update_mode and sequence == None:
-        sequence = getSequence(config, prot_id, pdb_tuple)
-
-        if sequence == 0 or sequence == 1 or sequence == 2:
-            print('Sequence error: ', prot_id)
-            return {},{}
+        print('Sequence error: ', prot_id)
+        return {},{}
 
     #Check if the protein is in the database
     msas,gpws = lookup(config, prot_id, ref_db_ids=ref_db_ids, gpw_ref_db_ids=gpw_ref_db_ids, debug=debug, update_mode=update_mode, sequence=sequence, sequence_map=sequence_map, pdb_tuple=pdb_tuple)
