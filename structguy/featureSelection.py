@@ -1,14 +1,12 @@
 from ossaudiodev import SNDCTL_SEQ_GETINCOUNT
 import sys
 import traceback
-
-import reguFeatureSelectionRegressor as reguFSreg
-import reguFeatureSelectionClassificator as reguFSclf
-import sampleSpace
 import random
-import featureAnalysis
 import ray
-import trainForest
+
+from structguy import reguFeatureSelectionRegressor as reguFSreg
+from structguy import reguFeatureSelectionClassificator as reguFSclf
+from structguy import sampleSpace, featureAnalysis, trainForest
 
 def crossFoldConfusionSelect(config, cv_slice, samples, distance_map = None, print_out = False, pre_filter = None, debug = False, return_list = False, overwrite_proc_n = None, rank_thresh = None, sequence_number = 0, return_score_list = False):
 

@@ -1,12 +1,12 @@
-import sampleSpace
 import random
-import structural_feature_generation as strfg
-import sequence_feature_generation as seqfg
-import consts
 import sys
 import traceback
 import time
 import ray
+
+from structguy import sampleSpace, consts
+from structguy import structural_feature_generation as strfg
+from structguy import sequence_feature_generation as seqfg
 
 from structman.base_utils.base_utils import calculate_chunksizes
 

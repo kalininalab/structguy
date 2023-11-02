@@ -1,22 +1,16 @@
-import util
 import random
 import time
 import sys
 import traceback
-import psutil
-
-import trainForest
+import ray
 
 import numpy as np
 import sklearn.gaussian_process as gp
-
 from scipy.stats import norm
 from scipy.optimize import minimize
 from sklearn.preprocessing import MinMaxScaler
 
-import ray
-
-import structman.base_utils.ray_utils as ray_utils
+from structguy import util, trainForest
 
 #Taken from https://github.com/thuijskens/bayesian-optimization
 def expected_improvement(x, gaussian_process, evaluated_loss, greater_is_better=False, n_params=1):

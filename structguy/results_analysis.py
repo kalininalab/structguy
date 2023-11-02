@@ -1,5 +1,4 @@
 import sys
-import os
 from scipy import stats
 
 class Results:

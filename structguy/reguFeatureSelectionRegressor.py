@@ -1,5 +1,4 @@
 # standart imports
-import enum
 from sklearn.linear_model import Lasso
 from sklearn.pipeline import Pipeline
 from sklearn.utils._testing import ignore_warnings

@@ -1,14 +1,11 @@
 import time
 import subprocess
 import multiprocessing
-import sys
 import string
 import random
-import pymysql as MySQLdb
 import os
-import msa
-import consts
-import util
+
+from structguy import msa, consts, util
 
 def initFeatures(samples):
     dbs = consts.refseq_datasets

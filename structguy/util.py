@@ -2,8 +2,6 @@
 import sys, os
 import getopt
 import statistics
-import learn
-import radarplot
 import numpy as np
 from psutil import virtual_memory
 
@@ -11,10 +9,8 @@ import matplotlib
 # Force matplotlib to not use any Xwindows backend.
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-from matplotlib.path import Path
-from matplotlib.spines import Spine
-from matplotlib.projections.polar import PolarAxes
-from matplotlib.projections import register_projection
+
+from structguy.scripts import radarplot
 
 from structman.base_utils.base_utils import Errorlog
 

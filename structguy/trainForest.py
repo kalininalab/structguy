@@ -10,13 +10,11 @@ from sklearn.metrics import recall_score
 from sklearn.metrics import matthews_corrcoef
 
 import time
-
-import featureSelection
-import util
 import ray
-import featureAnalysis
-
 from scipy import stats
+
+from structguy import featureSelection, util, featureAnalysis
+
 
 def makeBinaryClassifier(data,thresh,flip_sign=False):
     binary = []

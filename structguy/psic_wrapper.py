@@ -1,8 +1,5 @@
 import subprocess
 import os
-import sys
-import gzip
-import time
 
 def fastaToClustal(aln_fasta):
     seq_map = {}

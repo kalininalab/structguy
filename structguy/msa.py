@@ -3,21 +3,16 @@ import sys
 import traceback
 import gzip
 import subprocess
-import pymysql as MySQLdb
+
 from Bio.Align.Applications import MafftCommandline
 
 import xml.etree.ElementTree as ET
-from multiprocessing import Process, Queue, Manager, Value, Lock
-from sklearn.metrics import mutual_info_score
+
 from Bio import pairwise2
 from structman.lib.sdsc.consts import residues as residue_consts
-import time
 
-import structman.lib.uniprot as uniprot
-import structman.lib.pdbParser as pdbParser
-
-import psic_wrapper as psic
-import util
+from structguy import psic_wrapper as psic
+from structguy import util
 
 search_db_sequences = {}
 

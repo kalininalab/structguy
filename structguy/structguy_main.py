@@ -1,17 +1,10 @@
 #!/usr/bin/python
-# python ../structguy/structguy_main.py generate_features -f Output/envision_tr_correct/envision_tr_correct.features.tsv -c envision_config.txt --sm_conf config.txt -o structGuy_feature_output
-# python ../structguy/structguy_main.py build_model -f structGuy_feature_output/envision_tr_correct.features_structguy_features.tsv -c envision_config.txt --sm_conf config.txt -o structGuy_feature_output
 import sys
 import getopt
 import os
 import time
 
-import featureGenerator
-import util
-import learn
-import featureAnalysis
-
-import structman.structman_main as str_main
+from structguy import featureGenerator, util, learn, featureAnalysis
 
 disclaimer = """
 structguy_main.py generate_features [-i -o --verbosity]\n
@@ -137,6 +130,10 @@ def main():
 
     start_time = time.time()
     possible_key_words = set(['generate_features', 'build_model', 'predict', 'info'])
+
+    if len(sys.argv) < 2:
+        print(disclaimer)
+        return
 
     key_word = sys.argv[1]
 

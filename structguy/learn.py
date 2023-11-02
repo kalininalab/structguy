@@ -1,4 +1,6 @@
-#!/usr/bin/python3
+import ray
+import pickle
+
 from sklearn.metrics import accuracy_score
 from sklearn.metrics import r2_score
 from sklearn.metrics import f1_score
@@ -9,27 +11,10 @@ from sklearn.metrics import recall_score
 from sklearn.metrics import matthews_corrcoef
 
 from scipy import stats
-import resource
-import sys
-import os
-import random
 
-import util
-import getopt
-
-import featureGenerator
-import hyperParameterOptimization as hpo
-import sampleSpace
-import trainForest
-from results_analysis import Results, write_protein_wise_pearsons
-import featureAnalysis
-
-import cProfile
-import pstats
-
-import ray
-import pickle
-
+from structguy import util, featureGenerator, sampleSpace, trainForest, featureAnalysis
+from structguy import hyperParameterOptimization as hpo
+from structguy.results_analysis import Results, write_protein_wise_pearsons
 
 def calcFeatureImportances(forest, samples, cv_slice, config, print_them=False):
     feature_scores = forest.feature_importances_

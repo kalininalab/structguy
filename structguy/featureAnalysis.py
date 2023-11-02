@@ -1,12 +1,10 @@
-import learn
 import sys
-import sampleSpace
 import numpy as np
 import ray
-import trainForest
 import statistics
 import time
 
+from structguy import trainForest, learn
 from structman.base_utils.base_utils import calculate_chunksizes, pack, unpack
 
 def findAndAnalyseInterestingSample(forest, cv_slice, config):

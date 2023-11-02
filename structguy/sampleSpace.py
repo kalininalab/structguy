@@ -5,17 +5,16 @@ import math
 import random
 import ray
 import time
-import util
 
 from scipy import stats
 
 from structman.base_utils.base_utils import calculate_chunksizes
-#from scala.tree_split import tree
+
 from datasail.sail import datasail
 
-import sequence_feature_generation
+from structguy import sequence_feature_generation, util, dicts
 
-import dicts
+
 possible_na_values = set(['-', 'None'])
 class Feature:
     def __init__(self,name,f_type,group=None,default_value=None,mutation_specific=False):
