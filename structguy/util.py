@@ -675,13 +675,16 @@ class Config:
 
     def setByString(self,parameter_name,value):
         attributs = vars(self)
-        attributs_types = {attribut: type(valeur).__name__ for attribut, valeur in attributs.items()}
+        attribute_types = {attribute_name: type(attributs[attribute_name]) for attribute_name in attributs}
 
-        if parameter_name in attribute_names:
-            if isinstance(value, attribute_names[parameter_name]) or isinstance(value, type(None)) or (value == None):
+        if parameter_name in attribute_types:
+            target_type = attribute_types[parameter_name]
+            if isinstance(value, target_type) or isinstance(value, type(None)) or (value == None):
                 setattr(self, parameter_name, value)
+            elif isinstance(value, float) and target_type is int:
+                setattr(self, parameter_name, int(value))
             else:
-                raise TypeError(f"Value for {parameter_name} should be typed as a {attribute_names[parameter_name]}")
+                raise TypeError(f"Value for {parameter_name} should be typed as a {target_type}, but given was: {value} ({type(value)})")
         else:
             raise ValueError(f"Parameter {parameter_name} not known.")
 

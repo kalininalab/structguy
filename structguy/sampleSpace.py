@@ -804,15 +804,15 @@ class DataSAIL_cv(CrossValidation):
             print(f'Call of datasail with: e_data: {config.path_to_sequence_fasta}, e_weights: {weight_map} ({len(weight_map)}), splits: {splits}, names: {names}')
 
             write_weight_map(weight_map, 'weight_map_for_datasail.tsv')
-            raw_datasail_splits = datasail(e_data = config.path_to_sequence_fasta, e_weights = weight_map, splits = splits, techniques = ['CCSe'], names = names, e_type = 'P', solver = 'SCIP', verbose = 'I')
+            raw_datasail_splits = datasail(e_data = config.path_to_sequence_fasta, e_weights = weight_map, splits = splits, techniques = ['C1e'], names = names, e_type = 'P', solver = 'SCIP', verbose = 'I')
 
         else:
 
-            raw_datasail_splits = datasail(e_data = config.path_to_sequence_fasta, e_weights = weight_map, splits = splits, techniques = ['CCSe'], names = names, e_type = 'P', solver = 'SCIP')
+            raw_datasail_splits = datasail(e_data = config.path_to_sequence_fasta, e_weights = weight_map, splits = splits, techniques = ['C1e'], names = names, e_type = 'P', solver = 'SCIP')
 
         print(raw_datasail_splits)
 
-        datasail_splits = raw_datasail_splits[0]['CCSe'][0]
+        datasail_splits = raw_datasail_splits[0]['C1e'][0]
         print(datasail_splits)
 
         train_test_pairs = {}
