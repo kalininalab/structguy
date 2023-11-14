@@ -682,7 +682,7 @@ class Config:
             if isinstance(value, target_type) or isinstance(value, type(None)) or (value == None):
                 setattr(self, parameter_name, value)
             elif isinstance(value, float) and target_type is int:
-                setattr(self, parameter_name, int(value))
+                setattr(self, parameter_name, round(value))
             else:
                 raise TypeError(f"Value for {parameter_name} should be typed as a {target_type}, but given was: {value} ({type(value)})")
         else:

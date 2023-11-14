@@ -77,8 +77,10 @@ def sample_next_hyperparameter(acquisition_func, gaussian_process, evaluated_los
 
     for starting_point in np.random.uniform(bounds[:, 0], bounds[:, 1], size=(n_restarts, n_params)):
 
+        x0 = starting_point.reshape(1, -1)[0]
+        #print(f'In sample_next_hyperparameter, x0: {x0}, bounds: {bounds}')
         res = minimize(fun=acquisition_func,
-                       x0=starting_point.reshape(1, -1),
+                       x0=x0,
                        bounds=bounds,
                        method='L-BFGS-B',
                        args=(gaussian_process, evaluated_loss, greater_is_better, n_params))
@@ -138,6 +140,8 @@ def bayes_random_init(config, parameters, score_matrix, cv_obj, best_scores, n_p
 
     if n_pre_samples is None:
         n_pre_samples = min([config.proc_n, 2**n_params])
+
+    #n_pre_samples = 1 #Just for testing
 
     print('bayesian optimization:',param_names,n_pre_samples,force_remote)
     print('Current best scores:')
@@ -311,6 +315,9 @@ def bayesian_optimisation(n_iters, config, parameters, score_matrix, cv_obj, bes
         min_max_samples[1].append(bound[1])
 
     scaled_bounds = np.array([[0.,1.]]*len(bounds))
+
+    if config.verbosity >= 2:
+        print(f'In bayesian_optimization, scaled_bounds: {scaled_bounds}')
 
     scaler = MinMaxScaler()
     scaler.fit(min_max_samples)
