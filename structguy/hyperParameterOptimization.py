@@ -419,8 +419,10 @@ def bayesian_optimisation(n_iters, config, parameters, score_matrix, cv_obj, bes
         elif config.verbosity >= 3:
             print(f'No new optimun ({util.get_objective_score(config, best_scores)}): {util.get_objective_score(config, scores)}')
 
-        if cv_score is None:
-            print(' === cv_score is None:',next_sample)
+        if cv_score is None or cv_score != cv_score:
+            print(' === cv_score is None or Nan:',next_sample)
+            scores = util.Scores(zero=True)
+            cv_score = scores.objective_value(config)
 
         if config.verbosity >= 3:
             tl7 = time.time()
