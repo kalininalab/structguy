@@ -13,7 +13,7 @@ from structman.base_utils.base_utils import calculate_chunksizes
 def expand_structural_feature_table(config):
     samples = sampleSpace.SampleSpace(config)
     strfg.initFeatures(samples)
-    seqfg.initFeatures(samples)
+    seqfg.initFeatures(config, samples)
 
     parse_structural_features(samples, config)
 
@@ -241,7 +241,7 @@ def createTrainingSet(config):
     msa_db = config.msa_db
 
     strfg.initFeatures(samples)
-    seqfg.initFeatures(samples)
+    seqfg.initFeatures(config, samples)
 
     if config.path_to_processed_features_file == None:
 

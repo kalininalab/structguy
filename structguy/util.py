@@ -75,6 +75,8 @@ class Config:
         self.mmseqs_path = ""
 
         self.search_dbs = []
+        self.msa_dbs = ['ref50']
+        self.gpw_dbs = ['ref50', 'ref90']
 
         self.mmseqs_search_db_ref50 = ''
         self.mmseqs_search_db_ref90 = ''
@@ -152,7 +154,7 @@ class Config:
         self.filter_single_variant_prots = False
         self.balanceSubsampling = None
         self.fusePositions = False
-        self.standard_feature_filter = {'dPSIC ref50':0.0}
+        self.standard_feature_filter = {'dPSIC GPW ref50':0.0}
 
         self.transform = False
         self.produce_scatterplot = False
@@ -683,6 +685,8 @@ class Config:
                 setattr(self, parameter_name, value)
             elif isinstance(value, float) and target_type is int:
                 setattr(self, parameter_name, round(value))
+            elif str(target_type).count('float') > 0 and isinstance(value, float):
+                setattr(self, parameter_name, value)
             else:
                 raise TypeError(f"Value for {parameter_name} should be typed as a {target_type}, but given was: {value} ({type(value)})")
         else:

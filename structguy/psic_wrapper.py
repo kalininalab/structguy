@@ -4,16 +4,20 @@ import os
 def fastaToClustal(aln_fasta):
     seq_map = {}
     seed_id = None
-    for line in aln_fasta.split(b'\n'):
+    try:
+        lines = aln_fasta.split('\n')
+    except:
+        lines = aln_fasta.decode('ascii').split('\n')
+    for line in lines:
         if len(line) == 0:
             continue
-        if line[0:1] == b'>':
-            entry_id = line[1:].split()[0].decode('ascii')
+        if line[0:1] == '>':
+            entry_id = line[1:].split()[0]
             seq_map[entry_id] = ''
             if seed_id == None:
                 seed_id = entry_id
         else:
-            seq_map[entry_id] += line.decode('ascii')
+            seq_map[entry_id] += line
 
     if seed_id == None:
         return None

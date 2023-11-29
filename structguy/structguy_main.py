@@ -6,6 +6,8 @@ import time
 
 from structguy import featureGenerator, util, learn, featureAnalysis
 
+import structman.base_utils.ray_utils as ray_utils
+
 disclaimer = """
 structguy_main.py generate_features [-i -o --verbosity]\n
 structguy_main.py build_model [-i -o --verbosity]\n
@@ -90,6 +92,8 @@ def parse_arguments(argument_start = 2):
 def feature_generator_main():
     config = parse_arguments()
 
+    ray_utils.ray_init(config, overwrite_logging_level = 0)
+
     if config.path_structural_feature_table is not None:
         featureGenerator.expand_structural_feature_table(config)
 
@@ -100,8 +104,6 @@ def build_model_main():
 
     config.saveHyperParameter()
 
-    import structman.base_utils.ray_utils as ray_utils
-
     ray_utils.ray_init(config, overwrite_logging_level = 0)
 
     learn.learn(config)
@@ -110,8 +112,6 @@ def build_model_main():
 
 def predict_main():
     config = parse_arguments()
-
-    import structman.base_utils.ray_utils as ray_utils
 
     ray_utils.ray_init(config, overwrite_logging_level = 0)
     learn.evaluate_dataset(config)

@@ -3,6 +3,7 @@ import sys
 import traceback
 import gzip
 import subprocess
+import ray
 
 from Bio.Align.Applications import MafftCommandline
 
@@ -10,6 +11,7 @@ import xml.etree.ElementTree as ET
 
 from Bio import pairwise2
 from structman.lib.sdsc.consts import residues as residue_consts
+from structman.base_utils.base_utils import pack, unpack
 
 from structguy import psic_wrapper as psic
 from structguy import util
@@ -25,18 +27,16 @@ def median(l):
         med = l[(n-1)//2]
     return med
 
-def lookup(config, prot_id, ref_db_ids=['ref50','ref90'], gpw_ref_db_ids=['ref50','ref90'],debug=0,update_mode=False,sequence=None,sequence_map=None,pdb_tuple=None):
+def lookup(config, prot_id, ref_db_ids=['ref50','ref90'], gpw_ref_db_ids=['ref50','ref90'],debug=0,update_mode=False,sequence=None,sequence_maps=None,pdb_tuple=None):
 
     out_directory = get_out_directory(prot_id, config, pdb_tuple = pdb_tuple)
 
+    msa_files = {}
 
-    files = {}
-    msas = {}
-    gpws = {}
     for ref_db_id in ref_db_ids:
         filename = util.get_msa_path(out_directory, prot_id, ref_db_id)
         if os.path.isfile(filename):
-            files[ref_db_id] = filename
+            msa_files[ref_db_id] = filename
             if debug >= 2:
                 print('Look-up found a msa: ',filename)
 
@@ -48,19 +48,23 @@ def lookup(config, prot_id, ref_db_ids=['ref50','ref90'], gpw_ref_db_ids=['ref50
             if debug >= 2:
                 print('Look-up found a gpw: ',filename)
 
-    for ref_db_id in files:
-        filename = files[ref_db_id]
-        f = gzip.open(filename,'r')
-        msa = f.read()
-        f.close()
-        if msa == '':
-            continue
+    for ref_db_id in msa_files:
+        filename = msa_files[ref_db_id]
+        #f = gzip.open(filename,'r')
+        #msa = f.read()
+        #f.close()
+        #if msa == '':
+        #    continue
 
         psic_name = util.get_msa_path(out_directory, prot_id, ref_db_id, psic = True)
         if not os.path.isfile(psic_name):
             if debug >= 1:
                 print('Calc psic profiles from lookup', ref_db_id)
-            psic.psicFromFasta(msa,psic_name[:-3])
+
+            f = gzip.open(filename,'r')
+            msa = f.read()
+            f.close()
+            psic.psicFromFasta(msa,psic_name[:-3],config)
             
             if os.path.isfile(psic_name):
                 os.remove(psic_name)
@@ -69,15 +73,14 @@ def lookup(config, prot_id, ref_db_ids=['ref50','ref90'], gpw_ref_db_ids=['ref50
             except:
                 pass
 
-        msas[ref_db_id] = msa
-
     for ref_db_id in gpw_files:
 
         filename = gpw_files[ref_db_id]
 
         if update_mode:
-            gpw = updateGPW(filename,ref_db_id, sequence, sequence_map, prot_id)
+            gpw = updateGPW(filename,ref_db_id, sequence, sequence_maps[ref_db_id], prot_id)
 
+        """
         else:
             try:
                 f = gzip.open(filename,'r')
@@ -88,6 +91,7 @@ def lookup(config, prot_id, ref_db_ids=['ref50','ref90'], gpw_ref_db_ids=['ref50
                 continue
             if gpw == '':
                 continue
+        """
 
         psic_name = util.get_msa_path(out_directory, prot_id, ref_db_id, psic = True, gpw = True)
         if (not os.path.isfile(psic_name)) or update_mode:
@@ -103,9 +107,8 @@ def lookup(config, prot_id, ref_db_ids=['ref50','ref90'], gpw_ref_db_ids=['ref50
                 os.system("gzip %s" % psic_name[:-3])
             except:
                 pass
-        gpws[ref_db_id] = gpw
 
-    return msas,gpws
+    return msa_files, gpw_files
 
 
 def parseFasta(path,lines=None):
@@ -125,6 +128,20 @@ def parseFasta(path,lines=None):
             seq_map[entry_id] += line.decode('ascii')
 
     return seq_map
+
+def write_fasta(seq_map, outfile = None):
+    lines = []
+    for prot_id in seq_map:
+        lines.append(f'>{prot_id}\n')
+        lines.append(f'{seq_map[prot_id]}\n')
+    page = ''.join(lines)
+    if outfile is None:
+        return page
+
+    f = open(outfile, 'w')
+    f.write(page)
+    f.close()
+    return page
 
 def blast(config,seq,name,search_db,search_db_path,search_db_sequences={}):
     blast_path = config.blast_path
@@ -198,49 +215,87 @@ def blast(config,seq,name,search_db,search_db_path,search_db_sequences={}):
     page = '\n'.join(fasta_lines)
     return page,search_db_sequences
 
-def computeMSA(config,seq,u_ac,search_db='ref50',search_db_path='',debug=0,search_db_sequences={}):
+def computeMSA(config, seq, u_ac, search_db='ref50', search_db_path='', debug=0, search_db_sequences={}, sequence_map=None, sub_threads = 1):
     mafft_exe = config.mafft_path
     print('Compute MSA: ',u_ac,search_db)
 
-    #Blast against search database
-    fasta_page,search_db_sequences = blast(seq,'%s_%s' % (u_ac,search_db),search_db,search_db_path,search_db_sequences=search_db_sequences)
+    if sequence_map is None:
+        #Blast against search database
+        fasta_page,search_db_sequences = blast(seq,'%s_%s' % (u_ac,search_db),search_db,search_db_path,search_db_sequences=search_db_sequences)
 
-    if fasta_page == None:
-        return None,None
+        if fasta_page == None:
+            return None,None
 
-    #Write the Blast results into a fasta file
-    cwd = os.getcwd()
+        #Write the Blast results into a fasta file
+        cwd = os.getcwd()
 
-    temp_fasta = '%s/temp_fasta_%s_%s.fasta' % (cwd,u_ac,search_db)
-    f = open(temp_fasta,'w')
-    f.write(fasta_page)
-    f.close()
+        temp_fasta = '%s/temp_fasta_%s_%s.fasta' % (cwd,u_ac,search_db)
+        f = open(temp_fasta,'w')
+        f.write(fasta_page)
+        f.close()
+    else:
+        cwd = os.getcwd()
+
+        temp_fasta = '%s/temp_fasta_%s_%s.fasta' % (cwd,u_ac.replace('(','').replace(')',''),search_db)
+        sequence_map[u_ac] = seq
+        fasta_page = write_fasta(sequence_map, outfile = temp_fasta)
 
     stderr = None
     #Run mafft
     try:
-        mafft_cline = MafftCommandline(mafft_exe, input=temp_fasta,thread=4,amino=True)
+        mafft_cline = MafftCommandline(mafft_exe, input=temp_fasta,thread=sub_threads,amino=True)
         stdout, stderr = mafft_cline()
     except:
         [e,f,g] = sys.exc_info()
-        g = traceback.format_exc(g)
+        g = traceback.format_exc()
         print(u_ac,search_db,e,f,g,stderr)
-        return None,None
+        return None,None,None
     
 
     #delete temporary files
-    os.remove(temp_fasta)
+    try:
+        os.remove(temp_fasta)
+    except:
+        pass
 
     print('Done computing MSA: ',u_ac,search_db)
 
-    return stdout,fasta_page,search_db_sequences
+    outlines = []
+    inlines = stdout.split('\n')
+    parse = False
+    for line in inlines:
+        if line == '':
+            continue
+        if line[0] == '>':
+            entry_id = line[1:]
+            if entry_id == u_ac:
+                parse = True
+            else:
+                parse = False
+        if parse:
+            outlines.append(f'{line}\n')
+
+    parse = False
+    for line in inlines:
+        if line == '':
+            continue
+        if line[0] == '>':
+            entry_id = line[1:]
+            if entry_id == u_ac:
+                parse = False
+            else:
+                parse = True
+        if parse:
+            outlines.append(f'{line}\n')
+
+    return ''.join(outlines),fasta_page,search_db_sequences
 
 def updateGPW(filename,search_db,seq,sequence_map,u_ac):
     print("Update GPW: ",filename)
     f = gzip.open(filename,'rb')
     gpw = f.read()
     f.close()
-    gpw_ds = parseGpwFasta(gpw,dict_out=True)
+    gpw_ds, seed = parseGpwFasta(gpw,dict_out=True)
 
     #print gpw_ds
 
@@ -287,8 +342,8 @@ def updateGPW(filename,search_db,seq,sequence_map,u_ac):
 
     return gpw
 
-def computeGPW(config,seq,u_ac,search_db='ref50',search_db_path={},debug=0,fasta_page=None,sequence_map=None,search_db_sequences={}):
-    print('Compute GPW: ',u_ac,search_db)
+def computeGPW(config, seq, prot_id, search_db='ref50',search_db_path={},debug=0,fasta_page=None,sequence_map=None,search_db_sequences={}, sub_threads = 1):
+    print('Compute GPW: ', prot_id, search_db)
 
     if sequence_map == None:
         if fasta_page == None:
@@ -297,8 +352,8 @@ def computeGPW(config,seq,u_ac,search_db='ref50',search_db_path={},debug=0,fasta
             """
             #Blast against search database
             if debug >= 1:
-                print('In computeGPW sequence_map is None and fasta_page is None, try BLAST:',u_ac,search_db)
-            fasta_page,search_db_sequences = blast(seq,'%s_%s' % (u_ac,search_db),search_db,search_db_path,search_db_sequences=search_db_sequences)
+                print('In computeGPW sequence_map is None and fasta_page is None, try BLAST:',prot_id,search_db)
+            fasta_page,search_db_sequences = blast(seq,'%s_%s' % (prot_id,search_db),search_db,search_db_path,search_db_sequences=search_db_sequences)
             """
         if fasta_page == None:
             return None,search_db_sequences
@@ -313,32 +368,70 @@ def computeGPW(config,seq,u_ac,search_db='ref50',search_db_path={},debug=0,fasta
 
     if seq == 0 or seq == 1:
         if debug >= 1:
-            print('Sequence error in computeGPW:',u_ac,search_db)
+            print('Sequence error in computeGPW:', prot_id, search_db)
         return '',search_db_sequences
 
     out_fasta_lines = []
     target_seq = seq.replace('U','C').replace('O','K').replace('J','I')
-    for seq_id in seq_map:
-        template_seq = seq_map[seq_id]
-        if debug >= 3:
-            print('Aligning:',u_ac,seq_id)
-            print(target_seq)
-            print(template_seq)
-        try:
-            (target_aligned_sequence,template_aligned_sequence,a,b,c) = pairwise2.align.globalds(target_seq, template_seq,residue_consts.BLOSUM62,-10.0,-0.5,one_alignment_only=True)[0]
-        except:
-            if debug >= 1:
-                print('GPW error: ', u_ac, seq_id)
-                print(target_seq[:10],template_seq[:10])
-            continue
-        out_fasta_lines.append('>%s_%s' % (u_ac,seq_id))
-        out_fasta_lines.append(target_aligned_sequence)
-        out_fasta_lines.append('>%s' % seq_id)
-        out_fasta_lines.append(template_aligned_sequence)
+    if sub_threads == 1:
+        for hit in seq_map:
+            template_seq = seq_map[hit]
+            if debug >= 3:
+                print('Aligning:', prot_id, hit)
+                print(target_seq)
+                print(template_seq)
+            try:
+                (target_aligned_sequence,template_aligned_sequence,a,b,c) = pairwise2.align.globalds(target_seq, template_seq,residue_consts.BLOSUM62,-10.0,-0.5,one_alignment_only=True)[0]
+            except:
+                if debug >= 1:
+                    print('GPW error: ', prot_id, hit)
+                    print(target_seq[:10],template_seq[:10])
+                continue
+            out_fasta_lines.append(f'>{prot_id}_{hit}\n')
+            out_fasta_lines.append(f'{target_aligned_sequence}\n')
+            out_fasta_lines.append(f'>{hit}\n')
+            out_fasta_lines.append(f'{template_aligned_sequence}\n')
+    else:
+        store = ray.put((prot_id, target_seq, residue_consts.BLOSUM62))
+        packages = []
+        current_package = 0
+        for hit in seq_map:
+            hit_seq = seq_map[hit]
+            if len(packages) == current_package:
+                packages.append([])
+            packages[current_package].append((hit, hit_seq))
+            current_package += 1
+            if current_package >= sub_threads:
+                current_package = 0
+
+        para_alignment_ray_process_ids = []
+        for package in packages:
+            para_alignment_ray_process_ids.append(para_align_seqs.remote(store, pack(package)))
+
+        alignment_results = ray.get(para_alignment_ray_process_ids)
+        for results_package in alignment_results:
+            para_fasta_lines = unpack(results_package)
+            out_fasta_lines += para_fasta_lines
+
     if debug >= 1:
         print('Done computing GPW: ',u_ac,search_db)
 
-    return '\n'.join(out_fasta_lines),search_db_sequences
+    return ''.join(out_fasta_lines), search_db_sequences
+
+@ray.remote(max_calls = 1)
+def para_align_seqs(store, package):
+    prot_id, target_seq, blosum_matrix = store
+    out_fasta_lines = []
+    for hit, hit_seq in unpack(package):
+        try:
+            (target_aligned_sequence,template_aligned_sequence,a,b,c) = pairwise2.align.globalds(target_seq, hit_seq, blosum_matrix,-10.0,-0.5,one_alignment_only=True)[0]
+        except:
+            continue
+        out_fasta_lines.append(f'>{prot_id}_{hit}\n')
+        out_fasta_lines.append(f'{target_aligned_sequence}\n')
+        out_fasta_lines.append(f'>{hit}\n')
+        out_fasta_lines.append(f'{template_aligned_sequence}\n')
+    return pack(out_fasta_lines)
 
 def saveMSA(config, msa, prot_id, ref_db_id, pdb_tuple):
 
@@ -351,18 +444,47 @@ def saveMSA(config, msa, prot_id, ref_db_id, pdb_tuple):
 
     filename = util.get_msa_path(out_directory, prot_id, ref_db_id, unpacked = True)
 
+    outlines = []
+    inlines = msa.split('\n')
+    parse = False
+    for line in inlines:
+        if line == '':
+            continue
+        if line[0] == '>':
+            entry_id = line[1:]
+            if entry_id == prot_id:
+                parse = True
+            else:
+                parse = False
+        if parse:
+            outlines.append(f'{line}\n')
+
+    parse = False
+    for line in inlines:
+        if line == '':
+            continue
+        if line[0] == '>':
+            entry_id = line[1:]
+            if entry_id == prot_id:
+                parse = False
+            else:
+                parse = True
+        if parse:
+            outlines.append(f'{line}\n')
+
+    
+
     f = open(filename,'w')
-    f.write(msa)
+    f.write(''.join(outlines))
     f.close()
 
     if os.path.isfile('%s.gz' % filename):
         os.remove('%s.gz' % filename)
     os.system("gzip %s" % filename)
 
-    return
+    return f'{filename}.gz'
 
 def saveGpw(config, gpw, prot_id, ref_db_id, pdb_tuple):
-
     if gpw == None:
         return
 
@@ -378,7 +500,7 @@ def saveGpw(config, gpw, prot_id, ref_db_id, pdb_tuple):
         os.remove('%s.gz' % filename)
     os.system("gzip %s" % filename)
 
-    return
+    return f'{filename}.gz'
 
 def parsePsicFile(infile,debug=0):
     if not os.path.isfile(infile):
@@ -518,22 +640,41 @@ def calcPsicProfiles(config, prot_id, aacs, seq, ref_db_id, gpw=False, debug=0):
 #called by structural_feature_generation
 def getPosWiseGPW(gpw):
     pos_wise_map = {}
-    target = True
-    first_target = True
-    for [seq_id,seq] in gpw:
-        if target:
-            pos_map = getPosMap(seq)
-            target = False
-            if first_target:
-                for gl_pos,pos in enumerate(pos_map):
-                    pos_wise_map[gl_pos] = [seq[pos]]
-            first_target = False
-        else:
-            target = True
+
+    first_hit = True
+    for hit_id in gpw:
+        query_seq, hit_seq = gpw[hit_id]
+ 
+        pos_map = getPosMap(query_seq)
+
+        if first_hit:
             for gl_pos,pos in enumerate(pos_map):
-                pos_wise_map[gl_pos].append(seq[pos])
+                pos_wise_map[gl_pos] = [query_seq[pos]]
+                first_hit = False
+
+        try:
+            for gl_pos,pos in enumerate(pos_map):
+                pos_wise_map[gl_pos].append(hit_seq[pos])
+        except:
+            print(f'{hit_id} {len(pos_map)} {len(query_seq)} {len(hit_seq)}')
+            for gl_pos,pos in enumerate(pos_map):
+                pos_wise_map[gl_pos].append(hit_seq[pos])
 
     return pos_wise_map
+
+def getPosWiseMSA(msa, seed):
+    pos_wise_map = {}
+    pos_map = getPosMap(msa[seed])
+    for gl_pos,pos in enumerate(pos_map):
+            pos_wise_map[gl_pos] = [msa[seed][pos]]
+    for prot_id in msa:
+        if prot_id == seed:
+            continue
+        seq = msa[prot_id]
+        for gl_pos,pos in enumerate(pos_map):
+            pos_wise_map[gl_pos].append(seq[pos])
+    return pos_wise_map
+
 
 def getPosMap(seq):
     #print seq
@@ -560,7 +701,7 @@ def get_out_directory(protein_id, config, pdb_tuple = None):
 
     return out_directory
 
-def getMSA(config, prot_id, sequence_map=None, sequence=None, ref_db_ids=['ref50','ref90'], gpw_ref_db_ids=['ref50','ref90'], debug=0, update_mode=False):
+def getMSA(config, prot_id, sequence_maps=None, sequence=None, ref_db_ids=['ref50','ref90'], gpw_ref_db_ids=['ref50','ref90'], debug=0, update_mode=False, sub_threads = 1):
 
     if prot_id[4] == ':' and len(prot_id) == 6:
         pdb_tuple = prot_id
@@ -578,7 +719,7 @@ def getMSA(config, prot_id, sequence_map=None, sequence=None, ref_db_ids=['ref50
         return {},{}
 
     #Check if the protein is in the database
-    msas,gpws = lookup(config, prot_id, ref_db_ids=ref_db_ids, gpw_ref_db_ids=gpw_ref_db_ids, debug=debug, update_mode=update_mode, sequence=sequence, sequence_map=sequence_map, pdb_tuple=pdb_tuple)
+    msas, gpws = lookup(config, prot_id, ref_db_ids=ref_db_ids, gpw_ref_db_ids=gpw_ref_db_ids, debug=debug, update_mode=update_mode, sequence=sequence, sequence_maps=sequence_maps, pdb_tuple=pdb_tuple)
 
     if debug >= 2:
         print('Lookup results: ', prot_id, list(msas.keys()), list(gpws.keys()))
@@ -587,7 +728,7 @@ def getMSA(config, prot_id, sequence_map=None, sequence=None, ref_db_ids=['ref50
     if len(msas) == len(ref_db_ids) and len(gpws) == len(gpw_ref_db_ids):
         if debug >= 1:
             print('found msas in the db')
-        return msas,gpws
+        return msas, gpws
 
     fasta_results = {}
 
@@ -598,14 +739,13 @@ def getMSA(config, prot_id, sequence_map=None, sequence=None, ref_db_ids=['ref50
     for ref_db_id in ref_db_ids:
         if ref_db_id in msas:
             continue
-        msa,fasta_page,search_db_sequences = computeMSA(config, sequence, prot_id, search_db=ref_db_id, search_db_path=search_dbs[ref_db_id], debug=debug, sequence_map=sequence_map, search_db_sequences=search_db_sequences)
-        msas[ref_db_id] = msa
-
+        msa,fasta_page,search_db_sequences = computeMSA(config, sequence, prot_id, search_db=ref_db_id, search_db_path=search_dbs[ref_db_id], debug=debug, sequence_map=sequence_maps[ref_db_id], search_db_sequences=search_db_sequences, sub_threads = sub_threads)
+        
         psic_name = util.get_msa_path(out_directory, prot_id, ref_db_id, psic = True)
         if not os.path.isfile(psic_name):
             if debug >= 1:
                 print('Calc psic profiles from getMSA',ref_db_id)
-            psic.psicFromFasta(msa,outfile=psic_name[:-3])
+            psic.psicFromFasta(msa,psic_name[:-3],config)
             
             if os.path.isfile(psic_name):
                 os.remove(psic_name)
@@ -615,7 +755,8 @@ def getMSA(config, prot_id, sequence_map=None, sequence=None, ref_db_ids=['ref50
                 pass
 
         #save them into the database
-        saveMSA(config, msa, prot_id, ref_db_id, pdb_tuple)
+        msa_file_path = saveMSA(config, msa, prot_id, ref_db_id, pdb_tuple)
+        msas[ref_db_id] = msa_file_path
 
     for ref_db_id in gpw_ref_db_ids:
         if ref_db_id in gpws:
@@ -625,15 +766,16 @@ def getMSA(config, prot_id, sequence_map=None, sequence=None, ref_db_ids=['ref50
         else:
             fasta_page = None
         gpw,search_db_sequences = computeGPW(config, sequence, prot_id, search_db=ref_db_id, search_db_path=search_dbs[ref_db_id], debug=debug,
-                                                fasta_page=fasta_page, sequence_map=sequence_map, search_db_sequences=search_db_sequences)
+                                                fasta_page=fasta_page, sequence_map=sequence_maps[ref_db_id], search_db_sequences=search_db_sequences, sub_threads = sub_threads)
         if gpw == '':
             if debug >= 1:
                 print('computeGPW returned empty result:', prot_id, ref_db_id)
             continue
-        gpws[ref_db_id] = gpw
 
         #save them into the database
-        saveGpw(config, gpw, prot_id, ref_db_id, pdb_tuple)
+        gpw_file_path = saveGpw(config, gpw, prot_id, ref_db_id, pdb_tuple)
+
+        gpws[ref_db_id] = gpw_file_path
 
         psic_name = util.get_msa_path(out_directory, prot_id, ref_db_id, psic = True, gpw = True)
         if not os.path.isfile(psic_name):
@@ -648,7 +790,7 @@ def getMSA(config, prot_id, sequence_map=None, sequence=None, ref_db_ids=['ref50
             except:
                 pass
 
-    return msas,gpws
+    return msas, gpws
 
 def parseGpwFasta(page,dict_out=False):
 
@@ -659,29 +801,50 @@ def parseGpwFasta(page,dict_out=False):
         lines = page.split(b'\n')
 
     if dict_out:
+        seed = None
         seq_map = {}
         second_seq = False
+        first_entry = True
         for line in lines:
             if len(line) == 0:
                 continue
             if line[0:1] == b'>':
                 entry_id = line[1:].split()[0]
-                if entry_id.count(b'_') == 2:
-                    qid = entry_id.split(b'_')[0]
-                    t_id = (b'_'.join(entry_id.split(b'_')[1:])).decode('ascii')
+                if first_entry:
+                    if entry_id.count(b'UniRef') > 0:
+                        q_id = b'_'.join(entry_id.split(b'_')[:-2])
+                        t_id = (b'_'.join(entry_id.split(b'_')[-2:])).decode('ascii')
+                    else:
+                        splits = entry_id.split(b'_')
+                        h = len(splits) //2
+                        q_id = b'_'.join(entry_id.split(b'_')[:-h])
+                        t_id = (b'_'.join(entry_id.split(b'_')[-h:])).decode('ascii')
                     seq_map[t_id] = ['','']
                     second_seq = False
+                    first_entry = False
+                    if seed is None:
+                        seed = q_id.decode('ascii')
                 else:
                     t_id = entry_id.decode('ascii')
                     second_seq = True
+                    first_entry = True
+                
             else:
-                if second_seq:
-                    seq_map[t_id][1] += line.decode('ascii')
-                else:
-                    seq_map[t_id][0] += line.decode('ascii')
+                try:
+                    if second_seq:
+                        seq_map[t_id][1] += line.decode('ascii')
+                    else:
+                        seq_map[t_id][0] += line.decode('ascii')
+                except:
+                    print(f'{t_id} \n {list(seq_map.keys())}')
+                    if second_seq:
+                        seq_map[t_id][1] += line.decode('ascii')
+                    else:
+                        seq_map[t_id][0] += line.decode('ascii')
     else:
 
         seq_map = []
+        seed = 0
         for line in lines:
             if len(line) == 0:
                 continue
@@ -692,12 +855,10 @@ def parseGpwFasta(page,dict_out=False):
                 seq_map.append([entry_id,''])
             else:
                 seq_map[-1][1] += line.decode('ascii')
-    return seq_map
+    return seq_map, seed
 
 def parseMsaFasta(page):
     lines = page.split(b'\n')
-
-    seed = None
 
     seq_map = {}
     for line in lines:
@@ -706,10 +867,9 @@ def parseMsaFasta(page):
         if line[0:1] == b'>':
             entry_id = line[1:].split()[0].decode('ascii')
             seq_map[entry_id] = ''
-            if seed == None:
-                seed = entry_id
+
         else:
             seq_map[entry_id] += line.decode('ascii')
-    return seq_map,seed
+    return seq_map
 
 

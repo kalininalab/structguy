@@ -241,7 +241,7 @@ def bayes_random_init(config, parameters, score_matrix, cv_obj, best_scores, n_p
                     cat_param_map[parameter.name][val] = []
                 cat_param_map[parameter.name][val].append(obj_sc)
 
-    print('Para random init finished')
+    print('Random init finished')
     fix_parameters_pos = []
     if fix_cat:
 
@@ -564,7 +564,7 @@ def threeDim(parameter_1, parameter_2, parameter_3, best_scores, config, score_m
         elif parameter_3.param_type == 'categorical':
             return bayesianAndCat(parameter_3, [parameter_1, parameter_2], best_scores, config, score_matrix, cv_obj, distance_map, samples = samples)
 
-    return bayesian_optimisation(None, config, [parameter_1, parameter_2, parameter_3], score_matrix, cv_obj, best_scores, distance_map, samples = samples, n_pre_samples = None, force_remote = True)
+    return bayesian_optimisation(None, config, [parameter_1, parameter_2, parameter_3], score_matrix, cv_obj, best_scores, distance_map, samples = samples, n_pre_samples = None)
 
 def halfStepAndCat(parameter_1, parameter_2, best_scores, config, score_matrix, cv_obj, distance_map, samples = None):
     print('halfStep and Cat 2D',parameter_1.name,parameter_2.name)
@@ -1168,7 +1168,7 @@ def threeDimHyperOptimization(config, cv_obj, best_scores, distance_map = None, 
     print(f'=== Start with a brief complete bayes search (with big random init) ===')
     #Set samples to None, should not be needed, since slice_slices got set in initial training
     random_init_loops = max([config.proc_n, 1])
-    new_optimimum, best_scores = bayesian_optimisation(3*len(parameters), config, [parameters[p] for p in parameters], score_matrix, cv_obj, best_scores, distance_map, samples = None, n_pre_samples = random_init_loops, force_remote = True)
+    new_optimimum, best_scores = bayesian_optimisation(3*len(parameters), config, [parameters[p] for p in parameters], score_matrix, cv_obj, best_scores, distance_map, samples = None, n_pre_samples = random_init_loops)
     """
     #del samples
     #samples = None

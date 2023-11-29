@@ -4,27 +4,38 @@ import multiprocessing
 import string
 import random
 import os
+import sys
+import traceback
+import ray
+import gzip
 
 from structguy import msa, consts, util
+from structman.base_utils.base_utils import pack, unpack
 
-def initFeatures(samples):
-    dbs = consts.refseq_datasets
-    for db in dbs:
-        samples.addFeature('Wildtype AA rate %s' % db,'real',group='sequence',default_value=0.)
-        samples.addFeature('Mutant AA rate %s' % db,'real',group='sequence',default_value=0.,mutation_specific=True)
-        samples.addFeature('Wildtype AA rate gapless %s' % db,'real',group='sequence',default_value=0.)
-        samples.addFeature('Mutant AA rate gapless %s' % db,'real',group='sequence',default_value=0.,mutation_specific=True)
-        samples.addFeature('MSA allel freq %s' % db,'real',group='sequence',default_value=0.)
+def initFeatures(config, samples):
+    dbs = []
+    for db_id in config.msa_dbs:
+        dbs.append((db_id, 'MSA'))
 
-        samples.addFeature('Other mutant AA rate %s' % db,'real',group='sequence',default_value=0.,mutation_specific=True)
-        samples.addFeature('Other mutant AA rate gapless %s' % db,'real',group='sequence',default_value=0.,mutation_specific=True)
-        samples.addFeature('PSIC wildtype AA %s' % db,'real',group='sequence',default_value=0.)
-        samples.addFeature('PSIC mutant AA %s' % db,'real',group='sequence',default_value=0.,mutation_specific=True)
-        samples.addFeature('dPSIC %s' % db,'real',group='sequence',default_value=0.,mutation_specific=True)
+    for db_id in config.gpw_dbs:
+        dbs.append((db_id, "GPW"))
 
-        samples.addFeature('Positional median dPSIC %s' % db,'real',group='sequence',default_value=0.)
-        samples.addFeature('Window median dPSIC %s' % db,'real',group='sequence',default_value=0.)
-        samples.addFeature('Protein median dPSIC %s' % db,'real',group='sequence',default_value=0.)
+    for db_name, feature_name_tag in dbs:
+        samples.addFeature(f'Wildtype AA rate {feature_name_tag} {db_name}','real',group='sequence',default_value=0.)
+        samples.addFeature(f'Mutant AA rate {feature_name_tag} {db_name}','real',group='sequence',default_value=0.,mutation_specific=True)
+        samples.addFeature(f'Wildtype AA rate gapless {feature_name_tag} {db_name}','real',group='sequence',default_value=0.)
+        samples.addFeature(f'Mutant AA rate gapless {feature_name_tag} {db_name}','real',group='sequence',default_value=0.,mutation_specific=True)
+        samples.addFeature(f'MSA allel freq {feature_name_tag} {db_name}','real',group='sequence',default_value=0.)
+
+        samples.addFeature(f'Other mutant AA rate {feature_name_tag} {db_name}','real',group='sequence',default_value=0.,mutation_specific=True)
+        samples.addFeature(f'Other mutant AA rate gapless {feature_name_tag} {db_name}','real',group='sequence',default_value=0.,mutation_specific=True)
+        samples.addFeature(f'PSIC wildtype AA {feature_name_tag} {db_name}','real',group='sequence',default_value=0.)
+        samples.addFeature(f'PSIC mutant AA {feature_name_tag} {db_name}','real',group='sequence',default_value=0.,mutation_specific=True)
+        samples.addFeature(f'dPSIC {feature_name_tag} {db_name}','real',group='sequence',default_value=0.,mutation_specific=True)
+
+        samples.addFeature(f'Positional median dPSIC {feature_name_tag} {db_name}','real',group='sequence',default_value=0.)
+        samples.addFeature(f'Window median dPSIC {feature_name_tag} {db_name}','real',group='sequence',default_value=0.)
+        samples.addFeature(f'Protein median dPSIC {feature_name_tag} {db_name}','real',group='sequence',default_value=0.)
 
     samples.addFeature('Sequence Position Number','integer',group = 'amino acid property')
     samples.addFeature('Relative Sequence Position','real',group = 'amino acid property')
@@ -96,12 +107,37 @@ def parseFromFasta(seqs_from_fasta, config = None, dbs = []):
                 in_db.add(entry_id)
         else:
             seq_map[entry_id][0] += line.replace('\n', '').replace('/','').replace('*','').upper()
-    return seq_map, in_db 
+    return seq_map, in_db
+
+def estimate_cost(config, prot_id, msa_ref_dbs, gpw_ref_dbs, seq_len, n_of_mapped_seqs):
+    total_cost = 0
+    out_directory = msa.get_out_directory(prot_id, config)
+    for msa_ref_db in msa_ref_dbs:
+        filename = util.get_msa_path(out_directory, prot_id, msa_ref_db)
+        if not os.path.isfile(filename):
+            total_cost += ((seq_len**2) * n_of_mapped_seqs[msa_ref_db]) + (seq_len**2 * (n_of_mapped_seqs[msa_ref_db]**2))
+
+        psic_name = util.get_msa_path(out_directory, prot_id, msa_ref_db, psic = True)
+        if not os.path.isfile(psic_name):
+            total_cost += seq_len * n_of_mapped_seqs[msa_ref_db]
+
+    for gpw_ref_db in gpw_ref_dbs:
+        filename = util.get_msa_path(out_directory, prot_id, gpw_ref_db, gpw = True)
+        if os.path.isfile(filename):
+            total_cost += (seq_len**2) * n_of_mapped_seqs[gpw_ref_db]
+
+        psic_name = util.get_msa_path(out_directory, prot_id, gpw_ref_db,  gpw = True, psic = True)
+        if not os.path.isfile(psic_name):
+            total_cost += seq_len * n_of_mapped_seqs[gpw_ref_db]
+
+    return total_cost
+        
 
 def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False):
 
     if config.verbosity >= 2:
         t0 = time.time()
+        print(f'Call of getSequenceFeatures with MSA DB: {config.msa_db}')
 
     manager = multiprocessing.Manager()
     lock = manager.Lock()
@@ -109,10 +145,12 @@ def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False):
     inqueue = manager.Queue()
     outqueue = manager.Queue()
 
+    msa_dbs = config.msa_dbs
+    gpw_dbs = config.gpw_dbs
     msa_map = {}
     gpw_map = {}
 
-    initFeatures(samples)
+    initFeatures(config, samples)
 
     n = 0
     u_acs = set([])
@@ -239,20 +277,81 @@ def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False):
         t3 = time.time()
         print('getSequenceFeature part 3: ',t3-t2)
 
+    cost_map = {}
+    cost_tuples = []
+    total_cost = 0
     for primary_protein_id in msa_to_process:
-        for db in dbs:
-            n += 1
-            inqueue.put((primary_protein_id, db, n))
 
-    for pdb_tuple in pdb_ids:
+        n_of_mapped_seqs = {}
         for db in dbs:
-            n += 1
-            inqueue.put((pdb_tuple,db,n))
+            if primary_protein_id in sequence_maps[db]:
+                n_of_mapped_seqs[db] = len(sequence_maps[db][primary_protein_id])
+            else:
+                n_of_mapped_seqs[db] = 0
+        seq_len = len(gene_seq_map[primary_protein_id])
+        cost = estimate_cost(config, primary_protein_id, msa_dbs, gpw_dbs, seq_len, n_of_mapped_seqs)
+        total_cost += cost
+        cost_map[primary_protein_id] = cost
+        cost_tuples.append((primary_protein_id, cost))
+
+        #for db in dbs:
+        #    n += 1
+        #    inqueue.put((primary_protein_id, db, n))
+
+    prots_sorted_by_cost = sorted(cost_tuples, key=lambda x:x[1], reverse=True)
+
+    optimal_cost = total_cost / n_of_processes
+
+    chunks = []
+    current_chunk = 0
+    for prot_id, cost in prots_sorted_by_cost:
+        if len(chunks) <= current_chunk:
+            chunks.append([0, [], {}, {}])
+        assigned = False
+        start_chunk = current_chunk
+        while not assigned:
+            if chunks[current_chunk][0] <= optimal_cost:
+                chunks[current_chunk][0] += cost
+                chunks[current_chunk][1].append(prot_id)
+                chunks[current_chunk][2][prot_id] = gene_seq_map[prot_id]
+                if not prot_id in chunks[current_chunk][3]:
+                    chunks[current_chunk][3][prot_id] = {}
+                
+                for db in dbs:
+                    if not db in chunks[current_chunk][3][prot_id]:
+                        chunks[current_chunk][3][prot_id][db] = {}
+                    if prot_id in sequence_maps[db]:
+                        for hit_id in sequence_maps[db][prot_id]:
+                            chunks[current_chunk][3][prot_id][db][hit_id] = sequence_maps[db][prot_id][hit_id]
+                assigned = True
+            current_chunk += 1
+            if current_chunk == n_of_processes:
+                current_chunk = 0
+            if not assigned and current_chunk == start_chunk:
+                print('Chunk assigned failed')
+                sys.exit(1)
+
+    store = ray.put((config, update_mode, in_db, msa_dbs, gpw_dbs))
+
+    ray_process_ids = []
+    for chunk in chunks:
+        chunk_cost = chunk[0]
+        if optimal_cost > 0:
+            sub_threads = max([chunk_cost // optimal_cost, 1])
+        else:
+            sub_threads = 1
+        ray_process_ids.append(ray_paraMSA.remote(store, pack((chunk[1], chunk[2], chunk[3], sub_threads))))
+
+    #for pdb_tuple in pdb_ids:
+    #    for db in dbs:
+    #        n += 1
+    #        inqueue.put((pdb_tuple,db,n))
+
 
     if config.verbosity >= 1:
         print('Amount of total mapped sequences: ',n_mapped_sequences)
         print('Amount of alignments: ',n)
-
+    """
     processes = {}
     for i in range(1,n_of_processes + 1):
         p = multiprocessing.Process(target=paraMSA, args=(config,lock,inqueue,outqueue,config.verbosity,n,gene_seq_map,sequence_maps,update_mode,in_db))
@@ -276,6 +375,19 @@ def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False):
             msa_map[u_ac][db] = msas[db]
         for db in gpws:
             gpw_map[u_ac][db] = gpws[db]
+
+    """
+
+    para_results = ray.get(ray_process_ids)
+    for results in para_results:
+        for prot_id, msas, gpws in unpack(results):
+            if not prot_id in msa_map:
+                msa_map[prot_id] = {}
+                gpw_map[prot_id] = {}
+            for db in msas:
+                msa_map[prot_id][db] = msas[db]
+            for db in gpws:
+                gpw_map[prot_id][db] = gpws[db]
 
     if config.verbosity >= 2:
         t4 = time.time()
@@ -303,7 +415,7 @@ def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False):
 
     processes = {}
     for i in range(1,n_of_processes + 1):
-        p = multiprocessing.Process(target=paraCalcSeqFeat, args=(config,lock,inqueue,outqueue,config.verbosity,dbs,msa_map,gpw_map))
+        p = multiprocessing.Process(target=paraCalcSeqFeat, args=(config, lock, inqueue, outqueue, config.verbosity, msa_map, gpw_map))
         processes[i] = p
         p.start()
     for i in processes:
@@ -326,6 +438,35 @@ def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False):
         print('getSequenceFeature part 5: ',t5-t4)
 
     return 
+
+@ray.remote(max_calls = 1)
+def ray_paraMSA(store, package):
+    config, update_mode, in_db, msa_dbs, gpw_dbs = store
+    prot_ids, prot_seq_map, hit_seq_maps, sub_threads = unpack(package)
+    
+    results = []
+
+    for prot_id in prot_ids:
+        if not prot_id in prot_seq_map:
+            if prot_id.split('-')[0] in prot_seq_map:
+                seq = prot_seq_map[prot_id.split('-')[0]][0]
+            elif prot_id in in_db:
+                seq = None
+            else:
+                if debug >= 1:
+                    print('Skipped getMSA for:',prot_id,'It was not in the gene_seq_map')
+                continue
+        else:
+             seq = prot_seq_map[prot_id][0]
+
+
+        msas, gpws = msa.getMSA(config, prot_id, sequence_maps=hit_seq_maps[prot_id], sequence=seq, ref_db_ids=msa_dbs, gpw_ref_db_ids=gpw_dbs, update_mode=update_mode, sub_threads = sub_threads)
+        
+        results.append((prot_id, msas, gpws))
+
+    return pack(results)
+
+
 
 def paraMSA(config, lock, inqueue, outqueue, debug, N, gene_seq_map, sequence_maps, update_mode, in_db):
 
@@ -372,8 +513,13 @@ def paraMSA(config, lock, inqueue, outqueue, debug, N, gene_seq_map, sequence_ma
             outqueue.put((prot_id, msas, gpws))
     return
 
-def paraCalcSeqFeat(config,lock,inqueue,outqueue,debug,dbs,msa_map,gpw_map,):
-    msa_db = config.msa_db
+def paraCalcSeqFeat(config, lock, inqueue, outqueue, debug, msa_map, gpw_map,):
+    dbs = []
+    for db_id in config.msa_dbs:
+        dbs.append((db_id, False))
+
+    for db_id in config.gpw_dbs:
+        dbs.append((db_id, True))
 
     with lock:
         inqueue.put(None)
@@ -389,31 +535,63 @@ def paraCalcSeqFeat(config,lock,inqueue,outqueue,debug,dbs,msa_map,gpw_map,):
         for aac in aacs:
             prot_mut_map[aac] = []
         first_db = True
-        for db_name in dbs:
+        for db_name, is_gpw in dbs:
+            if is_gpw:
+                results_map = gpw_map
+                feature_name_tag = "GPW"
+            else:
+                results_map = msa_map
+                feature_name_tag = 'MSA'
             
-            if not u_ac in gpw_map:
+            if not u_ac in results_map:
                 if debug >= 1:
-                    print('Filtered',u_ac,',since it was not in the gpw_map',db_name)
+                    print(f'Filtered {u_ac}, since it was not in the results_map: {db_name} ({is_gpw})')
                 continue
-            if not db_name in gpw_map[u_ac]:
+            if not db_name in results_map[u_ac]:
                 if debug >= 1:
-                    print('Filtered',u_ac,',since db_name was not in the gpw_map[u_ac]',db_name)
+                    print('Filtered',u_ac,',since db_name was not in the results_map_map[u_ac]',db_name)
                 continue
-            gpw_fasta = gpw_map[u_ac][db_name]
+
+            gpw_file_path = results_map[u_ac][db_name]
+            #print(gpw_file_path)
+
+            try:
+                f = gzip.open(gpw_file_path, 'r')
+                gpw_fasta = f.read()
+                f.close()
+            except:
+                print(f'Error with reading file: {gpw_file_path}')
+                f = gzip.open(gpw_file_path, 'r')
+                gpw_fasta = f.read()
+                f.close()
+
             if gpw_fasta == None:
                 if debug >= 1:
                     print('Filtered',u_ac,',since gpw_fasta was None',db_name)
+
                 continue
-            gpw_ds = msa.parseGpwFasta(gpw_fasta)
+            if is_gpw:
+                gpw_ds, seed = msa.parseGpwFasta(gpw_fasta, dict_out = True)
 
-            if len(gpw_ds) == 0:
-                print('Error, gpw_ds is empty: ',u_ac)
+                if len(gpw_ds) == 0:
+                    print('Error, gpw_ds is empty: ',u_ac)
 
-            seed_seq = gpw_ds[0][1].replace('-','')
-            pos_wise_map = msa.getPosWiseGPW(gpw_ds)
+                seed_seq = gpw_ds[list(gpw_ds.keys())[0]][0].replace('-','')
+                try:
+                    pos_wise_map = msa.getPosWiseGPW(gpw_ds)
+                except:
+                    [e,f,g] = sys.exc_info()
+                    g = traceback.format_exc()
+                    print(f'Error in getPosWiseGPW: {u_ac} {db_name} {seed} {gpw_file_path}\n{e}\n{f}\n{g}')
+                    continue
+            else:
+                seq_map = msa.parseMsaFasta(gpw_fasta)
+                seed = u_ac
+                seed_seq = seq_map[seed].replace('-','')
+                pos_wise_map = msa.getPosWiseMSA(seq_map, seed)
             
             (psic_wt_map,psic_mut_map,dpsic_map,
-                positional_dpsic_map,window_dpsic_map,protein_median_dpsic) = msa.calcPsicProfiles(config,u_ac,aacs,seed_seq,db_name,gpw=True,debug=debug)
+                positional_dpsic_map,window_dpsic_map,protein_median_dpsic) = msa.calcPsicProfiles(config, u_ac, aacs, seed_seq, db_name, gpw = is_gpw, debug=debug)
 
             for aac in aacs:
                 aa1 = aac[0]
@@ -447,22 +625,22 @@ def paraCalcSeqFeat(config,lock,inqueue,outqueue,debug,dbs,msa_map,gpw_map,):
                 dif_rate = n_dif_aa/s
                 gl_dif_rate = n_dif_aa/(s-n_gap)
 
-                prot_mut_map[aac].append((wt_rate,'Wildtype AA rate %s' % db_name))
-                prot_mut_map[aac].append((mut_rate,'Mutant AA rate %s' % db_name))
+                prot_mut_map[aac].append((wt_rate, f'Wildtype AA rate {feature_name_tag} {db_name}'))
+                prot_mut_map[aac].append((mut_rate,f'Mutant AA rate {feature_name_tag} {db_name}'))
 
-                prot_mut_map[aac].append((gl_wt_rate,'Wildtype AA rate gapless %s' % db_name))
-                prot_mut_map[aac].append((gl_mut_rate,'Mutant AA rate gapless %s' % db_name))
-                prot_mut_map[aac].append((coverage,'MSA allel freq %s' % db_name))
-                prot_mut_map[aac].append((dif_rate,'Other mutant AA rate %s' % db_name))
-                prot_mut_map[aac].append((gl_dif_rate,'Other mutant AA rate gapless %s' % db_name))
+                prot_mut_map[aac].append((gl_wt_rate,f'Wildtype AA rate gapless {feature_name_tag} {db_name}'))
+                prot_mut_map[aac].append((gl_mut_rate,f'Mutant AA rate gapless {feature_name_tag} {db_name}'))
+                prot_mut_map[aac].append((coverage,f'MSA allel freq {feature_name_tag} {db_name}'))
+                prot_mut_map[aac].append((dif_rate,f'Other mutant AA rate {feature_name_tag} {db_name}'))
+                prot_mut_map[aac].append((gl_dif_rate,f'Other mutant AA rate gapless {feature_name_tag} {db_name}'))
 
-                prot_mut_map[aac].append((psic_wt_map[aac],'PSIC wildtype AA %s' % db_name))
-                prot_mut_map[aac].append((psic_mut_map[aac],'PSIC mutant AA %s' % db_name))
-                prot_mut_map[aac].append((dpsic_map[aac],'dPSIC %s' % db_name))
+                prot_mut_map[aac].append((psic_wt_map[aac],f'PSIC wildtype AA {feature_name_tag} {db_name}'))
+                prot_mut_map[aac].append((psic_mut_map[aac],f'PSIC mutant AA {feature_name_tag} {db_name}'))
+                prot_mut_map[aac].append((dpsic_map[aac],f'dPSIC {feature_name_tag} {db_name}'))
 
-                prot_mut_map[aac].append((positional_dpsic_map[aac],'Positional median dPSIC %s' % db_name))
-                prot_mut_map[aac].append((window_dpsic_map[aac],'Window median dPSIC %s' % db_name))
-                prot_mut_map[aac].append((protein_median_dpsic,'Protein median dPSIC %s' % db_name))
+                prot_mut_map[aac].append((positional_dpsic_map[aac],f'Positional median dPSIC {feature_name_tag} {db_name}'))
+                prot_mut_map[aac].append((window_dpsic_map[aac],f'Window median dPSIC {feature_name_tag} {db_name}'))
+                prot_mut_map[aac].append((protein_median_dpsic,f'Protein median dPSIC {feature_name_tag} {db_name}'))
                 if first_db:
                     prot_mut_map[aac].append((pos,'Sequence Position Number'))
                     prot_mut_map[aac].append((pos/len(seed_seq),'Relative Sequence Position'))
