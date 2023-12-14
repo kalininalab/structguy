@@ -8,7 +8,7 @@ from structguy import sampleSpace, consts
 from structguy import structural_feature_generation as strfg
 from structguy import sequence_feature_generation as seqfg
 
-from structman.base_utils.base_utils import calculate_chunksizes
+from structman.base_utils.base_utils import calculate_chunksizes, pack, unpack
 
 def expand_structural_feature_table(config):
     samples = sampleSpace.SampleSpace(config)
@@ -29,9 +29,14 @@ def expand_structural_feature_table(config):
 @ray.remote(max_calls = 1)
 def parseLines(store, left, right):
 
-    config, lines, primary_protein_id_col, amount_of_struct_col, effect_col, aac_col_s, tags_col, non_feature_cols, features, feature_names = store
+    config, features, package = store
+    lines, primary_protein_id_col, amount_of_struct_col, effect_col, aac_col_s, tags_col, non_feature_cols, feature_names = unpack(package)
 
     output = []
+    print(f'parseLines: non_feature_cols: {non_feature_cols}, primary_protein_id_col: {primary_protein_id_col}, aac_col_s: {aac_col_s}, effect_col: {effect_col}, tags_col: {tags_col}')
+
+    max_print = 10
+    print_n = 0
 
     for line in lines[left:right]:
 
@@ -94,6 +99,7 @@ def parseLines(store, left, right):
                 try:
                     tag_value = float(tag_value)
                 except:
+                    print(f'Given effect tag had non-float tag value: {tag_value} for {sample_id}')
                     continue
                 target_values.append(tag_value)
             if len(target_values) == 0:
@@ -145,9 +151,13 @@ def parseLines(store, left, right):
 
             feat_out.append((value, feat_name))
 
+        if target_value is None and print_n < max_print:
+            print(f'In parseLines - Target value is None for {sample_id}')
+            print_n += 1
+
         output.append((sample_id, target_value, amount_of_structures, tags, feat_out))
 
-    return output
+    return pack(output)
 
 
 def parse_structural_features(samples, config, non_feature_cols = [0,1,2,4,7,19], primary_protein_id_col = 1, aac_col_s = [3,4,5], tags_col = 7, amount_of_struct_col = 19, effect_col = None):
@@ -159,7 +169,7 @@ def parse_structural_features(samples, config, non_feature_cols = [0,1,2,4,7,19]
 
 
 def parse_feature_table(file_path, samples, config, non_feature_cols = [0,1,2,3,4], primary_protein_id_col = 0, aac_col_s = [1], tags_col = 3, amount_of_struct_col = 4, effect_col = 2):
-    print(f'Reading feature file: {file_path}, non_feature_cols: {non_feature_cols}, primary_protein_id_col: {primary_protein_id_col}, aac_col_s: {aac_col_s}, effect_col: {effect_col}')
+    print(f'Reading feature file: {file_path}, non_feature_cols: {non_feature_cols}, primary_protein_id_col: {primary_protein_id_col}, aac_col_s: {aac_col_s}, effect_col: {effect_col}, tags_col: {tags_col}')
 
     f = open(file_path,'r')
     lines = f.read().split('\n')
@@ -192,7 +202,7 @@ def parse_feature_table(file_path, samples, config, non_feature_cols = [0,1,2,3,
 
     small_chunksize, big_chunksize, n_of_small_chunks, n_of_big_chunks = calculate_chunksizes(config.proc_n, len(headless_lines))
 
-    store = ray.put((config, headless_lines, primary_protein_id_col, amount_of_struct_col, effect_col, aac_col_s, tags_col, non_feature_cols, samples.features, feature_names))
+    store = ray.put((config, samples.features, pack((headless_lines, primary_protein_id_col, amount_of_struct_col, effect_col, aac_col_s, tags_col, non_feature_cols, feature_names))))
 
     if config.verbosity >= 1:
         t3 = time.time()
@@ -214,14 +224,23 @@ def parse_feature_table(file_path, samples, config, non_feature_cols = [0,1,2,3,
 
     line_parse_out = ray.get(parse_subroutine_results)
 
+    if config.verbosity >= 1:
+        t5 = time.time()
+        print(f'parse_feature_table, part 5: {t5-t4}')
+
     n_f = 0
     n_s = 0
+    max_print = 10
+    n_print = 0
     for parse_out in line_parse_out:
-        for sample_id, target_value, amount_of_structures, tags, feat_out in parse_out:
+        for sample_id, target_value, amount_of_structures, tags, feat_out in unpack(parse_out):
             for value, feat_name in feat_out:
                 samples.addValue(sample_id,value,feat_name)
                 n_f += 1
             samples.addTargetValue(sample_id,target_value)
+            if target_value is None and n_print < max_print:
+                print(f'TV is None for {sample_id}')
+                n_print += 1
             samples.samples[sample_id].amount_of_structures = amount_of_structures
             samples.samples[sample_id].tags = tags
             n_s += 1
@@ -229,8 +248,8 @@ def parse_feature_table(file_path, samples, config, non_feature_cols = [0,1,2,3,
     samples.cleanse_empty_features(verbosity = config.verbosity)
 
     if config.verbosity >= 1:
-        t5 = time.time()
-        print(f'parse_feature_table, part 5: {t5-t4}')
+        t6 = time.time()
+        print(f'parse_feature_table, part 6: {t6-t5}')
         print(f'Total samples: {n_s}, total feature values: {n_f}')
     print('Finihsehd parsing of feature file')
 

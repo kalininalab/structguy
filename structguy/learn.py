@@ -1,5 +1,6 @@
 import ray
 import pickle
+import sys
 
 from sklearn.metrics import accuracy_score
 from sklearn.metrics import r2_score
@@ -276,7 +277,16 @@ def evaluate_dataset(config):
     protein_wise_results = {}
     for pos, sample_id in enumerate(sample_id_list):
         true_value = test_targets[pos]
+
+        if true_value is None:
+            print(f'Ground truth is None for: {sample_id}')
+            sys.exit()
+
         pred_value = y_pred[pos]
+
+        if pred_value is None:
+            print(f'Predicted value is None for: {sample_id}')
+
         prot_id, aac = sample_id
         protein_size = samples.features['Protein Size'].value_map[sample_id]
 
