@@ -114,6 +114,12 @@ def predict_main():
     config = parse_arguments()
 
     ray_utils.ray_init(config, overwrite_logging_level = 0)
+    learn.predict_dataset(config)
+
+def evaluate_main():
+    config = parse_arguments()
+
+    ray_utils.ray_init(config, overwrite_logging_level = 0)
     learn.evaluate_dataset(config)
 
 def generate_info():
@@ -129,7 +135,7 @@ def generate_info():
 def main():
 
     start_time = time.time()
-    possible_key_words = set(['generate_features', 'build_model', 'predict', 'info'])
+    possible_key_words = set(['generate_features', 'build_model', 'evaluate', 'predict', 'info'])
 
     if len(sys.argv) < 2:
         print(disclaimer)
@@ -149,6 +155,9 @@ def main():
 
     if key_word == 'predict':
         predict_main()
+
+    if key_word == 'evaluate':
+        evaluate_main()
 
     if key_word == 'info':
         generate_info()

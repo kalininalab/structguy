@@ -363,6 +363,111 @@ def evaluate_dataset(config):
     return
 
 
+def predict_dataset(config):
+    samples = featureGenerator.createTrainingSet(config)
+
+    for sample_id in samples.samples:
+        samples.samples[sample_id].testtrain = 'test'
+
+    forest, extern_feature_names_list, model_config = loadModel(config.path_to_model)
+
+    test_feature_matrix, test_targets, sample_id_list = samples.get_test_data_for_feature_list(extern_feature_names_list)
+
+
+    print('Shape of the feature matrix:',len(test_feature_matrix),len(test_feature_matrix[0]))
+    y_pred = forest.predict(test_feature_matrix)
+
+    protein_info = {}
+    protein_wise_results = {}
+    for pos, sample_id in enumerate(sample_id_list):
+        true_value = test_targets[pos]
+        pred_value = y_pred[pos]
+        prot_id, aac = sample_id
+        protein_size = samples.features['Protein Size'].value_map[sample_id]
+
+        if true_value is not None:
+            if prot_id not in protein_info:
+                protein_info[prot_id] = [protein_size, 0]
+            protein_info[prot_id][1] += 1
+
+        if not prot_id in protein_wise_results:
+            protein_wise_results[prot_id] = Results()
+
+        protein_wise_results[prot_id].add_result(aac, true_value, pred_value)
+
+    if config.regression:
+        r2 = r2_score(test_targets,y_pred)
+        mse = mean_squared_error(test_targets,y_pred)
+        corr,p_value = stats.spearmanr(test_targets,y_pred)
+
+        print('R2-Score: ',r2)
+        print('MSE: ',mse)
+        print('Spearman correlation and p-value: ',corr,p_value)
+
+        prot_wise_spearmans, mean_spearman = util.calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.spearmanr)
+        prot_wise_pearsons, mean_pearson = util.calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.pearsonr)
+
+        print(f'Prot-wise mean pearson: {mean_pearson}')
+        print(f'Prot-wise mean spearman: {mean_spearman}')
+
+        write_protein_wise_pearsons(f'{config.outfolder}/protein_wise_results.tsv', protein_wise_results, protein_info)
+
+        decisions, pred_std_vector = featureAnalysis.explain_decisions(config, forest, y_pred, test_feature_matrix, extern_feature_names_list)
+
+        header = 'Protein ID\tSAV\tPredicted effect value\tTree-wise standard deviation\tFeature 1\tFeature 2\t Feature 3\t Feature 4\t Feature 5\n'
+        lines = [header]
+        for pos, sample_id in enumerate(sample_id_list):
+            pred_value = y_pred[pos]
+            prot_id, aac = sample_id
+            pred_std = pred_std_vector[pos]
+            feature_decisions = decisions[pos]
+            words = [prot_id, aac, str(pred_value), str(pred_std)]
+            for feat_name, weight, left_thresh, right_thresh in feature_decisions[:5]:
+                if left_thresh is None:
+                    decision_string = f'{feat_name} < {right_thresh}'
+                elif right_thresh is None:
+                    decision_string = f'{feat_name} >= {left_thresh}'
+                else:
+                    decision_string = f'{feat_name} in [{left_thresh}, {right_thresh}]'
+                words.append(decision_string)
+            line = '\t'.join(words) + '\n'
+            lines.append(line)
+
+        predictions_file = f'{config.outfolder}/predictions.tsv'
+        f = open(predictions_file, 'w')
+        f.write(''.join(lines))
+        f.close()
+
+        if config.produce_scatterplot:
+            scatterfile = f'{config.outfolder}/predicted_value_scatterplot.png'
+            hexbinfile = f'{config.outfolder}/predicted_value_hexbinplot.png'
+
+            y_pred_median = util.median(y_pred)
+            tv_median = util.median(test_targets)
+            util.scatterplot(y_pred, test_feature_matrix, extern_feature_names_list, test_targets, config.target_values, y_pred_median, tv_median, scatterfile)
+            util.hexbinplot(y_pred, test_targets, config.target_values, hexbinfile)
+
+    else:
+        acc = accuracy_score(test_targets, y_pred)
+        int_targets = classToInt(test_targets, samples)
+        int_preds = classToInt(y_pred,samples)
+        roc = roc_auc_score(int_targets,int_preds)
+
+        f1 = f1_score(int_targets,int_preds)
+
+        precision = precision_score(int_targets,int_preds)
+        recall = recall_score(int_targets,int_preds)
+
+        mcc = matthews_corrcoef(int_targets,int_preds)
+
+        print('F-Score: ',f1)
+        print('Accuracy: ',acc)
+        print('Precision:',precision)
+        print('Recall:',recall)
+        print('MCC:',mcc)
+    return
+
+
 def writeOutput(config, y_pred, cv_slice, sampleSpace, append=False):
 
     feature_names = cv_slice.feature_names
@@ -427,6 +532,10 @@ def storeModel(model, feature_names, config, fn):
     print('\n============\nStored model in %s\n============\n' % fn)
 
 def loadModel(fn):
+    # This is done to fix model loading issue with pickle not finding libraries
+    condaEnv = os.environ["CONDA_PREFIX"]
+    sys.path.append(f"{condaEnv}/lib/python3.11/site-packages/structguy/")
+
     with open(fn, 'rb') as inp:
         model, feature_names, config = pickle.load(inp)
     print('\n============\nLoaded model from %s\n============\n' % fn)

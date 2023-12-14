@@ -203,7 +203,7 @@ def parse_feature_table(file_path, samples, config, non_feature_cols = [0,1,2,3,
     for i in range(n_of_big_chunks):
         parse_subroutine_results.append(parseLines.remote(store, i*big_chunksize, (i+1)*big_chunksize))
 
-    border = (i+1)*big_chunksize
+    border = n_of_big_chunks * big_chunksize
 
     for i in range(n_of_small_chunks):
         parse_subroutine_results.append(parseLines.remote(store, border + i*small_chunksize, border + (i+1)*small_chunksize))
