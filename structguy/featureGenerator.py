@@ -191,14 +191,14 @@ def parse_feature_table(file_path, samples, config, non_feature_cols = [0,1,2,3,
 
     if config.verbosity >= 1:
         t1 = time.time()
-        print(f'parse_feature_table, part 1: {t1-t0}')
+        print(f'parse_feature_table, part 1: {t1-t0}s')
 
     headless_lines = lines[1:]
     random.shuffle(headless_lines)
 
     if config.verbosity >= 1:
         t2 = time.time()
-        print(f'parse_feature_table, part 2: {t2-t1}')
+        print(f'parse_feature_table, part 2: {t2-t1}s')
 
     small_chunksize, big_chunksize, n_of_small_chunks, n_of_big_chunks = calculate_chunksizes(config.proc_n, len(headless_lines))
 
@@ -206,7 +206,7 @@ def parse_feature_table(file_path, samples, config, non_feature_cols = [0,1,2,3,
 
     if config.verbosity >= 1:
         t3 = time.time()
-        print(f'parse_feature_table, part 3: {t3-t2}')
+        print(f'parse_feature_table, part 3: {t3-t2}s')
 
     parse_subroutine_results = []
 
@@ -220,13 +220,13 @@ def parse_feature_table(file_path, samples, config, non_feature_cols = [0,1,2,3,
 
     if config.verbosity >= 1:
         t4 = time.time()
-        print(f'parse_feature_table, part 4: {t4-t3}')
+        print(f'parse_feature_table, part 4: {t4-t3}s')
 
     line_parse_out = ray.get(parse_subroutine_results)
 
     if config.verbosity >= 1:
         t5 = time.time()
-        print(f'parse_feature_table, part 5: {t5-t4}')
+        print(f'parse_feature_table, part 5: {t5-t4}s')
 
     n_f = 0
     n_s = 0
@@ -240,11 +240,11 @@ def parse_feature_table(file_path, samples, config, non_feature_cols = [0,1,2,3,
             samples.addTargetValue(sample_id,target_value)
             if target_value is None and n_print < max_print:
                 print(f'TV is None for {sample_id}')
-                n_print += 1
+            n_print += 1
             samples.samples[sample_id].amount_of_structures = amount_of_structures
             samples.samples[sample_id].tags = tags
             n_s += 1
-
+    print(f"\t...{n_print-max_print} more similar TV warnings happened.")
     samples.cleanse_empty_features(verbosity = config.verbosity)
 
     if config.verbosity >= 1:
@@ -284,6 +284,68 @@ def createTrainingSet(config):
         if config.transform:
             samples.targetTransformation(config)
         if config.regression:
+            samples.detectOutliers(config)
+
+        samples.printPureMixedProportion(config)
+
+        samples.adjustParameterRanges(config)
+
+        if config.filterStructuralFeatures:
+            samples.removeFeaturesByType('structural')
+
+        samples.oneHotifyAll()
+
+        config.path_to_processed_features_file = f'{config.outfolder}/{config.dataset_name}_structguy_features_processed.tsv'
+
+        samples.write(config.path_to_processed_features_file)
+
+        config.add_entry_to_project_file('path_to_processed_features_file', config.path_to_processed_features_file)
+
+    else:
+        parse_feature_table(config.path_to_processed_features_file, samples, config)
+        #Propably call some stuff here, TODO
+    config.n_of_features = len(samples.feature_names)
+    return samples
+
+def LINE():
+    return sys._getframe(1).f_lineno
+
+def createPredictingSet(config):
+
+    samples = sampleSpace.SampleSpace(config)
+    print("Sample line", LINE(), ":", len(samples.samples))
+
+    msa_db = config.msa_db
+
+    strfg.initFeatures(samples)
+    seqfg.initFeatures(config, samples)
+
+    if config.path_to_processed_features_file == None:
+
+        parse_feature_table(config.path_to_features_file, samples, config)
+        print("Sample line", LINE(), ":", len(samples.samples))
+
+        for additonal_infile in config.add_more_sample_files:
+            parse_feature_table(additonal_infile, samples, config)
+        print("Sample line", LINE(), ":", len(samples.samples))
+
+        if config.fusePositions:
+            config.regression = False
+            #print(samples.samples.keys())
+            samples.fusePositions()
+            #print(samples.samples.keys())
+            config.target_values = ['all neutral','possibly damaging']
+
+        samples.standardFilter(config)
+        print("Sample line", LINE(), ":", len(samples.samples))
+
+        if config.structure_threshold != None:
+            samples.filterSamplesByMappedStructures(config)
+
+        if config.transform:
+            samples.targetTransformation(config)
+        if config.regression:
+            print("Sample line", LINE(), ":", len(samples.samples))
             samples.detectOutliers(config)
 
         samples.printPureMixedProportion(config)

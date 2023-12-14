@@ -374,7 +374,7 @@ def evaluate_dataset(config):
 
 
 def predict_dataset(config):
-    samples = featureGenerator.createTrainingSet(config)
+    samples = featureGenerator.createPredictingSet(config)
 
     for sample_id in samples.samples:
         samples.samples[sample_id].testtrain = 'test'
