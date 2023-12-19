@@ -1,6 +1,6 @@
 import ray
 import pickle
-import sys
+import sys, os
 
 from sklearn.metrics import accuracy_score
 from sklearn.metrics import r2_score
@@ -385,6 +385,17 @@ def predict_dataset(config):
 
 
     print('Shape of the feature matrix:',len(test_feature_matrix),len(test_feature_matrix[0]))
+    print(extern_feature_names_list)
+
+    # import pandas as pd
+    # import numpy as np
+    # data_float = np.array(test_feature_matrix, dtype=float)
+    # rows_with_nan = np.any(np.isnan(data_float), axis=1)
+    # result = data_float[rows_with_nan]
+
+    # DF = pd.DataFrame(result)
+    # DF.to_csv("test_feature_matrix.csv")
+
     y_pred = forest.predict(test_feature_matrix)
 
     protein_info = {}
@@ -406,13 +417,13 @@ def predict_dataset(config):
         protein_wise_results[prot_id].add_result(aac, true_value, pred_value)
 
     if config.regression:
-        r2 = r2_score(test_targets,y_pred)
-        mse = mean_squared_error(test_targets,y_pred)
-        corr,p_value = stats.spearmanr(test_targets,y_pred)
+        # r2 = r2_score(test_targets,y_pred)
+        # mse = mean_squared_error(test_targets,y_pred)
+        # corr,p_value = stats.spearmanr(test_targets,y_pred)
 
-        print('R2-Score: ',r2)
-        print('MSE: ',mse)
-        print('Spearman correlation and p-value: ',corr,p_value)
+        # print('R2-Score: ',r2)
+        # print('MSE: ',mse)
+        # print('Spearman correlation and p-value: ',corr,p_value)
 
         prot_wise_spearmans, mean_spearman = util.calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.spearmanr)
         prot_wise_pearsons, mean_pearson = util.calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.pearsonr)
@@ -420,13 +431,15 @@ def predict_dataset(config):
         print(f'Prot-wise mean pearson: {mean_pearson}')
         print(f'Prot-wise mean spearman: {mean_spearman}')
 
-        write_protein_wise_pearsons(f'{config.outfolder}/protein_wise_results.tsv', protein_wise_results, protein_info)
+        # write_protein_wise_pearsons(f'{config.outfolder}/protein_wise_results.tsv', protein_wise_results, protein_info)
 
         decisions, pred_std_vector = featureAnalysis.explain_decisions(config, forest, y_pred, test_feature_matrix, extern_feature_names_list)
 
         header = 'Protein ID\tSAV\tPredicted effect value\tTree-wise standard deviation\tFeature 1\tFeature 2\t Feature 3\t Feature 4\t Feature 5\n'
         lines = [header]
         for pos, sample_id in enumerate(sample_id_list):
+            if pos < 100:
+                print(sample_id)
             pred_value = y_pred[pos]
             prot_id, aac = sample_id
             pred_std = pred_std_vector[pos]
@@ -448,33 +461,11 @@ def predict_dataset(config):
         f.write(''.join(lines))
         f.close()
 
-        if config.produce_scatterplot:
-            scatterfile = f'{config.outfolder}/predicted_value_scatterplot.png'
-            hexbinfile = f'{config.outfolder}/predicted_value_hexbinplot.png'
+        modelname = config.path_to_model.replace(".dump", "").split("/")[-1]
+        histfile = f'{config.outfolder}/predicted_value_histplot.{modelname}.png'
+        y_pred_median = util.median(y_pred)
+        util.plotPredictions(y_pred, histfile)
 
-            y_pred_median = util.median(y_pred)
-            tv_median = util.median(test_targets)
-            util.scatterplot(y_pred, test_feature_matrix, extern_feature_names_list, test_targets, config.target_values, y_pred_median, tv_median, scatterfile)
-            util.hexbinplot(y_pred, test_targets, config.target_values, hexbinfile)
-
-    else:
-        acc = accuracy_score(test_targets, y_pred)
-        int_targets = classToInt(test_targets, samples)
-        int_preds = classToInt(y_pred,samples)
-        roc = roc_auc_score(int_targets,int_preds)
-
-        f1 = f1_score(int_targets,int_preds)
-
-        precision = precision_score(int_targets,int_preds)
-        recall = recall_score(int_targets,int_preds)
-
-        mcc = matthews_corrcoef(int_targets,int_preds)
-
-        print('F-Score: ',f1)
-        print('Accuracy: ',acc)
-        print('Precision:',precision)
-        print('Recall:',recall)
-        print('MCC:',mcc)
     return
 
 

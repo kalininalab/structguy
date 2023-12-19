@@ -336,7 +336,7 @@ def createPredictingSet(config):
             #print(samples.samples.keys())
             config.target_values = ['all neutral','possibly damaging']
 
-        samples.standardFilter(config)
+        # samples.standardFilter(config)
         print("Sample line", LINE(), ":", len(samples.samples))
 
         if config.structure_threshold != None:
@@ -344,9 +344,9 @@ def createPredictingSet(config):
 
         if config.transform:
             samples.targetTransformation(config)
-        if config.regression:
-            print("Sample line", LINE(), ":", len(samples.samples))
-            samples.detectOutliers(config)
+        # if config.regression:
+            # print("Sample line", LINE(), ":", len(samples.samples))
+            # samples.detectOutliers(config)
 
         samples.printPureMixedProportion(config)
 

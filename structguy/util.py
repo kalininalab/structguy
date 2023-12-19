@@ -1534,6 +1534,10 @@ def parseFeatureList(featureFile):
         feature_list.append(line.strip())
     return feature_list
 
+def plotPredictions(prediction_values, outfile):
+    plt.hist(prediction_values, bins=50, color='blue', edgecolor='black')
+    plt.savefig(outfile,dpi=300)
+    plt.clf()
 
 #Needs to be updated
 """
