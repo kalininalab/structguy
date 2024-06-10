@@ -4,7 +4,7 @@ import ray
 import statistics
 import time
 
-from structguy import trainForest, learn
+from structguy import learn
 from structman.base_utils.base_utils import calculate_chunksizes, pack, unpack
 
 def findAndAnalyseInterestingSample(forest, cv_slice, config):
@@ -256,7 +256,7 @@ def tracebackDecision(estimator, feat_vec, feature_names, true_value):
 def add_tree_CM(tree_confusion_map, pre_confusion_map):
     for feat in tree_confusion_map:
         if not feat in pre_confusion_map:
-            pre_confusion_map[feat] = tree_confusion_map[feat]
+            pre_confusion_map[feat] = list(tree_confusion_map[feat])
         else:
             pre_confusion_map[feat][0] += tree_confusion_map[feat][0]
             pre_confusion_map[feat][1] += tree_confusion_map[feat][1]
@@ -270,15 +270,19 @@ def add_tree_RCM(tree_raw_confusion_map, pre_raw_confusion_map):
             pre_raw_confusion_map[feat] += tree_raw_confusion_map[feat]
     return pre_raw_confusion_map
 
-def calcSliceConfusion(forest, cv_slice, remote = True, para_number = None, err_warping_exp = 1, goodwill_interval = 0.25, norm_exp = 1.2):
+
+def calcSliceConfusion(forest, cv_slice, samples, remote = True, para_number = None, err_warping_exp = 1, goodwill_interval = 0.25, norm_exp = 1.2):
     pre_confusion_map = {}
     pre_raw_confusion_map = {}
 
     if para_number == 1:
         remote = False
 
+    test_feature_matrix = cv_slice.get_test_feature_matrix(samples)
+    #print(f'In calcSliceConfusion: {len(test_feature_matrix)}\n{test_feature_matrix[0]}\n{cv_slice.test_targets[:100]}, remote: {remote}, para_number: {para_number}')
+
     if remote:
-        store = ray.put((cv_slice.test_feature_matrix, cv_slice.test_targets, cv_slice.feature_names))
+        store = ray.put((test_feature_matrix, cv_slice.test_targets, cv_slice.feature_names))
 
     result_ids = []
 
@@ -290,21 +294,22 @@ def calcSliceConfusion(forest, cv_slice, remote = True, para_number = None, err_
         if remote:
             if i == para_number:
                 break
-            result_ids.append(trainForest.nested_ray_wrapper_for_conf_map_calculation.remote(tree, store, err_warping_exp = err_warping_exp, goodwill_interval = goodwill_interval))
+            result_ids.append(calcConfusionMapWrapper.remote(tree, store, err_warping_exp = err_warping_exp, goodwill_interval = goodwill_interval))
         else:
-            result_ids.append(calcConfusionMap(tree, (cv_slice.test_feature_matrix, cv_slice.test_targets, cv_slice.feature_names), err_warping_exp = err_warping_exp, goodwill_interval=goodwill_interval))
+            result_ids.append(calcConfusionMap(tree, (test_feature_matrix, cv_slice.test_targets, cv_slice.feature_names), err_warping_exp = err_warping_exp, goodwill_interval=goodwill_interval))
 
     if remote:
         while True:
             ready, not_ready = ray.wait(result_ids)
             new_result_ids = []
             if len(ready) > 0:
-                for tree_confusion_map, raw_tree_confusion_map in ray.get(ready):
+                for package in ray.get(ready):
+                    tree_confusion_map, raw_tree_confusion_map = unpack(package)
                     pre_confusion_map = add_tree_CM(tree_confusion_map, pre_confusion_map)
                     pre_raw_confusion_map = add_tree_RCM(raw_tree_confusion_map, pre_raw_confusion_map)
                     if i < n_trees:
                         tree = forest.estimators_[i]
-                        new_result_ids.append(trainForest.nested_ray_wrapper_for_conf_map_calculation.remote(tree, store, goodwill_interval = goodwill_interval, err_warping_exp = err_warping_exp))
+                        new_result_ids.append(calcConfusionMapWrapper.remote(tree, store, goodwill_interval = goodwill_interval, err_warping_exp = err_warping_exp))
                         i += 1
             result_ids = new_result_ids + not_ready
             if len(result_ids) == 0:
@@ -343,10 +348,9 @@ def confusion_map_from_raw_confusion_map(cv_slice, raw_confusion_map, goodwill_i
     confusion_map = sorted(confusion_map, key=lambda x: x[1], reverse=True)
     return confusion_map
 
-
 @ray.remote(max_calls = 1)
 def calcConfusionMapWrapper(estimator, store, err_warping_exp = 1, goodwill_interval = 0.25):
-    return calcConfusionMap(estimator, store, err_warping_exp = err_warping_exp, goodwill_interval=goodwill_interval)
+    return pack(calcConfusionMap(estimator, store, err_warping_exp = err_warping_exp, goodwill_interval=goodwill_interval))
 
 def calcConfusionMap(estimator, store, err_warping_exp = 1, goodwill_interval = 0.25):
     # First let's retrieve the decision path of each sample. The decision_path
@@ -366,6 +370,8 @@ def calcConfusionMap(estimator, store, err_warping_exp = 1, goodwill_interval = 
 
     leave_id = estimator.apply(X_test)
 
+    #print(f'LLI: {len(leave_id)}')
+
     # Now, it's possible to get the tests that were used to predict a sample or
     # a group of samples. First, let's make it for the sample.
 
@@ -379,12 +385,16 @@ def calcConfusionMap(estimator, store, err_warping_exp = 1, goodwill_interval = 
         raw_err = abs(true_value - y_pred[sample_id])
         warped_err = calc_confusion(raw_err, goodwill_interval, err_warping_exp)
 
+        #print(f'LNI: {len(node_index)}')
+
         for node_id in node_index:
 
             if leave_id[sample_id] == node_id:
                 continue
 
             feat = feature_names[feature[node_id]]
+
+            #print(feat)
 
             if not feat in confusion_map:
                 confusion_map[feat] = [warped_err,1]
@@ -394,6 +404,8 @@ def calcConfusionMap(estimator, store, err_warping_exp = 1, goodwill_interval = 
                 #confusion_map[feat][0] += err
                 confusion_map[feat][1] += 1
                 raw_confusion_map[feat].append(raw_err)
+
+    print(f'Add the end of calcConfusionMap: {len(confusion_map)} {len(raw_confusion_map)}')
     return confusion_map, raw_confusion_map
 
 def calc_confusion(raw_err, goodwill_interval, err_warping_exp):
@@ -551,7 +563,6 @@ if __name__ == "__main__":
 
     #full_slice = sampleSpace.FullSlice(samples, config)
 
-    #full_slice.slices[0].reorderByNames(feature_names)
 
     #feat_vec = full_slice.slices[0].train_feature_matrix[14]
     #true_value = full_slice.slices[0].train_targets[14]

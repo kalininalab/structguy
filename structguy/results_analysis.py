@@ -72,17 +72,14 @@ def parse_feature_table(filepath):
     return protein_info
 
 
-def write_protein_wise_pearsons(outfile, protein_wise_results, protein_info):
+def write_protein_wise_performances(outfile, protein_wise_results, protein_info):
 
-    lines = ["Protein Identifier\tPearsons Correlation Coefficient\tProtein Length\tVariant Coverage\n"]
+    lines = ["Protein Identifier\tPerformance\n"]
 
-    for prot_id in protein_wise_results:
-        protein_wise_results[prot_id].calculate_pearsons()
+    for prot_id, performance_value in protein_wise_results:
+        #performance_value = protein_wise_results[prot_id]
 
-        length, covered = protein_info[prot_id]
-        rel_cov = covered / (length*19)
-
-        lines.append(f'{prot_id}\t{protein_wise_results[prot_id].pearson}\t{length}\t{rel_cov}\n')
+        lines.append(f'{prot_id}\t{performance_value}\n')
 
     f = open(outfile, 'w')
     f.write(''.join(lines))

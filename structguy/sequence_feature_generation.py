@@ -10,6 +10,7 @@ import ray
 import gzip
 
 from structguy import msa, consts, util
+from structguy.sequence_util import parseFromFasta
 from structman.base_utils.base_utils import pack, unpack
 
 def initFeatures(config, samples):
@@ -70,44 +71,6 @@ def geneSeqMapToFasta(prot_seq_map, outfile, verbosity = 0):
     else: 
         return 'Empty fasta file'
 
-def parseFromFasta(seqs_from_fasta, config = None, dbs = []):
-
-    if config is not None:
-        fasta_file_name_base = seqs_from_fasta.split('/')[-1].rsplit('.',1)[0]
-        config.custom_msa_db = f'{config.msa_db}/{fasta_file_name_base}'
-
-        config.fasta_mode = True
-
-        if not os.path.exists(config.custom_msa_db):
-            os.mkdir(config.custom_msa_db)
-
-    f = open(seqs_from_fasta, 'r')
-    lines = f.readlines()
-    f.close()
-
-    seq_map = {}
-    in_db = set()
-
-    for line in lines:
-        line = line[:-1]
-        if len(line) == 0:
-            continue
-        if line[0] == '>':
-            words = line[1:].split()
-            entry_id = words[0]
-            if entry_id.count('|') > 1:
-                entry_id = entry_id.split('|')[1]
-            seq_map[entry_id] = ['']
-            inside_all = True
-            for ref_db_id in dbs:
-                msa_db_filename = util.get_msa_path(config.custom_msa_db, entry_id, ref_db_id, gpw = True)
-                if not os.path.isfile(msa_db_filename):
-                    inside_all = False
-            if inside_all:
-                in_db.add(entry_id)
-        else:
-            seq_map[entry_id][0] += line.replace('\n', '').replace('/','').replace('*','').upper()
-    return seq_map, in_db
 
 def estimate_cost(config, prot_id, msa_ref_dbs, gpw_ref_dbs, seq_len, n_of_mapped_seqs):
     total_cost = 0
@@ -333,6 +296,9 @@ def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False):
 
     store = ray.put((config, update_mode, in_db, msa_dbs, gpw_dbs))
 
+    if config.verbosity >= 2:
+        print(f'Going into ray_paraMSA, msa_dbs: {msa_dbs}, gpw_dbs: {gpw_dbs}, optimal cost: {optimal_cost}, number of chunks: {len(chunks)}')
+
     ray_process_ids = []
     for chunk in chunks:
         chunk_cost = chunk[0]
@@ -340,6 +306,8 @@ def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False):
             sub_threads = max([chunk_cost // optimal_cost, 1])
         else:
             sub_threads = 1
+        if config.verbosity >= 2:
+            print(f'Starting a ray_paraMSA thread, chunk cost: {chunk_cost}, sub_threads: {sub_threads}')
         ray_process_ids.append(ray_paraMSA.remote(store, pack((chunk[1], chunk[2], chunk[3], sub_threads))))
 
     #for pdb_tuple in pdb_ids:
@@ -406,7 +374,7 @@ def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False):
     for u_ac in prot_mut_map:
         aacs = prot_mut_map[u_ac]
 
-        if config.verbosity >= 3:
+        if config.verbosity >= 6:
             print('Added to CalcSeqFeat queue:',u_ac,aacs)
 
         inqueue.put((u_ac,aacs))
@@ -549,7 +517,7 @@ def paraCalcSeqFeat(config, lock, inqueue, outqueue, debug, msa_map, gpw_map,):
                 continue
             if not db_name in results_map[u_ac]:
                 if debug >= 1:
-                    print('Filtered',u_ac,',since db_name was not in the results_map_map[u_ac]',db_name)
+                    print(f'Filtered {u_ac} since db_name {db_name} was not in the results_map_map[u_ac], {is_gpw}')
                 continue
 
             gpw_file_path = results_map[u_ac][db_name]
@@ -560,10 +528,9 @@ def paraCalcSeqFeat(config, lock, inqueue, outqueue, debug, msa_map, gpw_map,):
                 gpw_fasta = f.read()
                 f.close()
             except:
-                print(f'Error with reading file: {gpw_file_path}')
-                f = gzip.open(gpw_file_path, 'r')
-                gpw_fasta = f.read()
-                f.close()
+                [e,f,g] = sys.exc_info()
+                g = traceback.format_exc()
+                print(f'Error with reading file, path: {gpw_file_path}, protein: {u_ac}, db_name: {db_name}, is_gpw: {is_gpw}\n{e}\n{f}\n{g}')
 
             if gpw_fasta == None:
                 if debug >= 1:

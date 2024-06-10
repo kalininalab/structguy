@@ -20,7 +20,10 @@ def parse_arguments(argument_start = 2):
         long_paras = [
             'verbosity=', #from 1 to 5
             'hp=',
-            'nocv' # Skip Cross Validation
+            'nocv', # Skip Cross Validation
+            'nohpo', # Skip Hyperparameter Optimization
+            'lopo', # Activate LOPO training setup
+            'overwrite',
         ]
         opts, args = getopt.getopt(argv, "i:n:m:", long_paras)
 
@@ -35,6 +38,9 @@ def parse_arguments(argument_start = 2):
     path_to_model = None
 
     skip_cv = None
+    skip_hpo = None
+    force_lopo = False
+    overwrite = False
 
     overwrite_proc_n = None
 
@@ -63,6 +69,15 @@ def parse_arguments(argument_start = 2):
         if opt == '--nocv':
             skip_cv = True
 
+        if opt == '--nohpo':
+            skip_hpo = True
+
+        if opt == '--lopo':
+            force_lopo = True
+        
+        if opt == '--overwrite':
+            overwrite = True
+
 
     if path_to_model is not None:
         if path_to_model.count('/') > 0:
@@ -77,9 +92,16 @@ def parse_arguments(argument_start = 2):
 
     config.path_to_model = path_to_model
     config.model_name = model_name
+    config.overwrite = overwrite
     
+    if force_lopo:
+        config.crossValidation = 'LOPO'
+
     if skip_cv is not None:
         config.skip_cv = True
+
+    if skip_hpo is not None:
+        config.hyperOptimization = None
 
     if overwrite_proc_n is not None:
         config.proc_n = overwrite_proc_n
@@ -94,7 +116,7 @@ def feature_generator_main():
 
     ray_utils.ray_init(config, overwrite_logging_level = 0)
 
-    if config.path_structural_feature_table is not None:
+    if config.path_structural_feature_table is not None or config.overwrite:
         featureGenerator.expand_structural_feature_table(config)
 
 def build_model_main():
@@ -104,7 +126,7 @@ def build_model_main():
 
     config.saveHyperParameter()
 
-    ray_utils.ray_init(config, overwrite_logging_level = 0)
+    ray_utils.ray_init(config, overwrite_logging_level = 0, total_memory_quantile = 0.85)
 
     learn.learn(config)
 
@@ -112,7 +134,7 @@ def build_model_main():
 
 def predict_main():
     config = parse_arguments()
-
+    config.predict_mode = True
     ray_utils.ray_init(config, overwrite_logging_level = 0)
     learn.evaluate_dataset(config)
 

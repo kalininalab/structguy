@@ -38,12 +38,15 @@ setup(
     setup_requires=['setuptools_scm'],
     include_package_data=True,
     install_requires=[
-
+        "scikit-learn==1.5.0"
     ],
 
     package_data = {
         "": [
-
+            'resources/psic/psic.c',
+            'resources/psic/Makefile',
+            'resources/psic/Blosum62.txt',
+            'reosurces/psic/psic_wrapper.py'
             ]
     },
     python_requires=">=3.8, <4",

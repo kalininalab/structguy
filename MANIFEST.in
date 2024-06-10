@@ -1,0 +1,4 @@
+include resources/psic/psic.c
+include resources/psic/Makefile
+include resources/psic/Blosum62.txt
+include resources/psic/psic_wrapper

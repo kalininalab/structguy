@@ -11,8 +11,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from structguy.scripts import radarplot
-
-from structman.base_utils.base_utils import Errorlog
+from structman.base_utils.base_utils import Errorlog, resolve_path
 
 class OutputCapture:
     def __init__(self):
@@ -52,9 +51,12 @@ def parse_conf(filepath):
 
 class Config:
     def __init__(self, path_to_project_file, hyperparameters_path = None):
+        util_scriptpath = os.path.abspath(resolve_path(__file__))
+        settings_path = f'{util_scriptpath.rsplit('/',1)[0]}/resources/search_db_settings.conf'
+        search_db_opt_args = parse_conf(settings_path)
 
         self.profiling = False
-
+        self.predict_mode = False
         self.iupred_path = ""
         self.ray_local_mode = False
         mem = virtual_memory()
@@ -65,7 +67,9 @@ class Config:
         self.path_to_sequence_fasta = None
         self.path_to_features_file = None
         self.path_to_processed_features_file = None
+        self.path_to_imputed_features_file = None
         self.path_structural_feature_table = None
+        self.path_to_multi_savs_table = None
         self.outfolder = None
 
         self.debug = 1
@@ -75,12 +79,17 @@ class Config:
         self.mmseqs_path = ""
 
         self.search_dbs = []
-        self.msa_dbs = ['ref50']
+        self.msa_dbs = [] #['ref50']
         self.gpw_dbs = ['ref50', 'ref90']
 
-        self.mmseqs_search_db_ref50 = ''
-        self.mmseqs_search_db_ref90 = ''
+        self.mmseqs_search_db_ref50 = ""
+        self.mmseqs_search_db_ref90 = ""
         self.mmseqs_search_db_ref100 = ''
+
+        for (opt, arg) in search_db_opt_args:
+            if opt == 'search_db_folder':
+                self.mmseqs_search_db_ref50 = f'{arg}/uniref50_search_db'
+                self.mmseqs_search_db_ref90 = f'{arg}/uniref90_search_db'
 
         self.mmseqs_tmp_folder = ''
 
@@ -98,17 +107,19 @@ class Config:
 
         self.mafft_path = ''
         self.blast_path = ''
-        self.psic_source = ''
-        self.blosum_path = ''
+        self.psic_source = f'{util_scriptpath.rsplit('/',1)[0]}/resources/psic'
+        self.blosum_path = f'{self.psic_source}/Blosum62.txt'
 
         self.pdb_path = ''
 
 
         self.skip_cv = False
-        self.suppress_remote_forests = True
+        self.suppress_remote_forests = False
 
         self.feature_selection = 'threeStaged' #Possible key words: threeStaged, 'meanCorrelation', 'regularization', 'double', 'confusion', confusion_and_regu sequential_confusion, sequential_confusion_and_regu, 'confusion_and_regu'
         self.select_feature_for_first_slice_only = True
+
+        self.impute_missing_values = False
 
         self.hpo_do_feat_selection = True
         self.hpo_do_forest_param = True
@@ -141,10 +152,11 @@ class Config:
         self.tag_based_crossValidation = None
         self.targetFilter = set(['nan'])
         self.target_values = None
+        self.class_labels = None
         self.binary_thresh = 0.5
         self.protein_filter = set([])
 
-        self.print_scores_greater_than = 0.005
+        self.print_scores_greater_than = 0.0005
 
         self.add_more_sample_files = []
         self.filterStructuralFeatures = False
@@ -154,7 +166,7 @@ class Config:
         self.filter_single_variant_prots = False
         self.balanceSubsampling = None
         self.fusePositions = False
-        self.standard_feature_filter = {'dPSIC GPW ref50':0.0}
+        #self.standard_feature_filter = {'dPSIC GPW ref50':0.0}
 
         self.transform = False
         self.produce_scatterplot = False
@@ -309,6 +321,9 @@ class Config:
             elif opt == 'target_values':
                 self.target_values = arg
 
+            elif opt == 'class_labels':
+                self.class_labels = arg.split(',')
+
             elif opt == 'blacklist':
                 self.blacklist = arg.split(',')
 
@@ -395,16 +410,19 @@ class Config:
                 for dt in dict_tuples:
                     key,value = dt.split(':')
                     self.target_translator[key] = value
+
             elif opt == 'tag_filter':
                 for tag in arg.split(','):
                     if tag == '':
                         continue
                     self.tag_filter.add(tag)
+
             elif opt == 'protein_filter':
                 for u_ac in arg.split(','):
                     if u_ac == '':
                         continue
                     self.protein_filter.add(u_ac)
+
             elif opt == 'additional_samples':
                 datafile = arg
                 self.add_more_sample_files.append(datafile)
@@ -514,6 +532,15 @@ class Config:
             elif opt == 'outfolder':
                 self.outfolder = arg
 
+            elif opt == 'path_to_imputed_features_file':
+                self.path_to_imputed_features_file = arg
+
+            elif opt == 'path_to_impute_map':
+                self.path_to_impute_map = arg
+
+            elif opt == 'Path_to_multi_savs_table':
+                self.path_to_multi_savs_table = arg
+
         if self.mmseqs_search_db_ref50 != '':
             self.search_dbs.append('ref50')
         if self.mmseqs_search_db_ref90 != '':
@@ -521,9 +548,8 @@ class Config:
         if self.mmseqs_search_db_ref100 != '':
             self.search_dbs.append('ref100')
 
-        self.regression = self.target_values[0] == '#'
+        self.regression = (self.class_labels is None)
         if not self.regression:
-            self.target_values = self.target_values.split(',')
             self.objective_function = 'MCC'
             self.criterion = 'gini'
             self.criteria = ['gini','entropy']
@@ -543,6 +569,7 @@ class Config:
                 lines_hp = f_hp.read().split('\n')
                 f_hp.close()
             except:
+                print(f'Error trying to read HP file: {hyperparameters_path}')
                 lines_hp = []
 
             for line in lines_hp:
@@ -551,7 +578,10 @@ class Config:
                 if line[0] == '#':
                     continue
                 
-                words = line.split('=')
+                if line.count('=') == 1:
+                    words = line.split('=')
+                else:
+                    words = line.split()
                 # CHeck the 'param = value' format
                 if len(words) != 2:
                     continue
@@ -805,6 +835,73 @@ class Config:
         f.write(''.join(new_lines))
         f.close()
 
+
+def tags_to_effect(config, tags):
+    if config.target_values is not None:
+        target_values = []
+        for tag in tags.split(','):
+            if tag == '':
+                continue
+            if tag[0] != '#':
+                continue
+            try:
+                tag_id, tag_value = tag.split(':')
+            except:
+                try:
+                    tag_id, tag_value = tag.split('=')
+                except:
+                    continue
+            if tag_id != config.target_values:
+                continue
+            try:
+                tag_value = float(tag_value)
+            except:
+                print(f'Given effect tag had non-float tag value: {tag_value}')
+                continue
+            target_values.append(tag_value)
+        if len(target_values) == 0:
+            target_value = None
+        else:
+            target_value = sum(target_values)/len(target_values)
+    else:
+        target_value = None
+        for tag in tags.split(','):
+            if tag[:6] == 'label:':
+                target_value = tag[6:]
+
+    return target_value
+
+def parse_multi_savs_table(config):
+    f = open(config.path_to_multi_savs_table, 'r')
+    lines = f.readlines()
+    f.close()
+
+    multi_savs = []
+
+    for line in lines[1:]:
+        words = line[:-1].split('\t')
+        prot_id = words[0]
+        aacs = words[1].split(':')
+        tags = words[2]
+        effect = tags_to_effect(config, tags)
+        multi_savs.append((prot_id, aacs, effect))
+
+    return multi_savs
+
+def combine_individual_effects(individual_effects, multiply = True):
+    if len(individual_effects) == 1:
+        return individual_effects[0]
+    if multiply:
+        individual_effects = sorted(individual_effects)[:2]
+        c = max([individual_effects[0], 0.])
+        for e in individual_effects[1:]:
+            em = max([e, 0.])
+            c = c*em
+    else:
+        c = sum(individual_effects) + 1.0 - float(len(individual_effects))
+
+    return c
+
 class Scores:
     __slots__ = [
                     'mse', 'wmse', 'r2', 'wr2', 'corr', 'acc', 'roc', 'precision', 'recall', 'f1',
@@ -926,7 +1023,7 @@ class Scores:
             return self.roc
 
 
-def calc_protein_wise_corr(y_test, y_pred, sample_ids, corr_function):
+def calc_protein_wise_corr(y_test, y_pred, sample_ids, corr_function, mono_return_score_function = False):
     test_pred_pairs = {}
     for sample_nr, yt_value in enumerate(y_test):
         prot_id, _ = sample_ids[sample_nr]
@@ -938,7 +1035,10 @@ def calc_protein_wise_corr(y_test, y_pred, sample_ids, corr_function):
     prot_wise_corrs = []
     corrs = []
     for prot_id in test_pred_pairs:
-        corr, _ = corr_function(test_pred_pairs[prot_id][0], test_pred_pairs[prot_id][1])
+        if not mono_return_score_function:
+            corr, _ = corr_function(test_pred_pairs[prot_id][0], test_pred_pairs[prot_id][1])
+        else:
+            corr = corr_function(test_pred_pairs[prot_id][0], test_pred_pairs[prot_id][1])
         corr = abs(corr)
         prot_wise_corrs.append((prot_id, corr))
         corrs.append(corr)
@@ -1607,22 +1707,6 @@ def median(l):
     else:
         med = l[(n-1)//2]
     return med
-
-def sanity_check_value_list(values, label_vector = None, datastructure_name = 'placeholder'):
-    insane_pos = []
-    for pos, value in enumerate(values):
-        try:
-            isfinite = np.isfinite(value)
-        except:
-            isfinite = False
-        if not isfinite:
-            insane_pos.append(pos)
-    if len(insane_pos) == 0:
-        return None
-    if label_vector is not None:
-        for pos in insane_pos:
-            print(f'Detected insane value in {datastructure_name}. At position {pos}, value: {values[pos]}, label: {label_vector[pos]}')
-    return insane_pos
 
 if __name__ == "__main__":
     disclaimer = 'Here comes the disclaimer'

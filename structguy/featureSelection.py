@@ -3,47 +3,154 @@ import sys
 import traceback
 import random
 import ray
+import copy
+import time
 
 from structguy import reguFeatureSelectionRegressor as reguFSreg
 from structguy import reguFeatureSelectionClassificator as reguFSclf
-from structguy import sampleSpace, featureAnalysis, trainForest
+from structguy import featureAnalysis, trainForest
+from structguy.sampleSpace import splitDataSet
+from structguy.support_classes import CrossValidationSlice
+from structman.base_utils.base_utils import pack, unpack
 
-def crossFoldConfusionSelect(config, cv_slice, samples, distance_map = None, print_out = False, pre_filter = None, debug = False, return_list = False, overwrite_proc_n = None, rank_thresh = None, sequence_number = 0, return_score_list = False):
+def check_for_confmap_calculation(config, slice_slices, active_exp, sequence_number = 0):
+
+    if active_exp[sequence_number] == (config.confusion_goodwill, config.err_warping_exp, config.confusion_normalization_exp):
+        return False
+
+    for slice_slice in slice_slices:
+        
+        if slice_slice.confusion_map is None or sequence_number not in slice_slice.confusion_map:
+            return True
+        else:
+            if (config.confusion_goodwill, config.err_warping_exp, config.confusion_normalization_exp) != slice_slice.active_exp[sequence_number]:
+                if slice_slice.raw_confusion_map[sequence_number] is None:
+                    return True
+
+    return False
+
+@ray.remote(max_calls = 1)
+def crossFold_confusion_internal_loop_wrapper(store, slice_slice):
+    pre_filter, sequence_number, config, samples, distance_map, overwrite_proc_n = store
+    conf_map, slice_slice, loop_time_1, loop_time_2, loop_time_2_1, loop_time_2_2 = crossFold_confusion_internal_loop(unpack(slice_slice), pre_filter, sequence_number, config, samples, distance_map, overwrite_proc_n)
+    return pack(conf_map), slice_slice, loop_time_1, loop_time_2, loop_time_2_1, loop_time_2_2
+
+def crossFold_confusion_internal_loop(slice_slice, pre_filter, sequence_number, config, samples, distance_map, overwrite_proc_n):
+    t_l_0 = time.time()
+
+    #train forest on sliceslice
+    if pre_filter is None:
+        slice_slice.filterFeatures([])
+    else:
+        slice_slice.filterFeatures(pre_filter)
+    t_l_1 = time.time()
+    loop_time_1 = (t_l_1 - t_l_0)
+
+    if slice_slice.raw_confusion_map is None or sequence_number not in slice_slice.raw_confusion_map:
+        if slice_slice.raw_confusion_map is None:
+            #slice_slice.confusion_map = {}
+            slice_slice.raw_confusion_map = {}
+        if sequence_number not in slice_slice.raw_confusion_map:
+            #slice_slice.confusion_map[sequence_number] = None
+            slice_slice.raw_confusion_map[sequence_number] = None
+
+        calculate_confusion_map = True
+    else:
+        if slice_slice.raw_confusion_map[sequence_number] is not None:
+            conf_map = featureAnalysis.confusion_map_from_raw_confusion_map(slice_slice, slice_slice.raw_confusion_map[sequence_number], config.confusion_goodwill, config.err_warping_exp, config.confusion_normalization_exp)
+            calculate_confusion_map = False
+        else:
+            calculate_confusion_map = True
+
+    t_l_2 = time.time()
+    loop_time_2 = (t_l_2 - t_l_1)
+
+    if calculate_confusion_map:
+        t_l_2_0 = time.time()
+    
+        forest, _, slice_slice, _ = trainForest.trainForest(config, slice_slice, samples, distance_map = distance_map, skip_feature_selection = True, skip_scoring = True, para_number = overwrite_proc_n)
+
+        #calculate feature confusions
+
+        t_l_2_1 = time.time()
+        loop_time_2_1 = (t_l_2_1 - t_l_2_0)
+
+        if config.verbosity >= 4:
+            print(f'Calculating conf map: # of features {len(slice_slice.features)}')
+        
+        conf_map, raw_conf_map = featureAnalysis.calcSliceConfusion(forest, slice_slice, samples, remote = True, para_number = overwrite_proc_n, err_warping_exp = config.err_warping_exp, goodwill_interval = config.confusion_goodwill, norm_exp = config.confusion_normalization_exp)
+        
+        if config.verbosity >= 4:
+            print(f'Resulting conf map {slice_slice.name}: {len(conf_map)}, {len(raw_conf_map)}')
+
+        slice_slice.raw_confusion_map[sequence_number] = raw_conf_map
+        slice_slice = pack(slice_slice)
+
+        t_l_2_2 = time.time()
+        loop_time_2_2 = (t_l_2_2 - t_l_2_1)
+    else:
+        loop_time_2_1 = 0.
+        loop_time_2_2 = 0.
+        slice_slice = None
+
+    return conf_map, slice_slice, loop_time_1, loop_time_2, loop_time_2_1, loop_time_2_2
+
+def crossFoldConfusionSelect(config, cv_slice, samples, slice_slices, distance_map = None, print_out = False, pre_filter = None, debug = False, return_list = False, overwrite_proc_n = None, rank_thresh = None, sequence_number = 0, return_score_list = False):
+
+    times = []
+    t0 = time.time()
+
+    if overwrite_proc_n is None:
+        available_threads = config.proc_n
+    else:
+        available_threads = overwrite_proc_n
 
     if config.verbosity >= 4:
         print(f'Call of crossFoldconfusionSelect: print_out {print_out}, overwrite_proc_n {overwrite_proc_n}, rank_thresh {rank_thresh}, sequence_number {sequence_number}')
 
+    try:
+        samples = ray.get(samples)
+    except:
+        samples = samples
+
+    t1 = time.time()
+    times.append(('1',t1-t0))
+
     #make sliceslices
-    if cv_slice.slice_slices is None:
-
-        if cv_slice.subslices is None:
-            subslices = [set([x]) for x in cv_slice.train_prots]
-            
+    if slice_slices is None:
+        if not cv_slice.isSlice:
+            slice_slices = cv_slice.slices
         else:
-            print(f'Sublices: {cv_slice.subslices}')
-            subslices = cv_slice.subslices
 
-        slice_slices = []
-        for i, subslice_test_proteins in enumerate(subslices):
-            remaining_prots = set(cv_slice.train_prots) - subslice_test_proteins
+            if cv_slice.subslices is None:
+                subslices = [set([x]) for x in cv_slice.train_prots]
 
-            try:
-                samples = ray.get(samples)
-            except:
-                pass
-            if print_out:
-                print(f'Subslice prots: {subslice_test_proteins}')
-            if cv_slice.train_equal_test:
-                ignore_samples = None
             else:
-                ignore_samples = set(cv_slice.test_sample_ids)
-            test_ids, train_ids = samples.splitDataSet(config, specific_id = subslice_test_proteins, protein_wise = True, ignore_samples = ignore_samples)
+                print(f'Sublices: {cv_slice.subslices}')
+                subslices = cv_slice.subslices
 
-            cv_slice_slice = sampleSpace.CrossValidationSlice(test_ids, train_ids, samples, config, name = f'{cv_slice.name}_subslice_{i}', train_prots = remaining_prots, para_number = overwrite_proc_n, feature_names = cv_slice.feature_names)
-            slice_slices.append(cv_slice_slice)
-        cv_slice.slice_slices = slice_slices
+            slice_slices = []
+            for i, subslice_test_proteins in enumerate(subslices):
+                remaining_prots = set(cv_slice.train_prots) - subslice_test_proteins
+
+                
+                if print_out:
+                    print(f'Subslice prots: {subslice_test_proteins}')
+                if cv_slice.train_equal_test:
+                    ignore_samples = None
+                else:
+                    ignore_samples = set(cv_slice.test_sample_ids)
+                test_ids, train_ids = splitDataSet(config, samples.samples, specific_id = subslice_test_proteins, protein_wise = True, ignore_samples = ignore_samples)
+
+                cv_slice_slice = CrossValidationSlice(test_ids, train_ids, raw_feature_names = samples.feature_names, sample_dict = samples.samples, config = config, name = f'{cv_slice.name}_subslice_{i}', train_prots = remaining_prots, para_number = overwrite_proc_n, feature_names = cv_slice.feature_names)
+                slice_slices.append(cv_slice_slice)
+
+        calc_at_least_once = True
     else:
-        slice_slices = cv_slice.slice_slices
+        calc_at_least_once = False
+
+    t2 = time.time()
+    times.append(('2',t2-t1))
 
     if cv_slice.active_exp is None:
         cv_slice.active_exp = {}
@@ -53,74 +160,93 @@ def crossFoldConfusionSelect(config, cv_slice, samples, distance_map = None, pri
         cv_slice.fused_confusion_map[sequence_number] = None
 
     if cv_slice.active_exp[sequence_number] != (config.confusion_goodwill, config.err_warping_exp, config.confusion_normalization_exp):
+        t1_0 = time.time()
         agg_conf_map = {}
 
-        for i, slice_slice in enumerate(slice_slices):
-            #train forest on sliceslice
-            if pre_filter is None:
-                if i == 0:
-                    cv_slice.filterFeatures([])
-                slice_slice.filterFeatures([])
-            else:
-                if i == 0:
-                    cv_slice.filterFeatures(pre_filter)
-                slice_slice.filterFeatures(pre_filter)
+        loop_time_1 = 0.
+        loop_time_2 = 0.
+        loop_time_2_1 = 0.
+        loop_time_2_2 = 0.
+        loop_time_3 = 0.
 
-            if slice_slice.confusion_map is None or sequence_number not in slice_slice.confusion_map:
-                if slice_slice.confusion_map is None:
-                    slice_slice.confusion_map = {}
-                    slice_slice.raw_confusion_map = {}
-                    slice_slice.active_exp = {}
-                if sequence_number not in slice_slice.confusion_map:
-                    slice_slice.confusion_map[sequence_number] = None
-                    slice_slice.raw_confusion_map[sequence_number] = None
-                    slice_slice.active_exp[sequence_number] = None
-                calculate_confusion_map = True
+        if pre_filter is None:
+            cv_slice.filterFeatures([])
+        else:
+            cv_slice.filterFeatures(pre_filter)
+
+        if available_threads < len(slice_slices):
+            updated_slice_slices = []
+            for packed_slice_slice in slice_slices:
+                conf_map, slice_slice, _loop_time_1, _loop_time_2, _loop_time_2_1, _loop_time_2_2 = crossFold_confusion_internal_loop(unpack(packed_slice_slice), pre_filter, sequence_number, config, samples, distance_map, available_threads)
+
+                if slice_slice is not None:
+                    updated_slice_slices.append(slice_slice)
+
+                loop_time_1 += _loop_time_1
+                loop_time_2 += _loop_time_2
+                loop_time_2_1 += _loop_time_2_1
+                loop_time_2_2 += _loop_time_2_2
+
+                t_l_2 = time.time()
+
+                for (feat_name, confusion) in conf_map:
+                    if feat_name not in agg_conf_map:
+                        agg_conf_map[feat_name] = []
+                    agg_conf_map[feat_name].append(confusion)
+
+                t_l_3 = time.time()
+                loop_time_3 += (t_l_3 - t_l_2)
+            if len(updated_slice_slices) > 0:
+                slice_slices = updated_slice_slices
+        else:
+            t_l_0 = time.time()
+            n_sub_threads = available_threads // len(slice_slices)
+            if calc_at_least_once:
+                store = ray.put((pre_filter, sequence_number, config, samples, distance_map, n_sub_threads))
             else:
-                if (config.confusion_goodwill, config.err_warping_exp, config.confusion_normalization_exp) != slice_slice.active_exp[sequence_number]:
-                    if slice_slice.raw_confusion_map[sequence_number] is not None:
-                        conf_map = featureAnalysis.confusion_map_from_raw_confusion_map(slice_slice, slice_slice.raw_confusion_map[sequence_number], config.confusion_goodwill, config.err_warping_exp, config.confusion_normalization_exp)
-                        if print_out or config.verbosity >= 4 or debug:
-                            print(f'confusion map calculated from raw confusions: {len(conf_map)} {len(slice_slice.raw_confusion_map[sequence_number])}')
-                        slice_slice.confusion_map[sequence_number] = conf_map
-                        slice_slice.active_exp[sequence_number] = (config.confusion_goodwill, config.err_warping_exp, config.confusion_normalization_exp)
-                        calculate_confusion_map = False
-                    else:
-                        calculate_confusion_map = True
+                store = ray.put((pre_filter, sequence_number, config, None, distance_map, n_sub_threads))
+            loop_ray_ids = []
+            for slice_slice in slice_slices:
+                if calc_at_least_once:
+                    packed_slice_slice = pack(slice_slice)
                 else:
-                    calculate_confusion_map = False
+                    packed_slice_slice = slice_slice
+                loop_ray_ids.append(crossFold_confusion_internal_loop_wrapper.remote(store, packed_slice_slice))
 
-            if calculate_confusion_map:
+            t_l_1 = time.time()
+            loop_time_1 = t_l_1 - t_l_0
+
+            results = ray.get(loop_ray_ids)
+
+            t_l_2 = time.time()
+            loop_time_2 = t_l_2 - t_l_1
+
+            updated_slice_slices = []
+            for package in results:
+                packed_conf_map, slice_slice, _loop_time_1, _loop_time_2, _loop_time_2_1, _loop_time_2_2 = package
+                conf_map = unpack(packed_conf_map)
+                if slice_slice is not None:
+                    updated_slice_slices.append(slice_slice)
+                for (feat_name, confusion) in conf_map:
+                    if feat_name not in agg_conf_map:
+                        agg_conf_map[feat_name] = []
+                    agg_conf_map[feat_name].append(confusion)
+
+            if len(updated_slice_slices) > 0:
+                slice_slices = updated_slice_slices
+
+            t_l_3 = time.time()
+            loop_time_3 = (t_l_3 - t_l_2)
             
-                forest, _ = trainForest.trainForest(config, slice_slice, distance_map, skip_feature_selection = True, skip_scoring = True, para_number = overwrite_proc_n)
 
-                #calculate feature confusions
+        times.append(('1.1.l1', loop_time_1))
+        times.append(('1.1.l2', loop_time_2))
+        times.append(('1.1.l2.1', loop_time_2_1))
+        times.append(('1.1.l2.2', loop_time_2_2))
+        times.append(('1.1.l3', loop_time_3))
 
-                if print_out or config.verbosity >= 4:
-                    print(f'Calculating conf map: # of features {len(slice_slice.features)}')
-                conf_map, raw_conf_map = featureAnalysis.calcSliceConfusion(forest, slice_slice, remote = True, para_number = overwrite_proc_n, err_warping_exp = config.err_warping_exp, goodwill_interval = config.confusion_goodwill, norm_exp = config.confusion_normalization_exp)
-                if print_out or config.verbosity >= 4 or debug:
-                    print(f'Resulting conf map {slice_slice.name}: {len(conf_map)}, {len(raw_conf_map)}')
-                if debug:
-                    copy_conf_map = featureAnalysis.confusion_map_from_raw_confusion_map(slice_slice, raw_conf_map, config.confusion_goodwill, config.err_warping_exp, config.confusion_normalization_exp)
-                    compare_map = {}
-                    for feat, c in conf_map:
-                        compare_map[feat] = c
-                    for feat, c in copy_conf_map:
-                        if c != compare_map[feat]:
-                            print(f'\n\nCompare map irregular: {feat}, {c}, {compare_map[feat]}\n\n')
-                slice_slice.confusion_map[sequence_number] = conf_map
-                slice_slice.raw_confusion_map[sequence_number] = raw_conf_map
-                slice_slice.active_exp[sequence_number] = (config.confusion_goodwill, config.err_warping_exp, config.confusion_normalization_exp)
-
-            if debug:
-                print(f'Size of used conf map: {len(slice_slice.confusion_map[sequence_number])} {calculate_confusion_map}')
-
-            for (feat_name, confusion) in slice_slice.confusion_map[sequence_number]:
-                if feat_name not in agg_conf_map:
-                    agg_conf_map[feat_name] = []
-                agg_conf_map[feat_name].append(confusion)
-            
+        t1_1 = time.time()
+        times.append(('1.1',t1_1-t1_0))            
 
         fused_confusion_map = []
         for feat_name in agg_conf_map:
@@ -135,8 +261,11 @@ def crossFoldConfusionSelect(config, cv_slice, samples, distance_map = None, pri
     else:
         fused_confusion_map = cv_slice.fused_confusion_map[sequence_number]
 
+    t3 = time.time()
+    times.append(('3',t3-t2))
+
     if return_score_list:
-        return fused_confusion_map
+        return fused_confusion_map, times, slice_slices
 
     
     #select by rank
@@ -165,17 +294,24 @@ def crossFoldConfusionSelect(config, cv_slice, samples, distance_map = None, pri
     if print_out or config.verbosity >= 5:
         print('confusion filtered:',len(to_filter))
 
+    t4 = time.time()
+    times.append(('4',t4-t3))
+
     if return_list:
-        return to_filter
+        return to_filter, times, slice_slices
 
     cv_slice.filterFeatures(to_filter, print_out = print_out)
 
+    t5 = time.time()
+    times.append(('5',t5-t4))
+
+    """
     if print_out:
         confusion_rank_dict = calc_rank_dict(fused_confusion_map)
 
         agg_conf_map = {}
         for slice_slice in slice_slices:
-            print(f'Length of stored raw confusion map {slice_slice.name} {len(slice_slice.raw_confusion_map[sequence_number])}')
+            #print(f'Length of stored raw confusion map {slice_slice.name} {len(slice_slice.raw_confusion_map[sequence_number])}')
             conf_map = featureAnalysis.confusion_map_from_raw_confusion_map(slice_slice, slice_slice.raw_confusion_map[sequence_number], config.confusion_goodwill, config.err_warping_exp, config.confusion_normalization_exp)
 
             for (feat_name, confusion) in conf_map:
@@ -184,11 +320,13 @@ def crossFoldConfusionSelect(config, cv_slice, samples, distance_map = None, pri
                 agg_conf_map[feat_name].append(confusion)
 
         fused_confusion_map = []
+        feat_type_map = {}
         for feat_name in agg_conf_map:
             #mean_confusion = sum(agg_conf_map[feat_name])/len(agg_conf_map[feat_name])
             max_confusion = max(agg_conf_map[feat_name])
             #fused_confusion_map.append((feat_name, mean_confusion))
             fused_confusion_map.append((feat_name, max_confusion))
+            feat_type_map[feat_name] = samples.features[feat_name].f_type
 
         fused_confusion_map = sorted(fused_confusion_map, key=lambda x: x[1], reverse=True)
         recalc_confusion_rank_dict = calc_rank_dict(fused_confusion_map)
@@ -197,9 +335,13 @@ def crossFoldConfusionSelect(config, cv_slice, samples, distance_map = None, pri
             'confusion' : confusion_rank_dict,
             'recalc_confusion' : recalc_confusion_rank_dict
         }
-        write_feature_ranks(config, rank_dicts, cv_slice.name)
+        write_feature_ranks(config, rank_dicts, cv_slice.name, feat_type_map)
+    """
+        
+    t6 = time.time()
+    times.append(('6',t6-t5))
 
-    return True
+    return True, times, slice_slices
     
 
 def confusionSelect(config, cv_slice, samples, distance_map = None, print_out = False, pre_filter = None, debug = False, return_list = False, overwrite_proc_n = None, rank_thresh = None, sequence_number = 0, return_score_list = False):
@@ -228,9 +370,9 @@ def confusionSelect(config, cv_slice, samples, distance_map = None, print_out = 
             ignore_samples = None
         else:
             ignore_samples = set(cv_slice.test_sample_ids)
-        test_ids, train_ids = samples.splitDataSet(config, specific_id = random_proteins, protein_wise = True, ignore_samples = ignore_samples)
+        test_ids, train_ids = splitDataSet(config, samples.samples, specific_id = random_proteins, protein_wise = True, ignore_samples = ignore_samples)
 
-        cv_slice_slice = sampleSpace.CrossValidationSlice(test_ids, train_ids, samples, config, name = f'{cv_slice.name}_subslice', train_prots = remaining_prots, para_number = overwrite_proc_n, feature_names = cv_slice.feature_names)
+        cv_slice_slice = CrossValidationSlice(test_ids, train_ids, raw_feature_names = samples.feature_names, sample_dict = samples.samples, config = config, name = f'{cv_slice.name}_subslice', train_prots = remaining_prots, para_number = overwrite_proc_n, feature_names = cv_slice.feature_names)
         cv_slice.slice_slice = cv_slice_slice
     else:
         cv_slice_slice = cv_slice.slice_slice
@@ -265,13 +407,13 @@ def confusionSelect(config, cv_slice, samples, distance_map = None, print_out = 
             calculate_confusion_map = False
 
     if calculate_confusion_map:
-        forest, _ = trainForest.trainForest(config, cv_slice_slice, distance_map, skip_feature_selection = True, skip_scoring = True, para_number = overwrite_proc_n)
+        forest, _, cv_slice_slice, _ = trainForest.trainForest(config, cv_slice_slice, samples, distance_map = distance_map, skip_feature_selection = True, skip_scoring = True, para_number = overwrite_proc_n)
 
         #calculate feature confusions
 
         if print_out or config.verbosity >= 4:
             print(f'Calculating conf map: # of features {len(cv_slice_slice.features)}')
-        cv_slice_slice.confusion_map[sequence_number] = featureAnalysis.calcSliceConfusion(forest, cv_slice_slice, remote = True, para_number = overwrite_proc_n, err_warping_exp = config.err_warping_exp, goodwill_interval = config.confusion_goodwill)
+        cv_slice_slice.confusion_map[sequence_number] = featureAnalysis.calcSliceConfusion(forest, cv_slice_slice, samples, remote = True, para_number = overwrite_proc_n, err_warping_exp = config.err_warping_exp, goodwill_interval = config.confusion_goodwill)
         cv_slice_slice.active_exp[sequence_number] = (config.err_warping_exp, pre_filter_count)
 
     if return_score_list:
@@ -351,7 +493,7 @@ def regu_fs(config, cv_slice, samples, print_out = False, pre_filter = None, deb
             except:
                 pass
 
-            cv_sub_slice = sampleSpace.CrossValidationSlice(cv_slice.test_sample_ids, random_subsample_ids, samples, config, name = f'{cv_slice.name}_random_subsample', para_number = overwrite_proc_n, train_equal_test = cv_slice.train_equal_test, feature_names = cv_slice.feature_names)
+            cv_sub_slice = CrossValidationSlice(cv_slice.test_sample_ids, random_subsample_ids, raw_feature_names = samples.feature_names, sample_dict = samples.samples, config = config, name = f'{cv_slice.name}_random_subsample', para_number = overwrite_proc_n, train_equal_test = cv_slice.train_equal_test, feature_names = cv_slice.feature_names)
             cv_slice.random_subslice = cv_sub_slice
     else:
         cv_sub_slice = cv_slice.random_subslice
@@ -400,18 +542,18 @@ def regu_fs(config, cv_slice, samples, print_out = False, pre_filter = None, deb
     cv_slice.filterFeatures(to_filter, print_out = print_out)
     return True
 
-def meanCorrelationWrapper(config, cross_val_object, print_out = False, pre_filter = None, debug = False, return_list = False, return_score_list = False):
+def meanCorrelationWrapper(config, samples, cross_val_object, dummy_call = False, print_out = False, pre_filter = None, debug = False, return_list = False, return_score_list = False):
     cv_repeat = not cross_val_object.isSlice
     if config.tvmb_rank_threshold < 0:
         return None
     if not cv_repeat:
-        return detectBiasedFeaturesByMeanCorrelation(config, cross_val_object, print_out = print_out, pre_filter = pre_filter, debug = debug, return_list = return_list, return_score_list = return_score_list)
+        return detectBiasedFeaturesByMeanCorrelation(config, samples, cross_val_object, dummy_call= dummy_call, print_out = print_out, pre_filter = pre_filter, debug = debug, return_list = return_list, return_score_list = return_score_list)
 
     else:
         return_lists = {}
         for cv_counter in cross_val_object.slices:
             cv_slice = cross_val_object.slices[cv_counter]
-            return_lists[cv_counter] = detectBiasedFeaturesByMeanCorrelation(config, cv_slice, print_out = print_out, pre_filter = pre_filter, debug = debug, return_list = return_list, return_score_list = return_score_list)
+            return_lists[cv_counter] = detectBiasedFeaturesByMeanCorrelation(config, samples, cv_slice, dummy_call= dummy_call, print_out = print_out, pre_filter = pre_filter, debug = debug, return_list = return_list, return_score_list = return_score_list)
 
         if return_list or return_score_list:
             return return_lists
@@ -436,7 +578,7 @@ def positionalMeanCorrelationWrapper(config, cross_val_object, print_out = False
 
         return True
 
-def detectBiasedFeaturesByMeanCorrelation(config, cv_slice, thresh=None, print_out = False, pre_filter = None, debug = False, return_list = False, return_score_list = False):
+def detectBiasedFeaturesByMeanCorrelation(config, samples, cv_slice, dummy_call = False, thresh=None, print_out = False, pre_filter = None, debug = False, return_list = False, return_score_list = False):
     if thresh is None:
         thresh = (config.tvmb_rank_threshold, config.p_val_thresh)
     if pre_filter is None:
@@ -448,21 +590,37 @@ def detectBiasedFeaturesByMeanCorrelation(config, cv_slice, thresh=None, print_o
         to_filter = pre_filter
     if print_out:
         print('===========================================================================================')
-        print('Biased feature detection (by mean correlation), TVMB thresh:',thresh)
+        print(f'Biased feature detection (by mean correlation), TVMB thresh: {thresh}, return_score_list: {return_score_list}, pre_filter: {pre_filter}')
         print('tvmb prefiltered:',len(to_filter))
+
+    if config.verbosity >= 5:
+        cv_slice.featureSanityCheck(verbose = True)
 
     if not 'Protein bias' in cv_slice.slice_specific_feature_map:
         cv_slice.setProteinBias(config)
 
+    if config.verbosity >= 5:
+        cv_slice.featureSanityCheck(verbose = True)
+
     if cv_slice.tvmb_map is None:
+        if config.verbosity >= 4:
+            print(f'Init tvmb_map for slice {cv_slice.name}')
+        feats_to_remove = []
         cv_slice.tvmb_map = {}
-        for feat_name in list(cv_slice.feature_names):
+        for feat_name in cv_slice.feature_names:
             if not feat_name in cv_slice.tvmb_map:
-                cv_slice.addToTvmbMap(feat_name,config)
+                to_remove = cv_slice.addToTvmbMap(feat_name, samples, config, dummy_call = dummy_call)
+                if to_remove:
+                    feats_to_remove.append(feat_name)
             #else:
             #    tvmb_score,target_p_val = cv_slice.tvmb_map[feat_name]
+        for feat_name in feats_to_remove:
+            cv_slice.removeFeature(feat_name)
 
-    cv_slice.rank_tvmb(config)
+    if dummy_call:
+        return
+    
+    cv_slice.rank_tvmb(samples, config)
 
     if return_score_list:
         return cv_slice.ranked_tvmb
@@ -651,7 +809,7 @@ def select_by_sequential_confusion(config, cross_val_object, samples, pre_filter
             return return_lists
         return True
 
-def select_features(config, cross_val_object, samples = None, print_out = False, debug = False, overwrite_proc_n = None):
+def select_features(config, cross_val_object, samples, slice_slices, print_out = False, debug = False, overwrite_proc_n = None):
 
     cv_repeat = not cross_val_object.isSlice
 
@@ -661,7 +819,7 @@ def select_features(config, cross_val_object, samples = None, print_out = False,
     if config.feature_selection == 'meanCorrelation':
         if print_out:
             print('=== Feature selection by mean correlation ===')
-        return meanCorrelationWrapper(config, cross_val_object, print_out = print_out, debug = debug)
+        return meanCorrelationWrapper(config, samples, cross_val_object, print_out = print_out, debug = debug)
 
     elif config.feature_selection == 'regularization':
         if print_out:
@@ -672,14 +830,15 @@ def select_features(config, cross_val_object, samples = None, print_out = False,
         if print_out:
             print('=== Feature selection by meanCorrelation and regularization ===')
 
-        to_filter = meanCorrelationWrapper(config, cross_val_object, print_out = print_out, debug = debug, return_list = True)
+        to_filter = meanCorrelationWrapper(config, samples, cross_val_object, print_out = print_out, debug = debug, return_list = True)
         return regu_fs_wrapper(config, cross_val_object, samples,  print_out = print_out, debug = debug, pre_filter = to_filter, overwrite_proc_n = overwrite_proc_n)
 
     elif config.feature_selection == 'confusion':
         if print_out:
             print('=== Feature selection by feature confusion ===')
-        mc_list = meanCorrelationWrapper(config, cross_val_object, print_out = print_out, debug = debug, return_score_list = True)
-        return crossFoldConfusionSelect(config, cross_val_object, samples, print_out = print_out, debug = debug, overwrite_proc_n = overwrite_proc_n)
+        meanCorrelationWrapper(config, samples, cross_val_object, dummy_call=True, print_out = print_out, debug = debug, return_score_list = True)
+        filtered, times, slice_slices = crossFoldConfusionSelect(config, cross_val_object, samples, slice_slices, print_out = print_out, debug = debug, overwrite_proc_n = overwrite_proc_n)
+        return filtered, times, slice_slices
 
 
     elif config.feature_selection == 'sequential_confusion':
@@ -700,7 +859,7 @@ def select_features(config, cross_val_object, samples = None, print_out = False,
         if print_out:
             print('=== Feature selection by meanCorrelation, confusion, and regularization ===')
 
-        to_filter = meanCorrelationWrapper(config, cross_val_object, print_out = print_out, debug = debug, return_list = True)
+        to_filter = meanCorrelationWrapper(config, samples, cross_val_object, print_out = print_out, debug = debug, return_list = True)
         to_filter = select_by_sequential_confusion(config, cross_val_object, samples, print_out = print_out, debug = debug, pre_filter = to_filter, overwrite_proc_n = overwrite_proc_n, return_list = True, repetition = 1)
         regu_fs_wrapper(config, cross_val_object, samples, print_out = print_out, pre_filter = to_filter, debug = debug, overwrite_proc_n = overwrite_proc_n)
         return True
@@ -709,7 +868,7 @@ def select_features(config, cross_val_object, samples = None, print_out = False,
         if print_out:
             print('=== Feature selection by list ranking of meanCorrelation, confusion, and regularization ===')
 
-        mc_list = meanCorrelationWrapper(config, cross_val_object, print_out = print_out, debug = debug, return_score_list = True)
+        mc_list = meanCorrelationWrapper(config, samples, cross_val_object, print_out = print_out, debug = debug, return_score_list = True)
         mc_rank_dict = calc_rank_dict(mc_list)
         if print_out:
             print(f'Length of mc_list: {len(mc_list)}, {len(mc_rank_dict)}')
@@ -725,10 +884,12 @@ def select_features(config, cross_val_object, samples = None, print_out = False,
             print(f'Length of regu_list: {len(regu_list)}, {len(regu_rank_dict)}')              
 
         regu_conf_list = []
+        feat_type_map = {}
         for feat_name in confusion_rank_dict:
             c_tied_rank = confusion_rank_dict[feat_name][2]
             r_tied_rank = regu_rank_dict[feat_name][2]
             regu_conf_list.append((feat_name, c_tied_rank + r_tied_rank))
+            feat_type_map[feat_name] = samples.features[feat_name].f_type
         regu_conf_list.sort(key=lambda x:x[1],reverse=True)
 
         if print_out:
@@ -740,7 +901,7 @@ def select_features(config, cross_val_object, samples = None, print_out = False,
                 'lasso regu' : regu_rank_dict,
                 'confusion X regu' : regu_conf_rank_dict
             }
-            write_feature_ranks(config, rank_dicts, cross_val_object.name)
+            write_feature_ranks(config, rank_dicts, cross_val_object.name, feat_type_map)
 
         if config.list_ranking_thresh is not None:
             to_filter = [x[0] for x in regu_conf_list[int(config.list_ranking_thresh):]]
@@ -785,8 +946,8 @@ def calc_rank_dict(score_list):
 
     return rank_dict
 
-def write_feature_ranks(config, rank_dicts, name):
-    headers = ['Feature Name']
+def write_feature_ranks(config, rank_dicts, name, feat_type_map):
+    headers = ['Feature Name', 'Feature Type']
     fs_types = list(rank_dicts.keys())
     for fs_type in fs_types:
         headers.append(f'{fs_type} Rank')
@@ -802,7 +963,7 @@ def write_feature_ranks(config, rank_dicts, name):
         for feat_name in rank_dicts[fs_type]:
             rank, score, tied_rank, scaled_score = rank_dicts[fs_type][feat_name]
             if feat_name not in feat_lines:
-                feat_lines[feat_name] = [feat_name]
+                feat_lines[feat_name] = [feat_name, feat_type_map[feat_name]]
             feat_lines[feat_name].append(str(rank))
             feat_lines[feat_name].append(str(tied_rank))
             feat_lines[feat_name].append(str(score))

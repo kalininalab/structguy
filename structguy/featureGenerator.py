@@ -12,12 +12,12 @@ from structman.base_utils.base_utils import calculate_chunksizes, pack, unpack
 
 def expand_structural_feature_table(config):
     samples = sampleSpace.SampleSpace(config)
-    strfg.initFeatures(samples)
+    #strfg.initFeatures(samples)
     seqfg.initFeatures(config, samples)
 
     parse_structural_features(samples, config)
 
-    seqfg.getSequenceFeatures(config, samples, n_of_processes=config.seq_feat_processes)
+    seqfg.getSequenceFeatures(config, samples, n_of_processes=config.proc_n)
 
     outfile = f'{config.outfolder}/{config.dataset_name}_structguy_features.tsv'
 
@@ -27,13 +27,18 @@ def expand_structural_feature_table(config):
     return
 
 @ray.remote(max_calls = 1)
-def parseLines(store, left, right):
+def parseLines_remote_wrapper(store, left, right):
 
     config, features, package = store
     lines, primary_protein_id_col, amount_of_struct_col, effect_col, aac_col_s, tags_col, non_feature_cols, feature_names = unpack(package)
 
+    output = parseLines(config, left, right, features, lines, primary_protein_id_col, amount_of_struct_col, effect_col, aac_col_s, tags_col, non_feature_cols, feature_names)
+
+    return pack(output)
+
+def parseLines(config, left, right, features, lines, primary_protein_id_col, amount_of_struct_col, effect_col, aac_col_s, tags_col, non_feature_cols, feature_names):
     output = []
-    print(f'parseLines: non_feature_cols: {non_feature_cols}, primary_protein_id_col: {primary_protein_id_col}, aac_col_s: {aac_col_s}, effect_col: {effect_col}, tags_col: {tags_col}')
+    print(f'parseLines: non_feature_cols: {non_feature_cols}, primary_protein_id_col: {primary_protein_id_col}, aac_col_s: {aac_col_s}, effect_col: {effect_col}, tags_col: {tags_col}, config.target_values: {config.target_values}')
 
     max_print = 10
     print_n = 0
@@ -70,7 +75,7 @@ def parseLines(store, left, right):
 
         sample_id = (primary_protein_id, aac)
 
-        if config.verbosity >= 5:
+        if config.verbosity >= 6:
             print(f'Parsing sample: {sample_id}')
 
 
@@ -120,6 +125,9 @@ def parseLines(store, left, right):
                     target_value = float(words[effect_col])
             else:
                 target_value = None
+                for tag in tags.split(','):
+                    if tag[:6] == 'label:':
+                        target_value = tag[6:]
 
         '''
         if add_file_to_samples:
@@ -140,6 +148,7 @@ def parseLines(store, left, right):
             if feat_name == 'Classification confidence':
                 continue
             feat = features[feat_name]
+
             try:
                 value = feat.value_from_string(x)
             except:
@@ -157,7 +166,7 @@ def parseLines(store, left, right):
 
         output.append((sample_id, target_value, amount_of_structures, tags, feat_out))
 
-    return pack(output)
+    return output
 
 
 def parse_structural_features(samples, config, non_feature_cols = [0,1,2,4,7,19], primary_protein_id_col = 1, aac_col_s = [3,4,5], tags_col = 7, amount_of_struct_col = 19, effect_col = None):
@@ -187,7 +196,7 @@ def parse_feature_table(file_path, samples, config, non_feature_cols = [0,1,2,3,
         if feat_name in consts.FEAT_NAME_SYNONYMS:
             feat_name = consts.FEAT_NAME_SYNONYMS[feat_name]
         if feat_name not in samples.features:
-            samples.addFeature(feat_name,'binary',group='structural',default_value=0)
+            samples.addFeature(feat_name, 'unknown', group='structural')
 
     if config.verbosity >= 1:
         t1 = time.time()
@@ -200,52 +209,37 @@ def parse_feature_table(file_path, samples, config, non_feature_cols = [0,1,2,3,
         t2 = time.time()
         print(f'parse_feature_table, part 2: {t2-t1}')
 
-    small_chunksize, big_chunksize, n_of_small_chunks, n_of_big_chunks = calculate_chunksizes(config.proc_n, len(headless_lines))
+    if config.verbosity >= 4:
+        samples.print_feat_types()
 
-    store = ray.put((config, samples.features, pack((headless_lines, primary_protein_id_col, amount_of_struct_col, effect_col, aac_col_s, tags_col, non_feature_cols, feature_names))))
-
-    if config.verbosity >= 1:
-        t3 = time.time()
-        print(f'parse_feature_table, part 3: {t3-t2}')
-
-    parse_subroutine_results = []
-
-    for i in range(n_of_big_chunks):
-        parse_subroutine_results.append(parseLines.remote(store, i*big_chunksize, (i+1)*big_chunksize))
-
-    border = n_of_big_chunks*big_chunksize
-
-    for i in range(n_of_small_chunks):
-        parse_subroutine_results.append(parseLines.remote(store, border + i*small_chunksize, border + (i+1)*small_chunksize))
-
-    if config.verbosity >= 1:
-        t4 = time.time()
-        print(f'parse_feature_table, part 4: {t4-t3}')
-
-    line_parse_out = ray.get(parse_subroutine_results)
+    
+    output = parseLines(config, 0, len(headless_lines), samples.features, headless_lines, primary_protein_id_col, amount_of_struct_col, effect_col, aac_col_s, tags_col, non_feature_cols, feature_names)
 
     if config.verbosity >= 1:
         t5 = time.time()
-        print(f'parse_feature_table, part 5: {t5-t4}')
+        print(f'parse_feature_table, part 5: {t5-t2}')
 
     n_f = 0
     n_s = 0
     max_print = 10
     n_print = 0
-    for parse_out in line_parse_out:
-        for sample_id, target_value, amount_of_structures, tags, feat_out in unpack(parse_out):
-            for value, feat_name in feat_out:
-                samples.addValue(sample_id,value,feat_name)
-                n_f += 1
-            samples.addTargetValue(sample_id,target_value)
-            if target_value is None and n_print < max_print:
-                print(f'TV is None for {sample_id}')
-                n_print += 1
-            samples.samples[sample_id].amount_of_structures = amount_of_structures
-            samples.samples[sample_id].tags = tags
-            n_s += 1
+    for sample_id, target_value, amount_of_structures, tags, feat_out in output:
+        for value, feat_name in feat_out:
+            samples.addValue(sample_id,value,feat_name)
+            n_f += 1
+        samples.addTargetValue(sample_id,target_value)
+        if target_value is None and n_print < max_print:
+            print(f'TV is None for {sample_id}')
+            n_print += 1
+        samples.samples[sample_id].amount_of_structures = amount_of_structures
+        samples.samples[sample_id].tags = tags
+        n_s += 1
 
-    samples.cleanse_empty_features(verbosity = config.verbosity)
+    if config.verbosity >= 3:
+        samples.print_stats()
+
+    if config.verbosity >= 4:
+        samples.print_feat_types()
 
     if config.verbosity >= 1:
         t6 = time.time()
@@ -253,16 +247,16 @@ def parse_feature_table(file_path, samples, config, non_feature_cols = [0,1,2,3,
         print(f'Total samples: {n_s}, total feature values: {n_f}')
     print('Finihsehd parsing of feature file')
 
-def createTrainingSet(config):
+def createTrainingSet(config, external_impute = None, for_prediction = False):
 
     samples = sampleSpace.SampleSpace(config)
 
     msa_db = config.msa_db
 
-    strfg.initFeatures(samples)
+    #strfg.initFeatures(samples)
     seqfg.initFeatures(config, samples)
 
-    if config.path_to_processed_features_file == None:
+    if (config.path_to_processed_features_file == None and config.path_to_imputed_features_file == None) or config.overwrite:
 
         parse_feature_table(config.path_to_features_file, samples, config)
 
@@ -283,7 +277,7 @@ def createTrainingSet(config):
 
         if config.transform:
             samples.targetTransformation(config)
-        if config.regression:
+        if config.regression and not for_prediction:
             samples.detectOutliers(config)
 
         samples.printPureMixedProportion(config)
@@ -295,14 +289,41 @@ def createTrainingSet(config):
 
         samples.oneHotifyAll()
 
-        config.path_to_processed_features_file = f'{config.outfolder}/{config.dataset_name}_structguy_features_processed.tsv'
+        if external_impute is None:
+            if config.impute_missing_values:
+                samples.impute_all()
+                path_to_impute_map_dump = f'{config.outfolder}/{config.dataset_name}_structguy_trained_impute_map.dump'
+                samples.dump_impute_map(path_to_impute_map_dump)
+                config.add_entry_to_project_file('path_to_impute_map', path_to_impute_map_dump)
+            
+            config.path_to_processed_features_file = f'{config.outfolder}/{config.dataset_name}_structguy_features_processed.tsv'
 
-        samples.write(config.path_to_processed_features_file)
+            samples.write(config.path_to_processed_features_file)
 
-        config.add_entry_to_project_file('path_to_processed_features_file', config.path_to_processed_features_file)
+            config.add_entry_to_project_file('path_to_processed_features_file', config.path_to_processed_features_file)
+        else:
+            if config.impute_missing_values:
+                samples.external_impute(external_impute)
+                
+                config.path_to_imputed_features_file = f'{config.outfolder}/{config.dataset_name}_structguy_features_imputed.tsv'
 
+                samples.write(config.path_to_imputed_features_file)
+
+                config.add_entry_to_project_file('path_to_imputed_features_file', config.path_to_imputed_features_file)
+            else:
+                config.path_to_processed_features_file = f'{config.outfolder}/{config.dataset_name}_structguy_features_processed.tsv'
+
+                samples.write(config.path_to_processed_features_file)
+
+                config.add_entry_to_project_file('path_to_processed_features_file', config.path_to_processed_features_file)
+
+    elif external_impute is not None:
+        parse_feature_table(config.path_to_imputed_features_file, samples, config)
     else:
         parse_feature_table(config.path_to_processed_features_file, samples, config)
+        if config.verbosity >= 4:
+            samples.print_feat_types()
         #Propably call some stuff here, TODO
     config.n_of_features = len(samples.feature_names)
+    samples.transform_matrix_dict()
     return samples

@@ -9,7 +9,9 @@ from Bio.Align.Applications import MafftCommandline
 
 import xml.etree.ElementTree as ET
 
-from Bio import pairwise2
+
+from structman.lib.globalAlignment import init_bp_aligner_class, call_biopython_alignment
+
 from structman.lib.sdsc.consts import residues as residue_consts
 from structman.base_utils.base_utils import pack, unpack
 
@@ -342,8 +344,8 @@ def updateGPW(filename,search_db,seq,sequence_map,u_ac):
 
     return gpw
 
-def computeGPW(config, seq, prot_id, search_db='ref50',search_db_path={},debug=0,fasta_page=None,sequence_map=None,search_db_sequences={}, sub_threads = 1):
-    print('Compute GPW: ', prot_id, search_db)
+def computeGPW(config, seq, prot_id, aligner_class = None, search_db='ref50',search_db_path={},fasta_page=None,sequence_map=None,search_db_sequences={}, sub_threads = 1):
+    print(f'Compute GPW: {prot_id}, {search_db} {sequence_map is None} {fasta_page is None}')
 
     if sequence_map == None:
         if fasta_page == None:
@@ -358,7 +360,7 @@ def computeGPW(config, seq, prot_id, search_db='ref50',search_db_path={},debug=0
         if fasta_page == None:
             return None,search_db_sequences
 
-        if debug >= 1:
+        if config.verbosity >= 1:
             print('Blast result size: ',len(fasta_page))
 
         seq_map = parseFasta('',lines=fasta_page.split('\n'))
@@ -367,7 +369,7 @@ def computeGPW(config, seq, prot_id, search_db='ref50',search_db_path={},debug=0
         seq_map = sequence_map
 
     if seq == 0 or seq == 1:
-        if debug >= 1:
+        if config.verbosity >= 1:
             print('Sequence error in computeGPW:', prot_id, search_db)
         return '',search_db_sequences
 
@@ -376,14 +378,15 @@ def computeGPW(config, seq, prot_id, search_db='ref50',search_db_path={},debug=0
     if sub_threads == 1:
         for hit in seq_map:
             template_seq = seq_map[hit]
-            if debug >= 3:
+            if config.verbosity >= 3:
                 print('Aligning:', prot_id, hit)
+            if config.verbosity >= 5:
                 print(target_seq)
                 print(template_seq)
             try:
-                (target_aligned_sequence,template_aligned_sequence,a,b,c) = pairwise2.align.globalds(target_seq, template_seq,residue_consts.BLOSUM62,-10.0,-0.5,one_alignment_only=True)[0]
+                (target_aligned_sequence, template_aligned_sequence) = call_biopython_alignment(target_seq, template_seq, aligner_class = aligner_class)
             except:
-                if debug >= 1:
+                if config.verbosity >= 1:
                     print('GPW error: ', prot_id, hit)
                     print(target_seq[:10],template_seq[:10])
                 continue
@@ -392,7 +395,7 @@ def computeGPW(config, seq, prot_id, search_db='ref50',search_db_path={},debug=0
             out_fasta_lines.append(f'>{hit}\n')
             out_fasta_lines.append(f'{template_aligned_sequence}\n')
     else:
-        store = ray.put((prot_id, target_seq, residue_consts.BLOSUM62))
+        store = ray.put((prot_id, target_seq))
         packages = []
         current_package = 0
         for hit in seq_map:
@@ -413,18 +416,19 @@ def computeGPW(config, seq, prot_id, search_db='ref50',search_db_path={},debug=0
             para_fasta_lines = unpack(results_package)
             out_fasta_lines += para_fasta_lines
 
-    if debug >= 1:
-        print('Done computing GPW: ',u_ac,search_db)
+    if config.verbosity >= 1:
+        print('Done computing GPW: ', prot_id, search_db)
 
     return ''.join(out_fasta_lines), search_db_sequences
 
 @ray.remote(max_calls = 1)
 def para_align_seqs(store, package):
-    prot_id, target_seq, blosum_matrix = store
+    prot_id, target_seq = store
+    aligner_class = init_bp_aligner_class()
     out_fasta_lines = []
     for hit, hit_seq in unpack(package):
         try:
-            (target_aligned_sequence,template_aligned_sequence,a,b,c) = pairwise2.align.globalds(target_seq, hit_seq, blosum_matrix,-10.0,-0.5,one_alignment_only=True)[0]
+            (target_aligned_sequence, template_aligned_sequence) = call_biopython_alignment(target_seq, hit_seq, aligner_class = aligner_class)
         except:
             continue
         out_fasta_lines.append(f'>{prot_id}_{hit}\n')
@@ -543,7 +547,7 @@ def calcPsicProfiles(config, prot_id, aacs, seq, ref_db_id, gpw=False, debug=0):
 
     if psic_profiles == {}:
         print('Empty psic profiles: ', prot_id, ref_db_id)
-        return psic_wt_map,psic_mut_map,dpsic_map
+        return psic_wt_map, psic_mut_map, dpsic_map, [], {}, None
 
     positional_median_dpsics = []
     for pos,wt in enumerate(seq):
@@ -758,6 +762,8 @@ def getMSA(config, prot_id, sequence_maps=None, sequence=None, ref_db_ids=['ref5
         msa_file_path = saveMSA(config, msa, prot_id, ref_db_id, pdb_tuple)
         msas[ref_db_id] = msa_file_path
 
+    aligner_class = init_bp_aligner_class()
+
     for ref_db_id in gpw_ref_db_ids:
         if ref_db_id in gpws:
             continue
@@ -765,7 +771,7 @@ def getMSA(config, prot_id, sequence_maps=None, sequence=None, ref_db_ids=['ref5
             fasta_page = fasta_results[ref_db_id]
         else:
             fasta_page = None
-        gpw,search_db_sequences = computeGPW(config, sequence, prot_id, search_db=ref_db_id, search_db_path=search_dbs[ref_db_id], debug=debug,
+        gpw,search_db_sequences = computeGPW(config, sequence, prot_id, aligner_class = aligner_class, search_db=ref_db_id, search_db_path=search_dbs[ref_db_id],
                                                 fasta_page=fasta_page, sequence_map=sequence_maps[ref_db_id], search_db_sequences=search_db_sequences, sub_threads = sub_threads)
         if gpw == '':
             if debug >= 1:

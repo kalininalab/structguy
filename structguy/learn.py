@@ -15,13 +15,13 @@ from scipy import stats
 
 from structguy import util, featureGenerator, sampleSpace, trainForest, featureAnalysis
 from structguy import hyperParameterOptimization as hpo
-from structguy.results_analysis import Results, write_protein_wise_pearsons
+from structguy.results_analysis import Results, write_protein_wise_performances
+from structman.base_utils.base_utils import pack
 
 def calcFeatureImportances(forest, samples, cv_slice, config, print_them=False):
     feature_scores = forest.feature_importances_
 
     feat_score_tuples = []
-    feature_value_map = {}
     feature_importance_map = {}
     #print feature_names
 
@@ -36,9 +36,6 @@ def calcFeatureImportances(forest, samples, cv_slice, config, print_them=False):
             return feature_importance_map
         if print_them:
             feat_score_tuples.append((feature_name,feature_scores[pos]))
-            feature_value_map[feature_name] = []
-            for values in cv_slice.test_feature_matrix:
-                feature_value_map[feature_name].append(values[pos])
 
         score = feature_importance_map[feature_name]
         feature_type = samples.features[feature_name].group
@@ -56,7 +53,7 @@ def calcFeatureImportances(forest, samples, cv_slice, config, print_them=False):
                 continue
             if score < config.print_scores_greater_than:
                 continue
-            print(feature_name, ':', score, ' ;Spearman: ', stats.spearmanr(cv_slice.test_targets, feature_value_map[feature_name]))
+            print(f'{feature_name}: {score} | Spearmans corr to true values: {cv_slice.featureTargetCorr(feature_name, samples, config)}')
 
         print('Total feature importance by feature type:', feature_type_importance)
 
@@ -98,7 +95,7 @@ def learn(config, effectRegressor=None):
         if crossValidation == 'LOPO':
             cross_val_obj = sampleSpace.LOPO(samples, config)
         elif crossValidation == 'DataSAIL':
-            cross_val_obj = sampleSpace.DataSAIL_cv(samples, config)
+            cross_val_obj = sampleSpace.DataSAIL_cv(sampleSpace = samples, config = config)
         else:
             cross_val_obj = sampleSpace.X_fold_cv(samples, config, crossValidation)
 
@@ -119,14 +116,14 @@ def learn(config, effectRegressor=None):
             initial_training_input = cv_slice
 
         if config.hyperOptimization == 'bayesianComplete':
-            forest,scores = trainForest.trainForest(config, initial_training_input, samples = samples_store_id, distance_map = distance_map, repeat = config.repeat_training, cv_repeat = config.cv_hpo, print_out = True, debug = debug)
+            forest,scores,initial_training_input, slice_slices = trainForest.trainForest(config, initial_training_input, samples_store_id, distance_map = distance_map, repeat = config.repeat_training, cv_repeat = config.cv_hpo, print_out = True, debug = debug)
             hpo.bayesianComplete(config, initial_training_input, scores, samples = samples_store_id, distance_map = distance_map)
         elif config.hyperOptimization == 'threeDim':
-            forest, scores = trainForest.trainForest(config, initial_training_input, samples = samples_store_id, distance_map = distance_map, repeat = config.repeat_training, cv_repeat = config.cv_hpo, print_out = True, debug = debug)
-            hpo.threeDimHyperOptimization(config, initial_training_input, scores, samples = samples_store_id, distance_map = distance_map, debug = debug)
+            forest, scores, initial_training_input, slice_slices = trainForest.trainForest(config, initial_training_input, samples_store_id, distance_map = distance_map, repeat = config.repeat_training, cv_repeat = config.cv_hpo, print_out = True, debug = debug)
+            hpo.threeDimHyperOptimization(config, initial_training_input, scores, samples_store_id, slice_slices, distance_map = distance_map, debug = debug)
         else:
             if debug:
-                forest,scores = trainForest.trainForest(config, initial_training_input, samples = samples_store_id, distance_map = distance_map, repeat = config.repeat_training, cv_repeat = config.cv_hpo, print_out = True, debug = debug)
+                forest,scores,initial_training_input, slice_slices = trainForest.trainForest(config, initial_training_input, samples_store_id, distance_map = distance_map, repeat = config.repeat_training, cv_repeat = config.cv_hpo, print_out = True, debug = debug)
                 scores.printOut()
 
             print('Hyperparamter optimization skipped')
@@ -160,14 +157,16 @@ def learn(config, effectRegressor=None):
 
             cv_slice.printBalance(config)
 
-            forest,scores = trainForest.trainForest(config, cv_slice, samples = samples_store_id, distance_map = distance_map, print_out = True, debug = debug)
+            forest, scores, cv_slice, slice_slices = trainForest.trainForest(config, cv_slice, samples_store_id, distance_map = distance_map, print_out = True, debug = debug)
 
             forests[cv_counter] = forest
 
             if config.crossValidation == 'LOPO':
                 lopo_scores[tuple(cv_counter)] = scores
 
-            y_pred = forest.predict(cv_slice.test_feature_matrix)
+            test_feature_matrix = cv_slice.get_test_feature_matrix(samples)
+
+            y_pred = forest.predict(test_feature_matrix)
 
             if config.regression:
                 mses.append((scores.mse,len(cv_slice.test_targets)))
@@ -197,7 +196,7 @@ def learn(config, effectRegressor=None):
 
                     y_pred_median = util.median(y_pred)
                     tv_median = util.median(cv_slice.test_targets)
-                    util.scatterplot(y_pred, cv_slice.test_feature_matrix, cv_slice.feature_names,
+                    util.scatterplot(y_pred, test_feature_matrix, cv_slice.feature_names,
                                      cv_slice.test_targets, config.target_values, y_pred_median, tv_median, scatterfile)
                     util.hexbinplot(y_pred, cv_slice.test_targets, config.target_values, hexbinfile)
 
@@ -222,7 +221,7 @@ def learn(config, effectRegressor=None):
             #middle_value = (max(accum_y_pred) + min(accum_y_pred))/2.
             y_pred_median = util.median(accum_y_pred)
             tv_median = util.median(accum_true_vals)
-            util.scatterplot(accum_y_pred,cv_slice.test_feature_matrix,cv_slice.feature_names,accum_true_vals,config.target_values,y_pred_median,tv_median,scatterfile)
+            util.scatterplot(accum_y_pred,cv_slice.get_test_feature_matrix(samples),cv_slice.feature_names,accum_true_vals,config.target_values,y_pred_median,tv_median,scatterfile)
             util.hexbinplot(accum_y_pred,accum_true_vals,config.target_values,hexbinfile)
             if config.crossValidation == 'LOPO':
                 labels = []
@@ -238,7 +237,7 @@ def learn(config, effectRegressor=None):
         if crossValidation == 'LOPO':
             cross_val_obj = sampleSpace.LOPO(samples, config)
         elif crossValidation == 'DataSAIL':
-            cross_val_obj = sampleSpace.DataSAIL_cv(samples, config)
+            cross_val_obj = sampleSpace.DataSAIL_cv(sampleSpace = samples, config = config)
         else:
             cross_val_obj = sampleSpace.X_fold_cv(samples, config, crossValidation)
     else:
@@ -260,18 +259,64 @@ def learn(config, effectRegressor=None):
 
 
 def evaluate_dataset(config):
-    samples = featureGenerator.createTrainingSet(config)
+    forest, extern_feature_names_list, impute_map, model_config = loadModel(config.path_to_model)
+
+    samples = featureGenerator.createTrainingSet(config, external_impute = impute_map, for_prediction=True)
 
     for sample_id in samples.samples:
         samples.samples[sample_id].testtrain = 'test'
 
-    forest, extern_feature_names_list, model_config = loadModel(config.path_to_model)
-
     test_feature_matrix, test_targets, sample_id_list = samples.get_test_data_for_feature_list(extern_feature_names_list)
-
 
     print('Shape of the feature matrix:',len(test_feature_matrix),len(test_feature_matrix[0]))
     y_pred = forest.predict(test_feature_matrix)
+
+    if config.path_to_multi_savs_table is not None:
+        multi_savs = util.parse_multi_savs_table(config)
+
+        effect_dict = {}
+        mm_y_pred = []
+        combined_y_pred = []
+        mm_test_targets = []
+        combined_test_targets = []
+        mm_sample_id_list = []
+        combined_sample_id_list = []
+        new_sample_id_list = []
+        new_y_pred = []
+        new_test_targets = []
+        for pos, sample_id in enumerate(sample_id_list):
+            pred_value = y_pred[pos]
+            effect_dict[sample_id] = pred_value
+            true_value = test_targets[pos]
+
+            if true_value is not None:
+                combined_test_targets.append(true_value)
+                combined_sample_id_list.append(sample_id)
+                combined_y_pred.append(pred_value)
+                new_test_targets.append(true_value)
+                new_sample_id_list.append(sample_id)
+                new_y_pred.append(pred_value)
+
+        for (prot_id, aacs, effect) in multi_savs:
+            individual_effect_preds = []
+            for aac in aacs:
+                individual_effect_preds.append(effect_dict[(prot_id, aac)])
+            combined_effect = util.combine_individual_effects(individual_effect_preds)
+
+            combined_test_targets.append(effect)
+            combined_sample_id_list.append((prot_id, ":".join(aacs)))
+            combined_y_pred.append(combined_effect)
+
+            mm_test_targets.append(effect)
+            mm_sample_id_list.append((prot_id, ":".join(aacs)))
+            mm_y_pred.append(combined_effect)
+
+        test_targets = new_test_targets
+        y_pred = new_y_pred
+        sample_id_list = new_sample_id_list
+
+    else:
+        mm_y_pred = None
 
     protein_info = {}
     protein_wise_results = {}
@@ -288,10 +333,10 @@ def evaluate_dataset(config):
             print(f'Predicted value is None for: {sample_id}')
 
         prot_id, aac = sample_id
-        protein_size = samples.features['Protein Size'].value_map[sample_id]
-
+        
         if true_value is not None:
             if prot_id not in protein_info:
+                protein_size = samples.get_feature_value(sample_id, 'Protein Size')
                 protein_info[prot_id] = [protein_size, 0]
             protein_info[prot_id][1] += 1
 
@@ -312,20 +357,39 @@ def evaluate_dataset(config):
         prot_wise_spearmans, mean_spearman = util.calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.spearmanr)
         prot_wise_pearsons, mean_pearson = util.calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.pearsonr)
 
+        print(f'Number of samples: {len(sample_id_list)} {len(test_targets)} {len(y_pred)}')
+
         print(f'Prot-wise mean pearson: {mean_pearson}')
         print(f'Prot-wise mean spearman: {mean_spearman}')
 
-        write_protein_wise_pearsons(f'{config.outfolder}/protein_wise_results.tsv', protein_wise_results, protein_info)
+        if mm_y_pred is not None:
+            prot_wise_spearmans, mean_spearman = util.calc_protein_wise_corr(mm_test_targets, mm_y_pred, mm_sample_id_list, stats.spearmanr)
+            prot_wise_pearsons, mean_pearson = util.calc_protein_wise_corr(mm_test_targets, mm_y_pred, mm_sample_id_list, stats.pearsonr)
 
-        decisions, pred_std_vector = featureAnalysis.explain_decisions(config, forest, y_pred, test_feature_matrix, extern_feature_names_list)
+            print(f'Number of samples: {len(mm_sample_id_list)} {len(mm_test_targets)} {len(mm_y_pred)}')
+
+            print(f'Prot-wise mean pearson for multi savs: {mean_pearson}')
+            print(f'Prot-wise mean spearman for multi savs: {mean_spearman}')
+
+            prot_wise_spearmans, mean_spearman = util.calc_protein_wise_corr(combined_test_targets, combined_y_pred, combined_sample_id_list, stats.spearmanr)
+            prot_wise_pearsons, mean_pearson = util.calc_protein_wise_corr(combined_test_targets, combined_y_pred, combined_sample_id_list, stats.pearsonr)
+
+            print(f'Number of samples: {len(combined_sample_id_list)} {len(combined_test_targets)} {len(combined_y_pred)}')
+
+            print(f'Prot-wise mean pearson for all variants: {mean_pearson}')
+            print(f'Prot-wise mean spearman for all variants: {mean_spearman}')
+
+        write_protein_wise_performances(f'{config.outfolder}/protein_wise_results.tsv', prot_wise_spearmans, protein_info)
+
+        #decisions, pred_std_vector = featureAnalysis.explain_decisions(config, forest, y_pred, test_feature_matrix, extern_feature_names_list)
 
         header = 'Protein ID\tSAV\tPredicted effect value\tTree-wise standard deviation\tFeature 1\tFeature 2\t Feature 3\t Feature 4\t Feature 5\n'
         lines = [header]
         for pos, sample_id in enumerate(sample_id_list):
             pred_value = y_pred[pos]
             prot_id, aac = sample_id
-            pred_std = pred_std_vector[pos]
-            feature_decisions = decisions[pos]
+            pred_std = ''#pred_std_vector[pos]
+            feature_decisions = ''#decisions[pos]
             words = [prot_id, aac, str(pred_value), str(pred_std)]
             for feat_name, weight, left_thresh, right_thresh in feature_decisions[:5]:
                 if left_thresh is None:
@@ -351,6 +415,21 @@ def evaluate_dataset(config):
             tv_median = util.median(test_targets)
             util.scatterplot(y_pred, test_feature_matrix, extern_feature_names_list, test_targets, config.target_values, y_pred_median, tv_median, scatterfile)
             util.hexbinplot(y_pred, test_targets, config.target_values, hexbinfile)
+
+    elif model_config.regression:
+        #print(test_targets[:100], y_pred[:100])
+        int_targets = []
+        for x in test_targets:
+            if x == 'Benign':
+                int_targets.append(1)
+            else: 
+                int_targets.append(0)
+        total_roc_auc = roc_auc_score(int_targets, y_pred)
+        prot_wise_roc_aucs, mean_roc_auc = util.calc_protein_wise_corr(int_targets, y_pred, sample_id_list, roc_auc_score, mono_return_score_function = True)
+        print(f'Total roc_auc: {total_roc_auc}')
+        print(f'Prot-wise mean roc_auc: {mean_roc_auc}')
+
+        #write_protein_wise_pearsons(f'{config.outfolder}/protein_wise_results.tsv', prot_wise_roc_aucs, protein_info)
 
     else:
         acc = accuracy_score(test_targets, y_pred)
@@ -406,7 +485,7 @@ def writeOutput(config, y_pred, cv_slice, sampleSpace, append=False):
         feature_vector = []
         for feature_name in feature_names:
             feat = sampleSpace.features[feature_name]
-            feature_value = feat.value_map[sample_id]
+            feature_value = sampleSpace.get_feature_value(sample_id, feature_name)
             feature_vector.append(feat.string_convert(feature_value))
 
         outlines.append('%s\t%s\t%s\t%s\t%s\t%s\n' % (u_ac,aac,str(target_value),str(y_pred[pos]),str(error),'\t'.join(feature_vector)))
@@ -439,25 +518,40 @@ def storeModel(model, feature_names, config, fn):
 def loadModel(fn):
     with open(fn, 'rb') as inp:
         model, feature_names, config = pickle.load(inp)
+
+    try:
+        path_to_impute_map = config.path_to_impute_map
+        with open(path_to_impute_map, 'rb') as inp:
+            impute_map = pickle.load(inp)
+    except:
+        impute_map = None
+
     print('\n============\nLoaded model from %s\n============\n' % fn)
-    return model, feature_names, config
+    return model, feature_names, impute_map, config
 
 def buildFinalModel(samples, config, internal_cv = None, outfile = None, filtered_features_file = None):
     #Some feature selection strategies require an internal cross validation-like slicing
     #An example is the confusion-based feature section
+
     cross_val_obj = sampleSpace.FullSlice(samples, config, internal_cv = internal_cv)
+
     full_slice = cross_val_obj.slices[0]
 
     full_slice.printBalance(config)
 
-    forest,scores = trainForest.trainForest(config, full_slice, samples = samples, distance_map = samples.geometric_distance_map, print_out = True,skip_scoring = True)
+    full_slice.subslices = []
+    for slice_slice in full_slice.slice_slices:
+        full_slice.subslices.append(slice_slice.test_prots)
+
+    forest, scores, full_slice, slice_slices = trainForest.trainForest(config, full_slice, samples, distance_map = samples.geometric_distance_map, print_out = True,skip_scoring = True)
 
     feat_importance_map = calcFeatureImportances(forest, samples, full_slice, config, print_them=True)
 
     if outfile != None:
         storeModel(forest, full_slice.feature_names, config, outfile)
 
-    if filtered_features_file != None:
-        full_slice.write(filtered_features_file)
+
+    #if filtered_features_file != None:
+        #full_slice.write(filtered_features_file)
 
     return forest
