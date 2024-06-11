@@ -53,15 +53,22 @@ fi
 conda_base_path=$(conda info --base)
 conda_bash_path="$conda_base_path"/etc/profile.d/conda.sh
 
-new_env_path=$(conda env list | awk -v name="$env_name" '/^[^#]/{ if ($1 == name) {print $2} }')
-
 #activate the environment
 {
     echo "Activating environment inside shell ..."
     source "$conda_bash_path"
+    current_env=$(conda info | grep 'active environment' | awk '{sub(/active environment.:./,""); print}')
+
+    if ! [ "$current_env" = "base" ]
+    then
+        conda deactivate
+    fi
+
+    new_env_path=$(conda env list | awk -v name="$env_name" '/^[^#]/{ if ($1 == name) {print $2} }')
     conda activate "$env_name"
-    echo "$new_env_path"" activated"
+    echo "$env_name" activated
 } >&$verbose_stdout
+
 
 conda_list_result=$(conda list | grep structman)
 if [ -z "$env_list_result" ]
@@ -80,7 +87,7 @@ fi
 #install dependencies
 {
     echo "Installing package DataSAIL ..."
-    mamba install -c conda-forge -c kalininalab -c bioconda -c mosek datasail
+    mamba install -y -c conda-forge -c kalininalab -c bioconda -c mosek datasail
     pip install grakel
 } >&$verbose_stdout
 
@@ -133,15 +140,16 @@ pushd $storage_folder
 if ! [ -f uniref50.fasta.gz ]
 then
     wget ftp://ftp.ebi.ac.uk/pub/databases/uniprot/uniref/uniref50/uniref50.fasta.gz
+    mmseqs createdb uniref50.fasta.gz uniref50_search_db
+    mmseqs createindex uniref50_search_db "$tmp_folder_path" -s 7.5
 fi
 if ! [ -f uniref90.fasta.gz ]
 then
     wget ftp://ftp.ebi.ac.uk/pub/databases/uniprot/uniref/uniref90/uniref90.fasta.gz
+    mmseqs createdb uniref90.fasta.gz uniref90_search_db
+    mmseqs createindex uniref90_search_db "$tmp_folder_path" -s 7.5
 fi
-mmseqs createdb uniref50.fasta.gz uniref50_search_db
-mmseqs createindex uniref50_search_db "$tmp_folder_path" -s 7.5
-mmseqs createdb uniref90.fasta.gz uniref90_search_db
-mmseqs createindex uniref90_search_db "$tmp_folder_path" -s 7.5
+
 echo "search_db_folder=$storage_folder" > "$resources_folder_path"search_db_settings.conf
 popd
 

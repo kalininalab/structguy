@@ -116,7 +116,7 @@ def fill_plane(parameter_values, integer_type_params, density = 20):
 
     return projected_parameter_values
 
-def bayes_random_init(config, parameters, score_matrix, initial_cv_obj, best_scores, n_pre_samples, distance_map, samples, slice_slices, fix_cat = True, force_remote = False, debug = False):
+def bayes_random_init(config, parameters, score_matrix, initial_cv_obj, best_scores, n_pre_samples, distance_map, samples, slice_slices, fix_cat = True, debug = False):
     param_names = [p.name for p in parameters]
 
     bounds = np.array([p.half_step_limits for p in parameters])
@@ -145,9 +145,15 @@ def bayes_random_init(config, parameters, score_matrix, initial_cv_obj, best_sco
 
     #n_pre_samples = 1 #Just for testing
 
-    force_remote = True
+    sample_size_threshold = config.gigs_of_ram * 300
+    n_of_samples = len(initial_cv_obj.slices[0].train_targets) + len(initial_cv_obj.slices[0].test_targets)
 
-    print('bayesian optimization:',param_names,n_pre_samples,force_remote)
+    if n_of_samples < sample_size_threshold:
+        para_random_init = True
+    else:
+        para_random_init = False
+
+    print('bayesian optimization:',param_names,n_pre_samples,para_random_init)
     print('Current best scores:')
     best_scores.printOut()
     print(f'Objective score: {best_scores.objective_value(config)}')
@@ -155,9 +161,9 @@ def bayes_random_init(config, parameters, score_matrix, initial_cv_obj, best_sco
     t0 = time.time()
 
     #if not 'geometric_exponent' in param_names:
-    if force_remote:
+    if para_random_init:
         randomized_parameters = np.random.uniform(bounds[:, 0], bounds[:, 1], (n_pre_samples, bounds.shape[0]))
-        max_packages = 4
+        max_packages = max([2, 4 * (sample_size_threshold/n_of_samples)])
         packagesize = math.ceil(n_pre_samples / max_packages)
 
         #Always calculate one set of parameters unparalized to set the confusion maps (or other slice specific stuff that resets after each round of the HPO)
@@ -173,7 +179,7 @@ def bayes_random_init(config, parameters, score_matrix, initial_cv_obj, best_sco
 
         store = ray.put((config, pack(cv_obj.serialize()), parameters, None, samples, slice_slices))
 
-        print(f'after store init, samples is None: {samples is None}')
+        print(f'after store init, samples is None: {samples is None}, max_packages: {max_packages}, package_size: {packagesize}')
 
         para_number = config.proc_n//max_packages
 
@@ -193,7 +199,7 @@ def bayes_random_init(config, parameters, score_matrix, initial_cv_obj, best_sco
             print(f'ERROR in bayes_random_init: {n_pre_samples}, {bounds}\n{e}\n{f}\n{g}')
             sys.exit()
 
-        print(f'Para random init started: {para_number}')
+        print(f'Para random init started: # of packages: {len(para_eval_ret_ids)} # of subthreads: {para_number}')
 
         para_results_package = ray.get(para_eval_ret_ids)
         for para_results in para_results_package:
@@ -243,7 +249,7 @@ def bayes_random_init(config, parameters, score_matrix, initial_cv_obj, best_sco
             best_scores = scores
             best_params = params
             new_optimimum = True
-            if force_remote:
+            if para_random_init:
                 try:
                     cv_obj_list = unpack(cv_obj)
                     cv_obj = DataSAIL_cv(as_list = cv_obj_list)
@@ -306,7 +312,7 @@ def bayes_random_init(config, parameters, score_matrix, initial_cv_obj, best_sco
 # Taken from https://github.com/thuijskens/bayesian-optimization
 # Changed to match the specific problem
 def bayesian_optimisation(n_iters, config, parameters, score_matrix, cv_obj, best_scores, distance_map, samples, slice_slices, n_pre_samples=5,
-                          gp_params=None, random_search=False, alpha=1e-5, epsilon=1e-7, force_remote = False, debug = False):
+                          gp_params=None, random_search=False, alpha=1e-5, epsilon=1e-7, debug = False):
     """ bayesian_optimisation
     Uses Gaussian Processes to optimise the loss function `sample_loss`.
     Arguments:
@@ -336,7 +342,7 @@ def bayesian_optimisation(n_iters, config, parameters, score_matrix, cv_obj, bes
     n_fixed_params = 1
 
     #while n_fixed_params > 0:
-    x_list, y_list, bounds, n_params, best_scores, best_params, initial_values, new_optimimum, n_fixed_params, param_names, integer_type_params, cv_obj, slice_slices = bayes_random_init(config, parameters, score_matrix, cv_obj, best_scores, n_pre_samples, distance_map, samples, slice_slices, fix_cat = False, force_remote = force_remote, debug = debug)
+    x_list, y_list, bounds, n_params, best_scores, best_params, initial_values, new_optimimum, n_fixed_params, param_names, integer_type_params, cv_obj, slice_slices = bayes_random_init(config, parameters, score_matrix, cv_obj, best_scores, n_pre_samples, distance_map, samples, slice_slices, fix_cat = False, debug = debug)
 
     min_max_samples = [[],[]]
     for bound in bounds:
@@ -744,7 +750,7 @@ def threeDimHyperOptimization(config, cv_obj, best_scores, samples, slice_slices
         if n > 1:
             cv_obj.reset_confusion_maps()
 
-        new_opti, best_scores, cv_obj, slice_slices = bayesian_optimisation(None, config, list(fs_parameters.values()), score_matrix, cv_obj, best_scores, distance_map, samples, slice_slices, n_pre_samples = None, force_remote = False, debug = debug)
+        new_opti, best_scores, cv_obj, slice_slices = bayesian_optimisation(None, config, list(fs_parameters.values()), score_matrix, cv_obj, best_scores, distance_map, samples, slice_slices, n_pre_samples = None, debug = debug)
         if new_opti:
             converged = False
             
