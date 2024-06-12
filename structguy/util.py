@@ -52,7 +52,7 @@ def parse_conf(filepath):
 class Config:
     def __init__(self, path_to_project_file, hyperparameters_path = None):
         util_scriptpath = os.path.abspath(resolve_path(__file__))
-        settings_path = f'{util_scriptpath.rsplit('/',1)[0]}/resources/search_db_settings.conf'
+        settings_path = f'{util_scriptpath.rsplit("/",1)[0]}/resources/search_db_settings.conf'
         search_db_opt_args = parse_conf(settings_path)
 
         self.profiling = False
@@ -107,7 +107,7 @@ class Config:
 
         self.mafft_path = ''
         self.blast_path = ''
-        self.psic_source = f'{util_scriptpath.rsplit('/',1)[0]}/resources/psic'
+        self.psic_source = f'{util_scriptpath.rsplit("/",1)[0]}/resources/psic'
         self.blosum_path = f'{self.psic_source}/Blosum62.txt'
 
         self.pdb_path = ''
