@@ -38,7 +38,8 @@ def parseLines_remote_wrapper(store, left, right):
 
 def parseLines(config, left, right, features, lines, primary_protein_id_col, amount_of_struct_col, effect_col, aac_col_s, tags_col, non_feature_cols, feature_names):
     output = []
-    print(f'parseLines: non_feature_cols: {non_feature_cols}, primary_protein_id_col: {primary_protein_id_col}, aac_col_s: {aac_col_s}, effect_col: {effect_col}, tags_col: {tags_col}, config.target_values: {config.target_values}')
+    if config.verbosity >= 1:
+        print(f'parseLines: non_feature_cols: {non_feature_cols}, primary_protein_id_col: {primary_protein_id_col}, aac_col_s: {aac_col_s}, effect_col: {effect_col}, tags_col: {tags_col}, config.target_values: {config.target_values}')
 
     max_print = 10
     print_n = 0
@@ -142,7 +143,10 @@ def parseLines(config, left, right, features, lines, primary_protein_id_col, amo
         for pos,x in enumerate(words):
             if pos in non_feature_cols:
                 continue
-            feat_name = feature_names[pos]
+            try:
+                feat_name = feature_names[pos]
+            except:
+                continue
             if feat_name in consts.FEAT_NAME_SYNONYMS:
                 feat_name = consts.FEAT_NAME_SYNONYMS[feat_name]
             if feat_name == 'Classification confidence':
@@ -178,7 +182,8 @@ def parse_structural_features(samples, config, non_feature_cols = [0,1,2,4,7,19]
 
 
 def parse_feature_table(file_path, samples, config, non_feature_cols = [0,1,2,3,4], primary_protein_id_col = 0, aac_col_s = [1], tags_col = 3, amount_of_struct_col = 4, effect_col = 2):
-    print(f'Reading feature file: {file_path}, non_feature_cols: {non_feature_cols}, primary_protein_id_col: {primary_protein_id_col}, aac_col_s: {aac_col_s}, effect_col: {effect_col}, tags_col: {tags_col}')
+    if config.verbosity >= 1:
+        print(f'Reading feature file: {file_path}, non_feature_cols: {non_feature_cols}, primary_protein_id_col: {primary_protein_id_col}, aac_col_s: {aac_col_s}, effect_col: {effect_col}, tags_col: {tags_col}')
 
     f = open(file_path,'r')
     lines = f.read().split('\n')
@@ -245,9 +250,13 @@ def parse_feature_table(file_path, samples, config, non_feature_cols = [0,1,2,3,
         t6 = time.time()
         print(f'parse_feature_table, part 6: {t6-t5}')
         print(f'Total samples: {n_s}, total feature values: {n_f}')
-    print('Finihsehd parsing of feature file')
+    if config.verbosity >= 1:
+        print('Finished parsing of feature file')
 
 def createTrainingSet(config, external_impute = None, for_prediction = False):
+
+    if config.verbosity >= 2:
+        print(f'Call of createTrainingSet: external_impute: {external_impute}, for_prediction: {for_prediction}')
 
     samples = sampleSpace.SampleSpace(config)
 
@@ -279,8 +288,9 @@ def createTrainingSet(config, external_impute = None, for_prediction = False):
             samples.targetTransformation(config)
         if config.regression and not for_prediction:
             samples.detectOutliers(config)
-
-        samples.printPureMixedProportion(config)
+            
+        if config.verbosity >= 1:
+            samples.printPureMixedProportion(config)
 
         samples.adjustParameterRanges(config)
 

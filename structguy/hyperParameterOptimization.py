@@ -116,7 +116,7 @@ def fill_plane(parameter_values, integer_type_params, density = 20):
 
     return projected_parameter_values
 
-def bayes_random_init(config, parameters, score_matrix, initial_cv_obj, best_scores, n_pre_samples, distance_map, samples, slice_slices, fix_cat = True, debug = False):
+def bayes_random_init(config, parameters, score_matrix, initial_cv_obj, best_scores, n_pre_samples, distance_map, slice_slices, samples = None, samples_store_id = None, fix_cat = True, debug = False, force_confusion = False):
     param_names = [p.name for p in parameters]
 
     bounds = np.array([p.half_step_limits for p in parameters])
@@ -163,8 +163,8 @@ def bayes_random_init(config, parameters, score_matrix, initial_cv_obj, best_sco
     #if not 'geometric_exponent' in param_names:
     if para_random_init:
         randomized_parameters = np.random.uniform(bounds[:, 0], bounds[:, 1], (n_pre_samples, bounds.shape[0]))
-        max_packages = max([2, 4 * (sample_size_threshold/n_of_samples)])
-        packagesize = math.ceil(n_pre_samples / max_packages)
+        max_packages = max([2, 8 * (sample_size_threshold//n_of_samples)])
+        packagesize = math.ceil((n_pre_samples-1) / max_packages)
 
         #Always calculate one set of parameters unparalized to set the confusion maps (or other slice specific stuff that resets after each round of the HPO)
         init_params = randomized_parameters[0]
@@ -174,10 +174,10 @@ def bayes_random_init(config, parameters, score_matrix, initial_cv_obj, best_sco
         if debug:
             print(f'Init params: {init_params}')
 
-        scores, cv_obj, slice_slices = get_scores(config, score_matrix, initial_cv_obj, distance_map, samples, slice_slices, debug = debug)
+        scores, cv_obj, slice_slices = get_scores(config, score_matrix, initial_cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, debug = debug, force_confusion = force_confusion)
         results = [(scores, init_params, cv_obj)]
 
-        store = ray.put((config, pack(cv_obj.serialize()), parameters, None, samples, slice_slices))
+        store = ray.put((config, pack(cv_obj.serialize()), parameters, samples_store_id, slice_slices, force_confusion))
 
         print(f'after store init, samples is None: {samples is None}, max_packages: {max_packages}, package_size: {packagesize}')
 
@@ -212,7 +212,7 @@ def bayes_random_init(config, parameters, score_matrix, initial_cv_obj, best_sco
             for params in np.random.uniform(bounds[:, 0], bounds[:, 1], (n_pre_samples, bounds.shape[0])):
                 for pos,para_value in enumerate(params):
                     parameters[pos].setValue(config, para_value)
-                scores, cv_obj, slice_slices = get_scores(config, score_matrix, cv_obj, distance_map, samples, slice_slices)
+                scores, cv_obj, slice_slices = get_scores(config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, force_confusion = force_confusion)
                 results.append((scores, params, cv_obj))
                 #projected_parameter_values = fill_plane(params, integer_type_params)
                 #for projected_param in projected_parameter_values:
@@ -311,8 +311,8 @@ def bayes_random_init(config, parameters, score_matrix, initial_cv_obj, best_sco
 
 # Taken from https://github.com/thuijskens/bayesian-optimization
 # Changed to match the specific problem
-def bayesian_optimisation(n_iters, config, parameters, score_matrix, cv_obj, best_scores, distance_map, samples, slice_slices, n_pre_samples=5,
-                          gp_params=None, random_search=False, alpha=1e-5, epsilon=1e-7, debug = False):
+def bayesian_optimisation(n_iters, config, parameters, score_matrix, cv_obj, best_scores, distance_map, slice_slices, samples = None, samples_store_id = None, n_pre_samples=5,
+                          gp_params=None, random_search=False, alpha=1e-5, epsilon=1e-7, debug = False, force_confusion = False):
     """ bayesian_optimisation
     Uses Gaussian Processes to optimise the loss function `sample_loss`.
     Arguments:
@@ -342,7 +342,7 @@ def bayesian_optimisation(n_iters, config, parameters, score_matrix, cv_obj, bes
     n_fixed_params = 1
 
     #while n_fixed_params > 0:
-    x_list, y_list, bounds, n_params, best_scores, best_params, initial_values, new_optimimum, n_fixed_params, param_names, integer_type_params, cv_obj, slice_slices = bayes_random_init(config, parameters, score_matrix, cv_obj, best_scores, n_pre_samples, distance_map, samples, slice_slices, fix_cat = False, debug = debug)
+    x_list, y_list, bounds, n_params, best_scores, best_params, initial_values, new_optimimum, n_fixed_params, param_names, integer_type_params, cv_obj, slice_slices = bayes_random_init(config, parameters, score_matrix, cv_obj, best_scores, n_pre_samples, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, fix_cat = False, debug = debug, force_confusion = force_confusion)
 
     min_max_samples = [[],[]]
     for bound in bounds:
@@ -422,7 +422,7 @@ def bayesian_optimisation(n_iters, config, parameters, score_matrix, cv_obj, bes
             tl4 = time.time()
             print(f'Bayesian optimisation loop part 4: {tl4-tl3}')
 
-        scores, cv_obj, slice_slices = get_scores(config, score_matrix, cv_obj, distance_map, samples, slice_slices)
+        scores, cv_obj, slice_slices = get_scores(config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, force_confusion = force_confusion)
 
         if config.verbosity >= 2:
             tl5 = time.time()
@@ -548,7 +548,7 @@ def addToScoreMatrix(scores_obj, config, score_matrix):
     score_matrix[score_tuple] = scores_obj
     return
 
-def twoDim(parameter_1, parameter_2, best_scores, config, score_matrix, cv_obj, distance_map, samples, slice_slices):
+def twoDim(parameter_1, parameter_2, best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = None, samples_store_id = None):
     cat_count = 0
     for p_type in [parameter_1.param_type, parameter_2.param_type]:
         if p_type == 'categorical':
@@ -559,35 +559,35 @@ def twoDim(parameter_1, parameter_2, best_scores, config, score_matrix, cv_obj, 
 
     if cat_count == 1:
         if parameter_1.param_type == 'categorical':
-            return bayesianAndCat(parameter_1, [parameter_2], best_scores, config, score_matrix, cv_obj, distance_map, samples, slice_slices)
+            return bayesianAndCat(parameter_1, [parameter_2], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id)
         elif parameter_2.param_type == 'categorical':
-            return bayesianAndCat(parameter_2, [parameter_1], best_scores, config, score_matrix, cv_obj, distance_map, samples, slice_slices)
+            return bayesianAndCat(parameter_2, [parameter_1], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id)
 
-    return bayesian_optimisation(None, config, [parameter_1, parameter_2], score_matrix, cv_obj, best_scores, distance_map, samples, slice_slices, n_pre_samples = None)
+    return bayesian_optimisation(None, config, [parameter_1, parameter_2], score_matrix, cv_obj, best_scores, distance_map, slice_slices, n_pre_samples = None, samples = samples, samples_store_id = samples_store_id)
 
-def threeDim(parameter_1, parameter_2, parameter_3, best_scores, config, score_matrix, cv_obj, distance_map, samples, slice_slices):
+def threeDim(parameter_1, parameter_2, parameter_3, best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = None, samples_store_id = None, force_confusion = False):
     cat_count = 0
     for p_type in [parameter_1.param_type, parameter_2.param_type, parameter_3.param_type]:
         if p_type == 'categorical':
             cat_count += 1
 
     if cat_count == 3:
-        return cat3D(parameter_1, parameter_2, parameter_3, best_scores,config,score_matrix,cv_obj, distance_map, samples, slice_slices)
+        return cat3D(parameter_1, parameter_2, parameter_3, best_scores,config,score_matrix,cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, force_confusion = force_confusion)
 
     if cat_count == 2:
         return #TODO when we have at least 2 categorical features
 
     if cat_count == 1:
         if parameter_1.param_type == 'categorical':
-            return bayesianAndCat(parameter_1, [parameter_2, parameter_3], best_scores, config, score_matrix, cv_obj, distance_map, samples, slice_slices)
+            return bayesianAndCat(parameter_1, [parameter_2, parameter_3], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, force_confusion = force_confusion)
         elif parameter_2.param_type == 'categorical':
-            return bayesianAndCat(parameter_2, [parameter_1, parameter_3], best_scores, config, score_matrix, cv_obj, distance_map, samples, slice_slices)
+            return bayesianAndCat(parameter_2, [parameter_1, parameter_3], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, force_confusion = force_confusion)
         elif parameter_3.param_type == 'categorical':
-            return bayesianAndCat(parameter_3, [parameter_1, parameter_2], best_scores, config, score_matrix, cv_obj, distance_map, samples, slice_slices)
+            return bayesianAndCat(parameter_3, [parameter_1, parameter_2], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, force_confusion = force_confusion)
 
-    return bayesian_optimisation(None, config, [parameter_1, parameter_2, parameter_3], score_matrix, cv_obj, best_scores, distance_map, samples, slice_slices, n_pre_samples = None)
+    return bayesian_optimisation(None, config, [parameter_1, parameter_2, parameter_3], score_matrix, cv_obj, best_scores, distance_map, slice_slices, n_pre_samples = None, samples = samples, samples_store_id = samples_store_id, force_confusion = force_confusion)
 
-def bayesianAndCat(parameter_1, parameters, best_scores, config, score_matrix, cv_obj, distance_map, samples, slice_slices):
+def bayesianAndCat(parameter_1, parameters, best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = None, samples_store_id = None, force_confusion = False):
     print('bayesian optimization and Cat', parameter_1.name)
 
     new_optimimum = False
@@ -600,7 +600,7 @@ def bayesianAndCat(parameter_1, parameters, best_scores, config, score_matrix, c
     for parameter_value_1 in parameter_1.possible_values:
         parameter_1.setValue(config,parameter_value_1)
 
-        bay_optimimum, scores, cv_obj, slice_slices = bayesian_optimisation(None, config, parameters, score_matrix, cv_obj, best_scores, distance_map, samples, slice_slices, n_pre_samples = None)
+        bay_optimimum, scores, cv_obj, slice_slices = bayesian_optimisation(None, config, parameters, score_matrix, cv_obj, best_scores, distance_map, slice_slices, n_pre_samples = None, samples = samples, samples_store_id = samples_store_id, force_confusion = force_confusion)
 
         if util.objective_function_criterium(config, scores, best_scores):
             best_scores = scores
@@ -616,18 +616,18 @@ def bayesianAndCat(parameter_1, parameters, best_scores, config, score_matrix, c
 
     return new_optimimum, best_scores, cv_obj, slice_slices
 
-def cat3D(parameter_1, parameter_2, parameter_3, best_scores, config, score_matrix, cv_obj, distance_map, samples):
+def cat3D(parameter_1, parameter_2, parameter_3, best_scores, config, score_matrix, cv_obj, distance_map, samples = None, samples_store_id = None):
     #Todo when we get at least 3 categorical features
     return
 
 
-def get_scores(config, score_matrix, cv_obj, distance_map, samples, slice_slices, remote = True, para_number = None, debug = False):
+def get_scores(config, score_matrix, cv_obj, distance_map, slice_slices, samples = None, samples_store_id = None, remote = True, para_number = None, debug = False, force_confusion = False):
     if (score_matrix is not None) and parametersInScoreMatrix(config,score_matrix):
         scores = getFromScoreMatrix(config,score_matrix)
         print('Parameter set already known, skip scores calculation')
     else:
         t0 = time.time()
-        forest, scores, cv_obj, slice_slices = trainForest.trainForest(config, cv_obj, samples, slice_slices = slice_slices, distance_map = distance_map, repeat = config.repeat_training,cv_repeat = config.cv_hpo, remote = remote, para_number = para_number, debug = debug)
+        _, scores, cv_obj, slice_slices = trainForest.trainForest(config, cv_obj, samples = samples, samples_store_id = samples_store_id, slice_slices = slice_slices, distance_map = distance_map, repeat = config.repeat_training,cv_repeat = config.cv_hpo, remote = remote, para_number = para_number, debug = debug, force_confusion = force_confusion)
         t1 = time.time()
         print(f'Time for training forest in get_scores: {t1-t0}')
         if score_matrix is not None:
@@ -636,14 +636,14 @@ def get_scores(config, score_matrix, cv_obj, distance_map, samples, slice_slices
 
 @ray.remote(max_calls = 1)
 def para_eval(package, store, para_number):
-    (config, packed_cv_obj, parameters, distance_map, samples, slice_slices) = store
+    (config, packed_cv_obj, parameters, samples_store_id, slice_slices, force_confusion) = store
     cv_obj_list = unpack(packed_cv_obj)
     cv_obj = DataSAIL_cv(as_list = cv_obj_list)
     returns = []
     for params in package:
         for pos,para_value in enumerate(params):
             parameters[pos].setValue(config, para_value)
-        scores, cv_obj, slice_slices = get_scores(config, None, cv_obj, distance_map, samples, slice_slices, remote = False, para_number = para_number)
+        scores, cv_obj, slice_slices = get_scores(config, None, cv_obj, None, slice_slices, samples_store_id = samples_store_id, remote = False, para_number = para_number, force_confusion = force_confusion)
         packed_cv_obj = pack(cv_obj.serialize())
         returns.append((scores, params, packed_cv_obj))
     return returns
@@ -653,6 +653,16 @@ def initConfParameters(config, parameters):
     parameters['confusion_goodwill'] = Parameter('confusion_goodwill', 'real', half_step_limits = config.confusion_goodwill_bounds)
     parameters['err_warping_exp'] = Parameter('err_warping_exp', 'real', half_step_limits = config.err_warping_exp_bounds)
     parameters['confusion_normalization_exp'] = Parameter('confusion_normalization_exp', 'real', half_step_limits= config.confusion_normalization_exp_bounds)
+
+    return parameters
+
+def initFSForestParameters(config, parameters):
+    parameters['fs_tree_depth'] = Parameter('fs_tree_depth','integer',half_step_limits = config.tree_depth_half_step)
+    parameters['fs_num_of_trees'] = Parameter('fs_num_of_trees','integer',half_step_limits = config.forest_size_half_step)
+    parameters['fs_min_impurity_decrease_exp'] = Parameter('fs_min_impurity_decrease_exp','real',half_step_limits = config.min_impurity_decrease_exp_half_step)
+    parameters['fs_min_sample_split'] = Parameter('fs_min_sample_split','integer',half_step_limits = config.min_sample_split_half_step)
+    parameters['fs_tree_min_leaf_samples'] = Parameter('fs_tree_min_leaf_samples','integer',half_step_limits = config.min_sample_leaf_half_step)
+    parameters['fs_max_sample_parameter'] = Parameter('fs_max_sample_parameter','real',half_step_limits = config.max_sample_half_step)
 
     return parameters
 
@@ -673,6 +683,7 @@ def initMeanCorrParameters(config, parameters):
 def initParameters(config, do_feat_selection = True, do_forest_param = True, do_sample_weighting = True, split_fs_parameters = False):
     parameters = {}
     fs_parameters = {}
+    fss_parameters = {}
     if config.hpo_do_feat_selection:
         if config.feature_selection == 'meanCorrelation':
             fs_parameters = initMeanCorrParameters(config, fs_parameters)
@@ -685,6 +696,7 @@ def initParameters(config, do_feat_selection = True, do_forest_param = True, do_
 
         elif config.feature_selection == 'confusion' or config.feature_selection == 'sequential_confusion' or config.feature_selection == 'sequential_confusion_and_regu' or config.feature_selection == 'confusion_and_regu':
             fs_parameters = initConfParameters(config, fs_parameters)
+            fss_parameters = initFSForestParameters(config, fss_parameters)
 
             if config.feature_selection == 'sequential_confusion' or config.feature_selection == 'sequential_confusion_and_regu':
                 fs_parameters['sequential_confusion_rank_threshold'] = Parameter('sequential_confusion_rank_threshold', 'integer', half_step_limits = config.sequential_confusion_rank_threshold_bounds, transform_limits = (max_to_n_of_features, config.n_of_features))
@@ -707,17 +719,21 @@ def initParameters(config, do_feat_selection = True, do_forest_param = True, do_
         parameters = fs_parameters
 
     if config.hpo_do_forest_param:
-        parameters['min_sample_split'] = Parameter('min_sample_split','integer',half_step_limits = config.min_sample_split_half_step)
+        
         parameters['tree_depth'] = Parameter('tree_depth','integer',half_step_limits = config.tree_depth_half_step)
         parameters['num_of_trees'] = Parameter('num_of_trees','integer',half_step_limits = config.forest_size_half_step)
-        parameters['max_feature_cont_parameter'] = Parameter('max_feature_cont_parameter','real',half_step_limits = config.max_feature_cont_parameter_bounds)
-        #parameters['max_feature_parameter'] = Parameter('max_feature_parameter','categorical',possible_values = config.max_feature_parameters)
-        #parameters['bootstrap_parameter'] = Parameter('bootstrap_parameter','categorical',possible_values = config.bootstrap_parameters)
         parameters['min_impurity_decrease_exp'] = Parameter('min_impurity_decrease_exp','real',half_step_limits = config.min_impurity_decrease_exp_half_step)
-        #parameters['oob_score'] = Parameter('oob_score','categorical',possible_values = config.oob_scores)
-        parameters['tree_min_leaf_samples'] = Parameter('tree_min_leaf_samples','integer',half_step_limits = config.min_sample_leaf_half_step)
-        parameters['ccp_alpha_exp'] = Parameter('ccp_alpha_exp','real',half_step_limits = config.ccp_alpha_exp_half_step)
-        parameters['max_sample_parameter'] = Parameter('max_sample_parameter','real',half_step_limits = config.max_sample_half_step)
+        
+        if config.forest_type == 'random' or 'gradient_boost':
+            parameters['min_sample_split'] = Parameter('min_sample_split','integer',half_step_limits = config.min_sample_split_half_step)
+            parameters['max_feature_cont_parameter'] = Parameter('max_feature_cont_parameter','real',half_step_limits = config.max_feature_cont_parameter_bounds)
+            parameters['tree_min_leaf_samples'] = Parameter('tree_min_leaf_samples','integer',half_step_limits = config.min_sample_leaf_half_step)
+            parameters['ccp_alpha_exp'] = Parameter('ccp_alpha_exp','real',half_step_limits = config.ccp_alpha_exp_half_step)
+        if config.forest_type == 'random':
+            parameters['max_sample_parameter'] = Parameter('max_sample_parameter','real',half_step_limits = config.max_sample_half_step)
+        elif config.forest_type == 'gradient_boost' or config.forest_type == 'xgboost':
+            parameters['learning_rate'] = Parameter('learning_rate', 'real', half_step_limits = [0.0, 2.0])
+        
         if not config.regression:
             parameters['criterion'] = Parameter('criterion','categorical',possible_values = config.criteria,classification_specific = True)
 
@@ -735,12 +751,12 @@ def initParameters(config, do_feat_selection = True, do_forest_param = True, do_
             parameters['class_weight'] = Parameter('class_weight','categorical',possible_values = config.class_weights,classification_specific = True)
     
     if split_fs_parameters:
-        return fs_parameters, parameters
+        return fss_parameters, fs_parameters, parameters
     return parameters
 
 
-def threeDimHyperOptimization(config, cv_obj, best_scores, samples, slice_slices, distance_map = None, debug = False):
-    fs_parameters, parameters = initParameters(config, split_fs_parameters = True)
+def threeDimHyperOptimization(config, cv_obj, best_scores, slice_slices, samples = None, samples_store_id = None, distance_map = None, debug = False):
+    fss_parameters, fs_parameters, parameters = initParameters(config, split_fs_parameters = True)
     converged = False
     n = 1
     score_matrix = {}
@@ -750,7 +766,17 @@ def threeDimHyperOptimization(config, cv_obj, best_scores, samples, slice_slices
         if n > 1:
             cv_obj.reset_confusion_maps()
 
-        new_opti, best_scores, cv_obj, slice_slices = bayesian_optimisation(None, config, list(fs_parameters.values()), score_matrix, cv_obj, best_scores, distance_map, samples, slice_slices, n_pre_samples = None, debug = debug)
+        for param in [fss_parameters]:
+            param_names = list(param.keys())
+            random.shuffle(param_names)
+
+            while len(param_names) > 2:
+                param_trio = param_names.pop(), param_names.pop(), param_names.pop()
+                new_opti, best_scores, cv_obj, slice_slices = threeDim(param[param_trio[0]], param[param_trio[1]], param[param_trio[2]], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, force_confusion = True)
+                if new_opti:
+                    converged = False
+
+        new_opti, best_scores, cv_obj, slice_slices = bayesian_optimisation(None, config, list(fs_parameters.values()), score_matrix, cv_obj, best_scores, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, n_pre_samples = None, debug = debug)
         if new_opti:
             converged = False
             
@@ -760,12 +786,12 @@ def threeDimHyperOptimization(config, cv_obj, best_scores, samples, slice_slices
 
             while len(param_names) > 1:
                 param_trio = param_names.pop(), param_names.pop()#, 'confusion_rank_threshold'#param_names.pop()
-                new_opti, best_scores, cv_obj, slice_slices = threeDim(param[param_trio[0]], param[param_trio[1]], fs_parameters['confusion_rank_threshold'], best_scores, config, score_matrix, cv_obj, distance_map, samples, slice_slices)
+                new_opti, best_scores, cv_obj, slice_slices = threeDim(param[param_trio[0]], param[param_trio[1]], fs_parameters['confusion_rank_threshold'], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id)
                 if new_opti:
                     converged = False
 
             while len(param_names) == 1:
-                new_opti, best_scores, cv_obj, slice_slices = twoDim(param_names.pop(), fs_parameters['confusion_rank_threshold'], best_scores, config, score_matrix, cv_obj, distance_map, samples, slice_slices)
+                new_opti, best_scores, cv_obj, slice_slices = twoDim(param_names.pop(), fs_parameters['confusion_rank_threshold'], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id)
                 if new_opti:
                     converged = False
 

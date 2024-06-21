@@ -3,6 +3,7 @@ import numpy as np
 import ray
 import statistics
 import time
+import random
 
 from structguy import learn
 from structman.base_utils.base_utils import calculate_chunksizes, pack, unpack
@@ -271,18 +272,21 @@ def add_tree_RCM(tree_raw_confusion_map, pre_raw_confusion_map):
     return pre_raw_confusion_map
 
 
-def calcSliceConfusion(forest, cv_slice, samples, remote = True, para_number = None, err_warping_exp = 1, goodwill_interval = 0.25, norm_exp = 1.2):
+def calcSliceConfusion(forest, cv_slice, samples = None, samples_store_id = None, remote = True, para_number = None, err_warping_exp = 1, goodwill_interval = 0.25, norm_exp = 1.2):
     pre_confusion_map = {}
     pre_raw_confusion_map = {}
 
     if para_number == 1:
         remote = False
 
-    test_feature_matrix = cv_slice.get_test_feature_matrix(samples)
-    #print(f'In calcSliceConfusion: {len(test_feature_matrix)}\n{test_feature_matrix[0]}\n{cv_slice.test_targets[:100]}, remote: {remote}, para_number: {para_number}')
-
     if remote:
-        store = ray.put((test_feature_matrix, cv_slice.test_targets, cv_slice.feature_names))
+        if samples_store_id is None:
+            samples_store_id = ray.put(samples)
+        store = ray.put((samples_store_id, pack(cv_slice)))
+    else:
+        if samples is None:
+            samples = ray.get(samples_store_id)
+        test_feature_matrix = cv_slice.get_test_feature_matrix(samples)
 
     result_ids = []
 
@@ -290,13 +294,15 @@ def calcSliceConfusion(forest, cv_slice, samples, remote = True, para_number = N
     if para_number is None:
         para_number = n_trees
 
+    print(f'Call of calcSliceConfusion with number of trees: {n_trees}, para_number: {para_number}')
+
     for i,tree in enumerate(forest.estimators_):
         if remote:
             if i == para_number:
                 break
             result_ids.append(calcConfusionMapWrapper.remote(tree, store, err_warping_exp = err_warping_exp, goodwill_interval = goodwill_interval))
         else:
-            result_ids.append(calcConfusionMap(tree, (test_feature_matrix, cv_slice.test_targets, cv_slice.feature_names), err_warping_exp = err_warping_exp, goodwill_interval=goodwill_interval))
+            result_ids.append(calcConfusionMap(tree, test_feature_matrix, cv_slice.test_targets, cv_slice.feature_names, err_warping_exp = err_warping_exp, goodwill_interval=goodwill_interval))
 
     if remote:
         while True:
@@ -350,15 +356,26 @@ def confusion_map_from_raw_confusion_map(cv_slice, raw_confusion_map, goodwill_i
 
 @ray.remote(max_calls = 1)
 def calcConfusionMapWrapper(estimator, store, err_warping_exp = 1, goodwill_interval = 0.25):
-    return pack(calcConfusionMap(estimator, store, err_warping_exp = err_warping_exp, goodwill_interval=goodwill_interval))
+    samples_store_id, packed_cv_slice = store
+    cv_slice = unpack(packed_cv_slice)
+    samples = ray.get(samples_store_id)
 
-def calcConfusionMap(estimator, store, err_warping_exp = 1, goodwill_interval = 0.25):
+    X_test = cv_slice.get_test_feature_matrix(samples)
+    y_test = cv_slice.test_targets
+    feature_names = cv_slice.feature_names
+
+    return pack(calcConfusionMap(estimator, X_test, y_test, feature_names, err_warping_exp = err_warping_exp, goodwill_interval=goodwill_interval))
+
+def calcConfusionMap(estimator, X_test, y_test, feature_names, err_warping_exp = 1, goodwill_interval = 0.25, max_samples = 10000):
     # First let's retrieve the decision path of each sample. The decision_path
     # method allows to retrieve the node indicator functions. A non zero element of
     # indicator matrix at the position (i, j) indicates that the sample i goes
     # through the node j.
 
-    X_test, y_test, feature_names = store
+    if len(X_test) > max_samples:
+        subselection = random.sample(range(len(X_test)), max_samples)
+        X_test = [X_test[n] for n in subselection]
+        y_test = [y_test[n] for n in subselection]
 
     y_pred = estimator.predict(X_test)
 
@@ -379,6 +396,7 @@ def calcConfusionMap(estimator, store, err_warping_exp = 1, goodwill_interval = 
     raw_confusion_map = {}
 
     for sample_id, true_value in enumerate(y_test):
+
         node_index = node_indicator.indices[node_indicator.indptr[sample_id]:
                                             node_indicator.indptr[sample_id + 1]]
 
@@ -405,7 +423,7 @@ def calcConfusionMap(estimator, store, err_warping_exp = 1, goodwill_interval = 
                 confusion_map[feat][1] += 1
                 raw_confusion_map[feat].append(raw_err)
 
-    print(f'Add the end of calcConfusionMap: {len(confusion_map)} {len(raw_confusion_map)}')
+    #print(f'Add the end of calcConfusionMap: {len(confusion_map)} {len(raw_confusion_map)}')
     return confusion_map, raw_confusion_map
 
 def calc_confusion(raw_err, goodwill_interval, err_warping_exp):

@@ -60,31 +60,41 @@ def calcFeatureImportances(forest, samples, cv_slice, config, print_them=False):
     return feature_importance_map
 
 
+def save_feature_importances(outfile, feature_importance_map):
+    lines = ['Feature\tImportance\n']
+    for feat_name in feature_importance_map:
+        lines.append(f'{feat_name}\t{feature_importance_map[feat_name]}\n')
+
+    f = open(outfile, 'w')
+    f.write(''.join(lines))
+    f.close()
+
 def learn(config, effectRegressor=None):
     crossValidation = config.crossValidation
 
-    print('================================ Start Learn ==============================================')
-    print('Protein-based randomization: ',config.prot_based_separation)
-    print('add Protein mean values: ',config.addBias)
-    if isinstance(crossValidation,int):
-        print('Cross Validation: %s-fold' % str(crossValidation))
-    else:
-        print('Cross Validation:',crossValidation)
-    print('filter structural features: ',config.filterStructuralFeatures)
-    print('filter samples with no mapped structures: ',config.structure_threshold)
-    print('Clean type-2 circularity from training set: ',config.remove_t2)
-    print('Trainset subsampling: ', config.balanceSubsampling,' (filter single variant proteins: ',config.filter_single_variant_prots,')')
-    print('===========================================================================================')
-    if config.path_structural_feature_table is not None:
-        print(f'Using feature file: {config.path_structural_feature_table}')
-        print(f'Writing processed features to processed feature file: {config.path_structural_feature_table.rsplit(".",1)[0]}_processed.tsv')
-    elif config.path_to_processed_feature_file is not None:
-        print(f'Using feature file: {config.path_to_processed_feature_file}')
-    print(f'Writing output to: {config.outfolder}')
+    if config.verbosity >= 1:
+        print('================================ Start Learn ==============================================')
+        print('Protein-based randomization: ',config.prot_based_separation)
+        print('add Protein mean values: ',config.addBias)
+        if isinstance(crossValidation,int):
+            print('Cross Validation: %s-fold' % str(crossValidation))
+        else:
+            print('Cross Validation:',crossValidation)
+        print('filter structural features: ',config.filterStructuralFeatures)
+        print('filter samples with no mapped structures: ',config.structure_threshold)
+        print('Clean type-2 circularity from training set: ',config.remove_t2)
+        print('Trainset subsampling: ', config.balanceSubsampling,' (filter single variant proteins: ',config.filter_single_variant_prots,')')
+        print('===========================================================================================')
+        if config.path_structural_feature_table is not None:
+            print(f'Using feature file: {config.path_structural_feature_table}')
+            print(f'Writing processed features to processed feature file: {config.path_structural_feature_table.rsplit(".",1)[0]}_processed.tsv')
+        elif config.path_to_processed_features_file is not None:
+            print(f'Using feature file: {config.path_to_processed_features_file}')
+        print(f'Writing output to: {config.outfolder}')
 
     samples = featureGenerator.createTrainingSet(config)
 
-    if config.geometric_weighting and config.regression:
+    if config.weighting == 'geometric' and config.regression:
         samples.setGeometricDistanceMap(config)
         distance_map = ray.put(samples.geometric_distance_map)
     else:
@@ -101,8 +111,9 @@ def learn(config, effectRegressor=None):
 
         cv_slice = cross_val_obj.getCurrentSlice()
 
-        print(len(cv_slice.train_targets))
-        print('Testset length: ',len(cv_slice.test_targets))
+        if config.verbosity >= 1:
+            print(len(cv_slice.train_targets))
+            print('Testset length: ',len(cv_slice.test_targets))
 
         debug = False
         if config.feature_selection == 'confusion' or config.feature_selection == 'confusion_and_regu' or config.feature_selection == 'sequential_confusion' or config.feature_selection == 'threeStaged' or config.feature_selection == 'sequential_confusion_and_regu' or config.feature_selection == 'threeStaged_listranking':
@@ -116,17 +127,17 @@ def learn(config, effectRegressor=None):
             initial_training_input = cv_slice
 
         if config.hyperOptimization == 'bayesianComplete':
-            forest,scores,initial_training_input, slice_slices = trainForest.trainForest(config, initial_training_input, samples_store_id, distance_map = distance_map, repeat = config.repeat_training, cv_repeat = config.cv_hpo, print_out = True, debug = debug)
+            forest,scores,initial_training_input, slice_slices = trainForest.trainForest(config, initial_training_input, samples_store_id = samples_store_id, samples = samples, distance_map = distance_map, repeat = config.repeat_training, cv_repeat = config.cv_hpo, print_out = True, debug = debug)
             hpo.bayesianComplete(config, initial_training_input, scores, samples = samples_store_id, distance_map = distance_map)
         elif config.hyperOptimization == 'threeDim':
-            forest, scores, initial_training_input, slice_slices = trainForest.trainForest(config, initial_training_input, samples_store_id, distance_map = distance_map, repeat = config.repeat_training, cv_repeat = config.cv_hpo, print_out = True, debug = debug)
-            hpo.threeDimHyperOptimization(config, initial_training_input, scores, samples_store_id, slice_slices, distance_map = distance_map, debug = debug)
+            forest, scores, initial_training_input, slice_slices = trainForest.trainForest(config, initial_training_input, samples_store_id = samples_store_id, samples = samples, distance_map = distance_map, repeat = config.repeat_training, cv_repeat = config.cv_hpo, print_out = True, debug = debug)
+            hpo.threeDimHyperOptimization(config, initial_training_input, scores, slice_slices, samples = samples, samples_store_id = samples_store_id, distance_map = distance_map, debug = debug)
         else:
             if debug:
-                forest,scores,initial_training_input, slice_slices = trainForest.trainForest(config, initial_training_input, samples_store_id, distance_map = distance_map, repeat = config.repeat_training, cv_repeat = config.cv_hpo, print_out = True, debug = debug)
+                forest,scores,initial_training_input, slice_slices = trainForest.trainForest(config, initial_training_input, samples_store_id = samples_store_id, samples = samples, distance_map = distance_map, repeat = config.repeat_training, cv_repeat = config.cv_hpo, print_out = True, debug = debug)
                 scores.printOut()
-
-            print('Hyperparamter optimization skipped')
+            if config.verbosity >= 1:
+                print('Hyperparamter optimization skipped')
 
         lopo_scores = {}
 
@@ -152,12 +163,13 @@ def learn(config, effectRegressor=None):
         for cv_counter in cross_val_obj.slices:
             cv_slice = cross_val_obj.slices[cv_counter]
 
-            print(cv_counter, len(cv_slice.train_targets))
-            print('Testset length: ',len(cv_slice.test_targets))
+            if config.verbosity >= 1:
+                print(cv_counter, len(cv_slice.train_targets))
+                print('Testset length: ',len(cv_slice.test_targets))
 
             cv_slice.printBalance(config)
 
-            forest, scores, cv_slice, slice_slices = trainForest.trainForest(config, cv_slice, samples_store_id, distance_map = distance_map, print_out = True, debug = debug)
+            forest, scores, cv_slice, slice_slices = trainForest.trainForest(config, cv_slice, samples = samples, samples_store_id = samples_store_id, distance_map = distance_map, print_out = True, debug = debug)
 
             forests[cv_counter] = forest
 
@@ -268,7 +280,11 @@ def evaluate_dataset(config):
 
     test_feature_matrix, test_targets, sample_id_list = samples.get_test_data_for_feature_list(extern_feature_names_list)
 
-    print('Shape of the feature matrix:',len(test_feature_matrix),len(test_feature_matrix[0]))
+    if len(test_feature_matrix) == 0:
+        return None, None, None
+
+    if config.verbosity >= 1:
+        print('Shape of the feature matrix:',len(test_feature_matrix),len(test_feature_matrix[0]))
     y_pred = forest.predict(test_feature_matrix)
 
     if config.path_to_multi_savs_table is not None:
@@ -350,34 +366,38 @@ def evaluate_dataset(config):
         mse = mean_squared_error(test_targets,y_pred)
         corr,p_value = stats.spearmanr(test_targets,y_pred)
 
-        print('R2-Score: ',r2)
-        print('MSE: ',mse)
-        print('Spearman correlation and p-value: ',corr,p_value)
+        if config.verbosity >= 1:
+            print('R2-Score: ',r2)
+            print('MSE: ',mse)
+            print('Spearman correlation and p-value: ',corr,p_value)
 
         prot_wise_spearmans, mean_spearman = util.calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.spearmanr)
         prot_wise_pearsons, mean_pearson = util.calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.pearsonr)
 
-        print(f'Number of samples: {len(sample_id_list)} {len(test_targets)} {len(y_pred)}')
+        if config.verbosity >= 1:
+            print(f'Number of samples: {len(sample_id_list)} {len(test_targets)} {len(y_pred)}')
 
-        print(f'Prot-wise mean pearson: {mean_pearson}')
-        print(f'Prot-wise mean spearman: {mean_spearman}')
+            print(f'Prot-wise mean pearson: {mean_pearson}')
+            print(f'Prot-wise mean spearman: {mean_spearman}')
 
         if mm_y_pred is not None:
-            prot_wise_spearmans, mean_spearman = util.calc_protein_wise_corr(mm_test_targets, mm_y_pred, mm_sample_id_list, stats.spearmanr)
+            prot_wise_spearmans, mean_mm_spearman = util.calc_protein_wise_corr(mm_test_targets, mm_y_pred, mm_sample_id_list, stats.spearmanr)
             prot_wise_pearsons, mean_pearson = util.calc_protein_wise_corr(mm_test_targets, mm_y_pred, mm_sample_id_list, stats.pearsonr)
 
-            print(f'Number of samples: {len(mm_sample_id_list)} {len(mm_test_targets)} {len(mm_y_pred)}')
+            if config.verbosity >= 1:
+                print(f'Number of samples: {len(mm_sample_id_list)} {len(mm_test_targets)} {len(mm_y_pred)}')
 
-            print(f'Prot-wise mean pearson for multi savs: {mean_pearson}')
-            print(f'Prot-wise mean spearman for multi savs: {mean_spearman}')
+                print(f'Prot-wise mean pearson for multi savs: {mean_pearson}')
+                print(f'Prot-wise mean spearman for multi savs: {mean_mm_spearman}')
 
-            prot_wise_spearmans, mean_spearman = util.calc_protein_wise_corr(combined_test_targets, combined_y_pred, combined_sample_id_list, stats.spearmanr)
+            prot_wise_spearmans, mean_comb_spearman = util.calc_protein_wise_corr(combined_test_targets, combined_y_pred, combined_sample_id_list, stats.spearmanr)
             prot_wise_pearsons, mean_pearson = util.calc_protein_wise_corr(combined_test_targets, combined_y_pred, combined_sample_id_list, stats.pearsonr)
 
-            print(f'Number of samples: {len(combined_sample_id_list)} {len(combined_test_targets)} {len(combined_y_pred)}')
+            if config.verbosity >= 1:
+                print(f'Number of samples: {len(combined_sample_id_list)} {len(combined_test_targets)} {len(combined_y_pred)}')
 
-            print(f'Prot-wise mean pearson for all variants: {mean_pearson}')
-            print(f'Prot-wise mean spearman for all variants: {mean_spearman}')
+                print(f'Prot-wise mean pearson for all variants: {mean_pearson}')
+                print(f'Prot-wise mean spearman for all variants: {mean_comb_spearman}')
 
         write_protein_wise_performances(f'{config.outfolder}/protein_wise_results.tsv', prot_wise_spearmans, protein_info)
 
@@ -385,8 +405,13 @@ def evaluate_dataset(config):
 
         header = 'Protein ID\tSAV\tPredicted effect value\tTree-wise standard deviation\tFeature 1\tFeature 2\t Feature 3\t Feature 4\t Feature 5\n'
         lines = [header]
-        for pos, sample_id in enumerate(sample_id_list):
-            pred_value = y_pred[pos]
+        if mm_y_pred is None:
+            combined_sample_id_list = sample_id_list
+            combined_y_pred = y_pred
+            combined_test_targets = test_targets
+
+        for pos, sample_id in enumerate(combined_sample_id_list):
+            pred_value = combined_y_pred[pos]
             prot_id, aac = sample_id
             pred_std = ''#pred_std_vector[pos]
             feature_decisions = ''#decisions[pos]
@@ -416,6 +441,7 @@ def evaluate_dataset(config):
             util.scatterplot(y_pred, test_feature_matrix, extern_feature_names_list, test_targets, config.target_values, y_pred_median, tv_median, scatterfile)
             util.hexbinplot(y_pred, test_targets, config.target_values, hexbinfile)
 
+        return mean_spearman, combined_test_targets, combined_y_pred
     elif model_config.regression:
         #print(test_targets[:100], y_pred[:100])
         int_targets = []
@@ -426,8 +452,9 @@ def evaluate_dataset(config):
                 int_targets.append(0)
         total_roc_auc = roc_auc_score(int_targets, y_pred)
         prot_wise_roc_aucs, mean_roc_auc = util.calc_protein_wise_corr(int_targets, y_pred, sample_id_list, roc_auc_score, mono_return_score_function = True)
-        print(f'Total roc_auc: {total_roc_auc}')
-        print(f'Prot-wise mean roc_auc: {mean_roc_auc}')
+        if config.verbosity >= 1:
+            print(f'Total roc_auc: {total_roc_auc}')
+            print(f'Prot-wise mean roc_auc: {mean_roc_auc}')
 
         #write_protein_wise_pearsons(f'{config.outfolder}/protein_wise_results.tsv', prot_wise_roc_aucs, protein_info)
 
@@ -444,11 +471,12 @@ def evaluate_dataset(config):
 
         mcc = matthews_corrcoef(int_targets,int_preds)
 
-        print('F-Score: ',f1)
-        print('Accuracy: ',acc)
-        print('Precision:',precision)
-        print('Recall:',recall)
-        print('MCC:',mcc)
+        if config.verbosity >= 1:
+            print('F-Score: ',f1)
+            print('Accuracy: ',acc)
+            print('Precision:',precision)
+            print('Recall:',recall)
+            print('MCC:',mcc)
     return
 
 
@@ -501,19 +529,22 @@ def writeOutput(config, y_pred, cv_slice, sampleSpace, append=False):
 def storeCV(forests, config, cross_val_obj, cv_file):
     with open(cv_file, 'wb') as output:
         pickle.dump((forests, cross_val_obj, config), output, pickle.HIGHEST_PROTOCOL)
-    print('\n============\nStored full CV results in %s\n============\n' % cv_file)
+    if config.verbosity >= 1:
+        print('\n============\nStored full CV results in %s\n============\n' % cv_file)
 
 def loadCV(fn):
     with open(fn, 'rb') as inp:
         forests, cross_val_object, config = pickle.load(inp)
-    print('\n============\nLoaded full CV from %s\n============\n' % fn)
+    if config.verbosity >= 1:    
+        print('\n============\nLoaded full CV from %s\n============\n' % fn)
     return forests, cross_val_object, config
 
 
 def storeModel(model, feature_names, config, fn):
     with open(fn, 'wb') as output:
         pickle.dump((model, feature_names, config), output, pickle.HIGHEST_PROTOCOL)
-    print('\n============\nStored model in %s\n============\n' % fn)
+    if config.verbosity >= 1:
+        print('\n============\nStored model in %s\n============\n' % fn)
 
 def loadModel(fn):
     with open(fn, 'rb') as inp:
@@ -526,7 +557,8 @@ def loadModel(fn):
     except:
         impute_map = None
 
-    print('\n============\nLoaded model from %s\n============\n' % fn)
+    if config.verbosity >= 1:
+        print('\n============\nLoaded model from %s\n============\n' % fn)
     return model, feature_names, impute_map, config
 
 def buildFinalModel(samples, config, internal_cv = None, outfile = None, filtered_features_file = None):
@@ -537,21 +569,24 @@ def buildFinalModel(samples, config, internal_cv = None, outfile = None, filtere
 
     full_slice = cross_val_obj.slices[0]
 
-    full_slice.printBalance(config)
+    if config.verbosity >= 1:
+        full_slice.printBalance(config)
 
-    full_slice.subslices = []
-    for slice_slice in full_slice.slice_slices:
-        full_slice.subslices.append(slice_slice.test_prots)
+    if config.feature_selection == 'confusion':
+        full_slice.subslices = []
+        for slice_slice in full_slice.slice_slices:
+            full_slice.subslices.append(slice_slice.test_prots)
 
-    forest, scores, full_slice, slice_slices = trainForest.trainForest(config, full_slice, samples, distance_map = samples.geometric_distance_map, print_out = True,skip_scoring = True)
+    print_out = config.verbosity >= 1
+    forest, scores, full_slice, slice_slices = trainForest.trainForest(config, full_slice, samples = samples, distance_map = samples.geometric_distance_map, print_out = print_out ,skip_scoring = True)
 
-    feat_importance_map = calcFeatureImportances(forest, samples, full_slice, config, print_them=True)
+    feat_importance_map = calcFeatureImportances(forest, samples, full_slice, config, print_them = print_out)
 
     if outfile != None:
         storeModel(forest, full_slice.feature_names, config, outfile)
 
 
-    #if filtered_features_file != None:
-        #full_slice.write(filtered_features_file)
+    if filtered_features_file != None:
+        save_feature_importances(filtered_features_file, feat_importance_map)
 
     return forest

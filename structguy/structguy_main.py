@@ -14,28 +14,34 @@ structguy_main.py build_model [-i -o --verbosity]\n
 MORE TODO\n
 """
 
-def parse_arguments(argument_start = 2):
-    argv = sys.argv[argument_start:]
-    try:
-        long_paras = [
-            'verbosity=', #from 1 to 5
-            'hp=',
-            'nocv', # Skip Cross Validation
-            'nohpo', # Skip Hyperparameter Optimization
-            'lopo', # Activate LOPO training setup
-            'overwrite',
-        ]
-        opts, args = getopt.getopt(argv, "i:n:m:", long_paras)
+def parse_arguments(argument_start = 2, manual_args = None):
+    if manual_args is None:
+        argv = sys.argv[argument_start:]
+        try:
+            long_paras = [
+                'verbosity=', #from 1 to 5
+                'hp=',
+                'nocv', # Skip Cross Validation
+                'nohpo', # Skip Hyperparameter Optimization
+                'lopo', # Activate LOPO training setup
+                'overwrite',
+                'feats=',
+                'type=',
+            ]
+            opts, args = getopt.getopt(argv, "i:n:m:", long_paras)
 
-    except getopt.GetoptError:
-        print("Illegal Input\n\n", disclaimer)
-        return
+        except getopt.GetoptError:
+            print("Illegal Input\n\n", disclaimer)
+            return
+    else:
+        opts = manual_args
 
     path_to_project_file = None
 
     verbosity_overwrite = None
     path_to_hyperparameters_file = None
     path_to_model = None
+    feature_list_file = None
 
     skip_cv = None
     skip_hpo = None
@@ -43,6 +49,7 @@ def parse_arguments(argument_start = 2):
     overwrite = False
 
     overwrite_proc_n = None
+    forest_type = None
 
     for opt, arg in opts:
         if opt == '-i':
@@ -78,6 +85,11 @@ def parse_arguments(argument_start = 2):
         if opt == '--overwrite':
             overwrite = True
 
+        if opt == '--feats':
+            feature_list_file = arg
+
+        if opt == '--type':
+            forest_type = arg
 
     if path_to_model is not None:
         if path_to_model.count('/') > 0:
@@ -109,6 +121,15 @@ def parse_arguments(argument_start = 2):
     if verbosity_overwrite is not None:
         config.verbosity = verbosity_overwrite
 
+    if feature_list_file is not None:
+        config.feature_selection = 'pre_defined'
+        config.feature_list_file = feature_list_file
+
+    if forest_type is not None:
+        config.forest_type = forest_type
+        if forest_type == 'gradient_boost' or forest_type == 'xgboost':
+            config.impute_missing_values = True
+
     return config
 
 def feature_generator_main():
@@ -119,24 +140,25 @@ def feature_generator_main():
     if config.path_structural_feature_table is not None or config.overwrite:
         featureGenerator.expand_structural_feature_table(config)
 
-def build_model_main():
-    config = parse_arguments()
+def build_model_main(manual_args = None):
+    config = parse_arguments(manual_args = manual_args)
     # if config.verbosity > 0:
     #     print(config.printHyperParameter())
 
     config.saveHyperParameter()
 
-    ray_utils.ray_init(config, overwrite_logging_level = 0, total_memory_quantile = 0.85)
+    ray_utils.ray_init(config, overwrite_logging_level = 0, total_memory_quantile = 0.74)
 
     learn.learn(config)
 
     config.saveHyperParameter()
 
-def predict_main():
-    config = parse_arguments()
+def predict_main(manual_args = None):
+    config = parse_arguments(manual_args = manual_args)
     config.predict_mode = True
     ray_utils.ray_init(config, overwrite_logging_level = 0)
-    learn.evaluate_dataset(config)
+    score, y_true, y_pred = learn.evaluate_dataset(config)
+    return score, y_true, y_pred
 
 def generate_info():
     config = parse_arguments()

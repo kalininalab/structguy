@@ -245,7 +245,7 @@ def computeMSA(config, seq, u_ac, search_db='ref50', search_db_path='', debug=0,
     stderr = None
     #Run mafft
     try:
-        mafft_cline = MafftCommandline(mafft_exe, input=temp_fasta,thread=sub_threads,amino=True)
+        mafft_cline = MafftCommandline(mafft_exe, input=temp_fasta, thread=sub_threads, amino=True)
         stdout, stderr = mafft_cline()
     except:
         [e,f,g] = sys.exc_info()

@@ -49,6 +49,7 @@ class Feature:
 
 
     def value_from_string(self, string):
+        value = None
         if self.name == 'Blosum62':
             try:
                 value = float(string)
@@ -182,6 +183,9 @@ class CrossValidationSlice:
         self.int_map = {}
         self.int_counter = 0
 
+        self.train_class_weight_vector = None
+        self.test_class_weight_vector = None
+
         self.tvmb_map = None
         self.ranked_tvmb = None
         self.active_tvmb_threshold = None
@@ -202,7 +206,8 @@ class CrossValidationSlice:
             t0 = time.time()
 
         if not self.train_equal_test:
-            self.checkCircularity(remove_t2=config.remove_t2,print_out=True)
+            print_out = config.verbosity >= 1
+            self.checkCircularity(remove_t2=config.remove_t2, print_out=print_out)
 
         if config.verbosity >= 2:
             t1 = time.time()
@@ -253,16 +258,17 @@ class CrossValidationSlice:
             t6 = time.time()
             print(f'Init CV slice part 6: {t6-t5}')
 
-        self.printBalance(config)
+        if config.verbosity >= 1:
+            self.printBalance(config)
 
         if config.verbosity >= 2:
             t7 = time.time()
             print(f'Init CV slice part 7: {t7-t6}')
 
         if config.regression:
-            if config.geometric_weighting:
+            if config.weighting == 'geometric':
                 self.calcSampleWeights(config, geometric_distance_map)
-            else:
+            elif config.weighting == 'subsample_distance':
                 self.calcSubsampleDistanceWeights(config, para_number = para_number)
 
         for feat_name in features_to_remove:
@@ -843,40 +849,45 @@ class CrossValidationSlice:
                 cv_slice.reset_confusion_maps()
 
     def addToTvmbMap(self, feat_name, samples, config, dummy_call = False):
-        if config.verbosity >= 4:
+        if config.verbosity >= 5:
             print(f'Calling of addToTvmbMap of feature: {feat_name} in slice {self.name}')
         try:
             target_corr,target_p_val = self.featureTargetCorr(feat_name, samples, config)
         except:
             #self.removeFeature(feat_name)
-            print('Error: cant get feature target corr for:',feat_name)
+            if config.verbosity >= 5:
+                print('Error: cant get feature target corr for:',feat_name)
             return True 
         if target_corr == 'const':
             #self.removeFeature(feat_name)
-            print(f'{self.name} - Removed feature: {feat_name} due to constant feature values, info: {target_p_val}')
+            if config.verbosity >= 5:
+                print(f'{self.name} - Removed feature: {feat_name} due to constant feature values, info: {target_p_val}')
             return True
         if target_corr is None:
             #self.removeFeature(feat_name)
-            print(f'{self.name} - Removed feature: {feat_name} due to None target_corr, len of values: {target_p_val}')
+            if config.verbosity >= 5:
+                print(f'{self.name} - Removed feature: {feat_name} due to None target_corr, len of values: {target_p_val}')
             return True
         if dummy_call:
             return False
         mean_value_corr,p_val = self.featureCorr(feat_name,'Protein bias',slice_specific_feature = True)
         if mean_value_corr != mean_value_corr:
             #self.removeFeature(feat_name)
-            print(self.name,'Removed feature:',feat_name,'due to nan mean_value_corr')
+            if config.verbosity >= 5:
+                print(self.name,'Removed feature:',feat_name,'due to nan mean_value_corr')
             return True
         tvmb_score = abs(mean_value_corr)-abs(target_corr) #target value mean bias score
         if tvmb_score != tvmb_score: #test for 'nan'
             #self.removeFeature(feat_name)
-            print(self.name,'Removed feature:',feat_name,'due to nan tvmb score')
+            if config.verbosity >= 5:
+                print(self.name,'Removed feature:',feat_name,'due to nan tvmb score')
             return True
         else:
             self.tvmb_map[feat_name] = tvmb_score,target_p_val
             return False
 
     def rank_tvmb(self, samples, config):
-        if config.verbosity >= 4:
+        if config.verbosity >= 5:
             print(f'Call of rank_tvmb in slice {self.name}')
         self.ranked_tvmb = []
         for feat_name in list(self.feature_names):

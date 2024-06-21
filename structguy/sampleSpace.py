@@ -430,14 +430,20 @@ class SampleSpace:
         for sample_pos in sample_pos_vec:
             feat_vec = []
             for feat_id in feat_id_vec:
-                feat_vec.append(self.raw_feature_matrix[sample_pos][feat_id])
+                try:
+                    feat_vec.append(self.raw_feature_matrix[sample_pos][feat_id])
+                except:
+                    feat_vec.append(None)
             feat_matrix.append(feat_vec)
         return feat_matrix
 
     def get_feat_matrix_from_feat_names(self, feat_names):
         feat_id_vec = []
         for feat_name in feat_names:
-            feat_id_vec.append(self.feat_pos_dict[feat_name])
+            try:
+                feat_id_vec.append(self.feat_pos_dict[feat_name])
+            except:
+                feat_id_vec.append(None)
 
         sample_pos_vec = list(range(len(self.raw_feature_matrix)))
         return self.get_feat_matrix(feat_id_vec, sample_pos_vec)
@@ -700,7 +706,8 @@ class FullSlice(CrossValidation):
     def __init__(self, sampleSpace, config, internal_cv = None, train_equal_test = False):
         super().__init__()
 
-        print(f'Init of FullSlice: {internal_cv is None} {train_equal_test}')
+        if config.verbosity >= 1:
+            print(f'Init of FullSlice: {internal_cv is None} {train_equal_test}')
         
         self.slice_ids.append(0)
 
@@ -709,7 +716,8 @@ class FullSlice(CrossValidation):
         if internal_cv is not None:
             full_slice_obj.slice_slices = []
             for slice_id in internal_cv.slices:
-                print(f'Adding a slice_slice to the FullSlice: {slice_id}')
+                if config.verbosity >= 1:
+                    print(f'Adding a slice_slice to the FullSlice: {slice_id}')
                 full_slice_obj.slice_slices.append(internal_cv.slices[slice_id])
 
         self.slices[0] = full_slice_obj

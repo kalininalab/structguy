@@ -171,7 +171,7 @@ class Config:
         self.transform = False
         self.produce_scatterplot = False
 
-        self.geometric_weighting = False
+        self.weighting = None #'subsample_distance'
         self.geometric_exponent = 2
 
         #HPO setup
@@ -183,6 +183,8 @@ class Config:
         self.repeat_training = 1
 
         self.feature_penalty = 0.00002
+
+        self.forest_type = 'random'
 
         #Forest hyperparameters
         self.tree_depth = 194
@@ -206,6 +208,15 @@ class Config:
         self.reg_c_exp = 3.
         self.reg_thresh_exp = 20.
         self.list_ranking_thresh = 150
+        self.learning_rate = 0.1
+
+        self.fs_tree_depth = 10
+        self.fs_num_of_trees = 100
+        self.fs_min_impurity_decrease_exp = 10.
+        self.fs_min_sample_split = 4
+        self.fs_tree_min_leaf_samples = 1
+        self.fs_ccp_alpha_exp = 30.
+        self.fs_max_sample_parameter = 0.92
 
         self.maximal_exp = 19.0
 
@@ -687,6 +698,30 @@ class Config:
                 if opt == 'confusion_normalization_exp':
                     self.confusion_normalization_exp = float(arg)
                     continue
+                if opt == 'learning_rate':
+                    self.learning_rate = float(arg)
+                    continue
+                if opt == 'fs_tree_depth':
+                    self.fs_tree_depth = int(arg)
+                    continue
+                if opt == 'fs_num_of_trees':
+                    self.fs_num_of_trees = int(arg)
+                    continue
+                if opt == 'fs_min_impurity_decrease_exp':
+                    self.fs_min_impurity_decrease_exp = float(arg)
+                    continue
+                if opt == 'fs_min_sample_split':
+                    self.fs_min_sample_split = int(arg)
+                    continue
+                if opt == 'fs_tree_min_leaf_samples':
+                    self.fs_tree_min_leaf_samples = int(arg)
+                    continue
+                if opt == 'fs_cpp_alpha_exp':
+                    self.fs_ccp_alpha_exp = float(arg)
+                    continue
+                if opt == 'fs_max_sample_parameter':
+                    self.fs_max_sample_parameter = float(arg)
+                    continue
 
         #self.blacklist = ['P28482']#set(['P28482','P42212','P38398','P06654','Q9UK59','P04386','P00552'])
     
@@ -732,7 +767,10 @@ class Config:
                 self.tree_min_leaf_samples,self.tvmb_rank_threshold,self.tvpmb_rank_threshold, self.confusion_rank_threshold,
                 self.sequential_confusion_rank_threshold, self.err_warping_exp, self.confusion_normalization_exp,
                 self.number_of_bins, self.list_ranking_thresh, self.confusion_goodwill,
-                self.p_val_thresh,self.sample_weight_parameter,self.reg_alpha_exp, self.reg_c_exp, self.reg_thresh_exp, self.geometric_exponent)
+                self.p_val_thresh,self.sample_weight_parameter,self.reg_alpha_exp, self.reg_c_exp, self.reg_thresh_exp, self.geometric_exponent,
+                self.learning_rate, self.fs_tree_depth, self.fs_num_of_trees, self.fs_min_impurity_decrease_exp, self.fs_min_sample_split,
+                self.fs_tree_min_leaf_samples, self.fs_ccp_alpha_exp, self.fs_max_sample_parameter
+                )
         return sct
 
     def printParameter(self):
@@ -747,7 +785,7 @@ class Config:
         print('Min impurity decrease exponent:',self.min_impurity_decrease_exp)
         print('Out of bag:',self.oob_score)
         print('CCP alpha exponent:',self.ccp_alpha_exp)
-
+        print(f'Learning rate: {self.learning_rate}')
         print('Max sample:',self.max_sample_parameter)
 
         print('TVMB rank threshold:',self.tvmb_rank_threshold)
@@ -766,6 +804,13 @@ class Config:
         print('Geometric exponent:', self.geometric_exponent)
         print(f'Confusion goodwill: {self.confusion_goodwill}')
         print(f'List ranking thresh: {self.list_ranking_thresh}')
+        print(f'FS tree depth: {self.fs_tree_depth}')
+        print(f'FS # of trees: {self.fs_num_of_trees}')
+        print(f'FS min impurity decrease: {self.fs_min_impurity_decrease_exp}')
+        print(f'FS min sample split: {self.fs_min_sample_split}')
+        print(f'FS min leaf samples: {self.fs_tree_min_leaf_samples}')
+        print(f'FS CCP alpha exp: {self.fs_ccp_alpha_exp}')
+        print(f'FS max sampes: {self.fs_max_sample_parameter}')
         return
 
     def printHyperParameter(self):
@@ -781,6 +826,7 @@ class Config:
         print("min_impurity_decrease_exp", self.min_impurity_decrease_exp)
         print("oob_score", self.oob_score)
         print("ccp_alpha_exp", self.ccp_alpha_exp)
+        print(f'Learning rate: {self.learning_rate}')
         print("max_sample_parameter", self.max_sample_parameter)
         print("number_of_bins", self.number_of_bins)
         print("p_val_thresh", self.p_val_thresh)
@@ -794,6 +840,13 @@ class Config:
         print("confusion_rank_threshold", self.confusion_rank_threshold)
         print("err_warping_exp", self.err_warping_exp)
         print("confusion_normalization_exp", self.confusion_normalization_exp)
+        print(f'fs_tree_depth {self.fs_tree_depth}')
+        print(f'fs_num_of_trees {self.fs_num_of_trees}')
+        print(f'fs_min_impurity_decrease_exp {self.fs_min_impurity_decrease_exp}')
+        print(f'fs_min_sample_split {self.fs_min_sample_split}')
+        print(f'fs_tree_min_leaf_samples {self.fs_tree_min_leaf_samples}')
+        print(f'fs_ccp_alpha_exp {self.fs_ccp_alpha_exp}')
+        print(f'fs_max_sample_parameter {self.fs_max_sample_parameter}')        
         return
 
     def saveHyperParameter(self, outputFileName = None):
@@ -809,7 +862,8 @@ class Config:
 
 
         hp_file_outpath = f"{self.outfolder}/./{outputFileName}"
-        print(f'Saving HP file to {hp_file_outpath}')
+        if self.verbosity >= 1:
+            print(f'Saving HP file to {hp_file_outpath}')
 
         with open(hp_file_outpath, "w") as hpfo:
             print(capture, file = hpfo)

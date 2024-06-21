@@ -1,4 +1,4 @@
-from sklearn.ensemble import RandomForestRegressor
+from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import accuracy_score
 from sklearn.metrics import r2_score
@@ -12,6 +12,7 @@ from sklearn.metrics import matthews_corrcoef
 import time
 import ray
 from scipy import stats
+import xgboost as xgb
 
 from structguy import featureSelection, util
 from structman.base_utils.base_utils import pack, unpack
@@ -137,15 +138,15 @@ def test_for_constant_array(a):
 
 
 @ray.remote(max_calls = 1)
-def trainRegressionForestWrapper(config, cv_slice, samples, slice_slices = None, distance_map = None,print_out=True,skip_scoring = False, cv_counter = None, debug = False, overwrite_proc_n = None, skip_feature_selection = False):
-    return trainRegressionForest(config, unpack(cv_slice), samples, slice_slices= slice_slices, distance_map = distance_map,print_out=print_out,skip_scoring = skip_scoring, cv_counter = cv_counter, debug = debug, remote = True, skip_feature_selection = skip_feature_selection, overwrite_proc_n = overwrite_proc_n)
+def trainRegressionForestWrapper(config, cv_slice, samples_store_id = None, slice_slices = None, distance_map = None, print_out=True, skip_scoring = False, cv_counter = None, debug = False, overwrite_proc_n = None, skip_feature_selection = False, force_confusion = False):
+    return trainRegressionForest(config, unpack(cv_slice), samples_store_id = samples_store_id[0], slice_slices= slice_slices, distance_map = distance_map,print_out=print_out,skip_scoring = skip_scoring, cv_counter = cv_counter, debug = debug, remote = True, skip_feature_selection = skip_feature_selection, overwrite_proc_n = overwrite_proc_n, force_confusion = force_confusion)
 
 def return_zero(zero_return, remote, cv_slice):
     if remote:
         del cv_slice
     return zero_return
 
-def trainRegressionForest(config, cv_slice, samples, slice_slices = None, distance_map = None, print_out=True,skip_scoring = False, cv_counter = None, remote = False, overwrite_proc_n = None, debug = False, skip_feature_selection = False):
+def trainRegressionForest(config, cv_slice, samples = None, samples_store_id = None, slice_slices = None, distance_map = None, print_out=True,skip_scoring = False, cv_counter = None, remote = False, overwrite_proc_n = None, debug = False, skip_feature_selection = False, force_confusion = False):
     times = []
     t0 = time.time()
 
@@ -156,24 +157,35 @@ def trainRegressionForest(config, cv_slice, samples, slice_slices = None, distan
     if overwrite_proc_n is None:
         proc = config.proc_n
     else:
-        proc = overwrite_proc_n
+        proc = int(overwrite_proc_n)
     leaf_samples = config.tree_min_leaf_samples
     n_of_trees = int(config.num_of_trees)
     rel_max_leaf_node_pruning = config.rel_max_leaf_node_pruning
-    max_leaf_nodes = config.max_leaf_nodes
+
     max_feature_parameter = config.max_feature_parameter
     if config.max_feature_cont_parameter is not None:
         max_feature_parameter = config.max_feature_cont_parameter
-    bootstrap_parameter = config.bootstrap_parameter
+
     if config.min_impurity_decrease_exp < config.maximal_exp:
         min_impurity_decrease = 10**(-config.min_impurity_decrease_exp)
     else:
         min_impurity_decrease = 0.
-    oob_score = config.oob_score
+
+    if config.fs_min_impurity_decrease_exp < config.maximal_exp:
+        fs_min_impurity_decrease = 10**-(config.fs_min_impurity_decrease_exp)
+    else:
+        fs_min_impurity_decrease = 0.
+
     if config.ccp_alpha_exp < config.maximal_exp:
         ccp_alpha = 10**-(config.ccp_alpha_exp)
     else:
         ccp_alpha = 0.
+
+    if config.fs_ccp_alpha_exp < config.maximal_exp:
+        fs_ccp_alpha = 10**-(config.fs_cpp_alpha_exp)
+    else:
+        fs_ccp_alpha = 0.
+
     max_sample_parameter = config.max_sample_parameter
     criterion = config.criterion
     number_of_bins = config.number_of_bins
@@ -197,24 +209,23 @@ def trainRegressionForest(config, cv_slice, samples, slice_slices = None, distan
         return return_zero(zero_return, remote, cv_slice)
     if ccp_alpha < 0.0:
         return return_zero(zero_return, remote, cv_slice)
+    
     if max_sample_parameter <= 0.0 or max_sample_parameter > 1.0:
         return return_zero(zero_return, remote, cv_slice)
+    
     if isinstance(max_feature_parameter,float):
        if max_feature_parameter <= 0.0 or max_feature_parameter > 1.0:
            return return_zero(zero_return, remote, cv_slice)
     if number_of_bins < 1:
         return return_zero(zero_return, remote, cv_slice)
 
-    if oob_score and not bootstrap_parameter:
-        return return_zero(zero_return, remote, cv_slice)
-
     t1 = time.time()
     if config.verbosity >= 3:
-        print(f'Train regression forest part 1: {t1-t0}, {proc}')
+        print(f'Train regression forest part 1: {t1-t0}, Threads: {proc}, Feature selection: {not skip_feature_selection}')
     times.append(('1', t1-t0))
 
     if not skip_feature_selection:
-        slice_updated, feat_select_times, slice_slices = featureSelection.select_features(config, cv_slice, samples, slice_slices, print_out = print_out, debug = debug, overwrite_proc_n = proc)
+        slice_updated, feat_select_times, slice_slices = featureSelection.select_features(config, cv_slice, slice_slices, samples_store_id = samples_store_id, samples = samples, print_out = print_out, debug = debug, overwrite_proc_n = proc, force_confusion = force_confusion)
     else:
         slice_updated = False
         feat_select_times = []
@@ -230,7 +241,7 @@ def trainRegressionForest(config, cv_slice, samples, slice_slices = None, distan
         return return_zero(zero_return, remote, cv_slice)
 
     if len(cv_slice.feature_names) == 0:
-        #print('ERROR =============== Feature vector has len 0',cv_counter)
+        print('Warning =============== Feature vector has len 0',cv_counter)
         #config.printParameter()
         #print('==============================================')
         return return_zero(zero_return, remote, cv_slice)
@@ -253,20 +264,48 @@ def trainRegressionForest(config, cv_slice, samples, slice_slices = None, distan
         print(f'Train regression forest part 2: {t2-t1}, {proc}')
     times.append(('2', t2-t1))
 
-    forest = RandomForestRegressor(
-                n_estimators=n_of_trees,
-                max_depth = depth,
-                min_samples_leaf = leaf_samples,
-                max_features=max_feature_parameter,
-                n_jobs=proc,
-                min_samples_split=min_sample_split,
-                max_leaf_nodes=max_leaf_nodes,
-                oob_score=oob_score,
-                ccp_alpha=ccp_alpha,
-                bootstrap=bootstrap_parameter,
-                min_impurity_decrease=min_impurity_decrease,
-                max_samples = max_sample_parameter,
-                criterion = criterion)
+    if config.forest_type == 'gradient_boost' and not skip_feature_selection:
+        forest = GradientBoostingRegressor(
+            n_estimators = n_of_trees,
+            max_depth = depth,
+            min_samples_leaf = leaf_samples,
+            max_features = max_feature_parameter,
+            min_samples_split = min_sample_split,
+            ccp_alpha = ccp_alpha,
+            min_impurity_decrease = min_impurity_decrease,
+            learning_rate = config.learning_rate
+        )
+    elif config.forest_type == 'xgboost' and not skip_feature_selection:
+       forest = xgb.XGBRegressor(
+            n_jobs = proc,
+            n_estimators = n_of_trees,
+            max_depth = depth,
+            gamma = min_impurity_decrease,
+            learning_rate = config.learning_rate
+        )
+    elif skip_feature_selection:
+        forest = RandomForestRegressor(
+                    n_estimators = config.fs_num_of_trees,
+                    max_depth = config.fs_tree_depth,
+                    min_samples_leaf = config.fs_tree_min_leaf_samples,
+                    n_jobs = proc,
+                    min_samples_split = config.fs_min_sample_split,
+                    ccp_alpha = fs_ccp_alpha,
+                    min_impurity_decrease = fs_min_impurity_decrease,
+                    max_samples = config.fs_max_sample_parameter,
+                    criterion = criterion)
+    else:
+        forest = RandomForestRegressor(
+                    n_estimators=n_of_trees,
+                    max_depth = depth,
+                    min_samples_leaf = leaf_samples,
+                    max_features=max_feature_parameter,
+                    n_jobs=proc,
+                    min_samples_split=min_sample_split,
+                    ccp_alpha=ccp_alpha,
+                    min_impurity_decrease=min_impurity_decrease,
+                    max_samples = max_sample_parameter,
+                    criterion = criterion)
 
     t3 = time.time()
     if config.verbosity >= 3:    
@@ -275,9 +314,9 @@ def trainRegressionForest(config, cv_slice, samples, slice_slices = None, distan
 
     weights_updated = False
 
-    if config.geometric_weighting:
+    if config.weighting == 'geometric':
         cv_slice.calcSampleWeights(config, distance_map)
-    else:
+    elif config.weighting == 'subsample_distance':
         weights_updated = cv_slice.calcSubsampleDistanceWeights(config, para_number = proc)
 
     slice_updated = slice_updated or weights_updated
@@ -296,12 +335,10 @@ def trainRegressionForest(config, cv_slice, samples, slice_slices = None, distan
     times.append(('5', t5-t4))
 
     if print_out or config.verbosity >= 3:
-        print(f'Train regression forst, call of fit with # of features: {len(cv_slice.features)}, skip feature selection {skip_feature_selection}, slice update {slice_updated}, skip scoring {skip_scoring}')
+        print(f'Train regression {config.forest_type} forest, call of fit with # of features: {len(cv_slice.features)}, skip feature selection {skip_feature_selection}, slice update {slice_updated}, skip scoring {skip_scoring}')
     
-    try:
-        samples = ray.get(samples)
-    except:
-        pass
+    if samples is None:
+        samples = ray.get(samples_store_id)
 
     train_feature_matrix = cv_slice.get_train_feature_matrix(samples)
     forest.fit(train_feature_matrix, cv_slice.train_targets, sample_weight=cv_slice.train_class_weight_vector)
@@ -383,7 +420,7 @@ def trainRegressionForest(config, cv_slice, samples, slice_slices = None, distan
         return scores_obj, pack(cv_slice), cv_counter, times_collection, slice_slices
     return forest, scores_obj, cv_counter, cv_slice, times_collection, slice_slices
 
-def trainForest(config, cross_val_object, samples, slice_slices = None, distance_map = None, repeat = 1, print_out = False, cv_repeat = False, skip_scoring=False, remote = True, debug = False, para_number = None, skip_feature_selection = False):
+def trainForest(config, cross_val_object, samples_store_id = None, samples = None, slice_slices = None, distance_map = None, repeat = 1, print_out = False, cv_repeat = False, skip_scoring=False, remote = True, debug = False, para_number = None, skip_feature_selection = False, force_confusion = False):
     #if cv_repeat is False, the cross_val_object is a cross validation slice object instead
     zero_scores_obj = util.Scores(zero=True)
     if para_number == 1:
@@ -413,7 +450,7 @@ def trainForest(config, cross_val_object, samples, slice_slices = None, distance
             if config.verbosity >= 5:
                 cross_val_object.featureSanityCheck(verbose = True)
             if config.regression:
-                forest, scores_obj, cv_counter, cv_slice, reg_forest_times, _slice_slices = trainRegressionForest(config, cross_val_object, samples, slice_slices = slice_slices, distance_map = distance_map, print_out = print_out,skip_scoring = skip_scoring, debug = debug, skip_feature_selection = skip_feature_selection, overwrite_proc_n = para_number)
+                forest, scores_obj, cv_counter, cv_slice, reg_forest_times, _slice_slices = trainRegressionForest(config, cross_val_object, samples_store_id = samples_store_id, samples = samples, slice_slices = slice_slices, distance_map = distance_map, print_out = print_out,skip_scoring = skip_scoring, debug = debug, skip_feature_selection = skip_feature_selection, overwrite_proc_n = para_number, force_confusion = force_confusion)
             else:
                 forest, scores_obj, cv_counter, cv_slice = trainClassificationForest(config,cross_val_object,print_out = print_out,skip_scoring = skip_scoring, skip_feature_selection = skip_feature_selection)
             if repeat > 1:
@@ -470,7 +507,7 @@ def trainForest(config, cross_val_object, samples, slice_slices = None, distance
                 cv_slice_stores[cv_counter] = packed_cv_slice
                 t02 = time.time()
                 if config.verbosity >= 2:
-                    print(f'Time for packing cv_slice {cv_counter} in trainForest: {t02-t01} {slice_slices is None}')
+                    print(f'Time for packing cv_slice {cv_counter} in trainForest: {t02-t01} {slice_slices is None} {para_number}')
 
             if slice_slices is not None:
                 s_slice_slices = slice_slices[cv_counter]
@@ -479,12 +516,14 @@ def trainForest(config, cross_val_object, samples, slice_slices = None, distance
 
             if remote:
                 if config.regression:
-                    slice_result_ids.append(trainRegressionForestWrapper.remote(config, packed_cv_slice, samples, slice_slices = s_slice_slices, distance_map = distance_map, print_out = print_out, cv_counter = cv_counter, debug = debug, skip_feature_selection = skip_feature_selection, overwrite_proc_n = para_number,skip_scoring = skip_scoring))
+                    if samples_store_id is None:
+                        samples_store_id = ray.put(samples)
+                    slice_result_ids.append(trainRegressionForestWrapper.remote(config, packed_cv_slice, samples_store_id = [samples_store_id], slice_slices = s_slice_slices, distance_map = distance_map, print_out = print_out, cv_counter = cv_counter, debug = debug, skip_feature_selection = skip_feature_selection, overwrite_proc_n = para_number,skip_scoring = skip_scoring, force_confusion = force_confusion))
                 else:
                     slice_result_ids.append(trainClassificationForestWrapper.remote(config, packed_cv_slice, print_out = print_out, cv_counter = cv_counter,skip_scoring = skip_scoring, skip_feature_selection = skip_feature_selection))
             else:
                 if config.regression:
-                    slice_result_ids.append(trainRegressionForest(config, cv_slice, samples, slice_slices = slice_slices[cv_counter], distance_map = distance_map, print_out = print_out, cv_counter = cv_counter, overwrite_proc_n = para_number, debug = debug, skip_feature_selection = skip_feature_selection,skip_scoring = skip_scoring))
+                    slice_result_ids.append(trainRegressionForest(config, cv_slice, samples = samples, samples_store_id = samples_store_id, slice_slices = slice_slices[cv_counter], distance_map = distance_map, print_out = print_out, cv_counter = cv_counter, overwrite_proc_n = para_number, debug = debug, skip_feature_selection = skip_feature_selection,skip_scoring = skip_scoring, force_confusion = force_confusion))
                 else:
                     slice_result_ids.append(trainClassificationForest(config,cv_slice,print_out = print_out, cv_counter = cv_counter,skip_scoring = skip_scoring, skip_feature_selection = skip_feature_selection))
 
