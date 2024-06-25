@@ -210,13 +210,13 @@ class Config:
         self.list_ranking_thresh = 150
         self.learning_rate = 0.1
 
-        self.fs_tree_depth = 10
+        self.fs_tree_depth = 5
         self.fs_num_of_trees = 100
-        self.fs_min_impurity_decrease_exp = 10.
-        self.fs_min_sample_split = 4
-        self.fs_tree_min_leaf_samples = 1
+        self.fs_min_impurity_decrease_exp = 15.
+        self.fs_min_sample_split = 70
+        self.fs_tree_min_leaf_samples = 20
         self.fs_ccp_alpha_exp = 30.
-        self.fs_max_sample_parameter = 0.92
+        self.fs_max_sample_parameter = 0.8
 
         self.maximal_exp = 19.0
 

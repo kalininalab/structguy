@@ -176,7 +176,7 @@ def crossFoldConfusionSelect(config, cv_slice, slice_slices, samples = None, sam
         else:
             cv_slice.filterFeatures(pre_filter)
 
-        sample_size_threshold = config.gigs_of_ram * 300
+        sample_size_threshold = config.gigs_of_ram * 3000
         n_of_samples = len(cv_slice.train_targets) + len(cv_slice.test_targets)
 
         if n_of_samples < sample_size_threshold:
@@ -225,7 +225,7 @@ def crossFoldConfusionSelect(config, cv_slice, slice_slices, samples = None, sam
             loop_ray_ids = []
             
             for slice_slice in slice_slices:
-                if calc_at_least_once:
+                if calc_at_least_once and not isinstance(slice_slice, bytes):
                     packed_slice_slice = pack(slice_slice)
                 else:
                     packed_slice_slice = slice_slice

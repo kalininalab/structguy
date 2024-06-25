@@ -87,7 +87,7 @@ fi
 #install dependencies
 {
     echo "Installing package DataSAIL ..."
-    mamba install -y -c conda-forge -c kalininalab -c bioconda -c mosek datasail
+    mamba install -y -c conda-forge -c kalininalab -c bioconda datasail
     pip install grakel
 } >&$verbose_stdout
 

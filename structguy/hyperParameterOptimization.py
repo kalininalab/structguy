@@ -145,8 +145,10 @@ def bayes_random_init(config, parameters, score_matrix, initial_cv_obj, best_sco
 
     #n_pre_samples = 1 #Just for testing
 
-    sample_size_threshold = config.gigs_of_ram * 300
+    sample_size_threshold = config.gigs_of_ram * 3000
     n_of_samples = len(initial_cv_obj.slices[0].train_targets) + len(initial_cv_obj.slices[0].test_targets)
+
+    number_of_sub_jobs = len(initial_cv_obj.slices) * (len(initial_cv_obj.slices) -1)
 
     if n_of_samples < sample_size_threshold:
         para_random_init = True
@@ -163,7 +165,7 @@ def bayes_random_init(config, parameters, score_matrix, initial_cv_obj, best_sco
     #if not 'geometric_exponent' in param_names:
     if para_random_init:
         randomized_parameters = np.random.uniform(bounds[:, 0], bounds[:, 1], (n_pre_samples, bounds.shape[0]))
-        max_packages = max([2, 8 * (sample_size_threshold//n_of_samples)])
+        max_packages = min([max([2, 8 * (sample_size_threshold//n_of_samples)]), len(randomized_parameters) - 1])
         packagesize = math.ceil((n_pre_samples-1) / max_packages)
 
         #Always calculate one set of parameters unparalized to set the confusion maps (or other slice specific stuff that resets after each round of the HPO)
@@ -182,6 +184,9 @@ def bayes_random_init(config, parameters, score_matrix, initial_cv_obj, best_sco
         print(f'after store init, samples is None: {samples is None}, max_packages: {max_packages}, package_size: {packagesize}')
 
         para_number = config.proc_n//max_packages
+
+        if para_number % number_of_sub_jobs != 0:
+            para_number = ((para_number//number_of_sub_jobs)+1)*number_of_sub_jobs
 
         # Get n_pre_samples amount of random points
         try:
@@ -238,6 +243,9 @@ def bayes_random_init(config, parameters, score_matrix, initial_cv_obj, best_sco
 
         x_list.append(params)
         y_list.append(obj_sc)
+
+        if config.verbosity >= 3:
+            print(f'Objective score: {obj_sc}')
 
         #print('==DEBUG OUT==')
         #print(params)
@@ -378,6 +386,8 @@ def bayesian_optimisation(n_iters, config, parameters, score_matrix, cv_obj, bes
     return_cv_obj = cv_obj
     return_slice_slices = slice_slices
 
+    count_dups = 0
+
     for n in range(n_iters):
         if config.verbosity >= 2:
             tl0 = time.time()
@@ -407,8 +417,17 @@ def bayesian_optimisation(n_iters, config, parameters, score_matrix, cv_obj, bes
         # Duplicates will break the GP. In case of a duplicate, we will randomly sample a next query point.
         if np.any(np.abs(next_sample - xp) <= epsilon):
             next_sample = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
+            count_dups += 1
+            if config.verbosity >= 2:
+                print('Sampled a duplicate')
         else:
             next_sample = scaler.inverse_transform([next_sample])[0]
+
+        if count_dups == 2:
+            break
+
+        if config.verbosity >= 1:
+            print(f'Try out next sampled HP: {next_sample}')
 
         if config.verbosity >= 2:
             tl3 = time.time()
@@ -435,6 +454,8 @@ def bayesian_optimisation(n_iters, config, parameters, score_matrix, cv_obj, bes
             print(f'Bayesian optimisation loop part 6: {tl6-tl5}')
 
         print('Bayesian optimization, iteration:',n)
+        if config.verbosity >= 3:
+            print(f'Objective score: {cv_score}')
         #print('===========================\nBayesian optimization, iteration:',n,'\n===\n')
         #config.printParameter()
         #scores.printOut()
@@ -657,9 +678,9 @@ def initConfParameters(config, parameters):
     return parameters
 
 def initFSForestParameters(config, parameters):
-    parameters['fs_tree_depth'] = Parameter('fs_tree_depth','integer',half_step_limits = config.tree_depth_half_step)
-    parameters['fs_num_of_trees'] = Parameter('fs_num_of_trees','integer',half_step_limits = config.forest_size_half_step)
-    parameters['fs_min_impurity_decrease_exp'] = Parameter('fs_min_impurity_decrease_exp','real',half_step_limits = config.min_impurity_decrease_exp_half_step)
+    #parameters['fs_tree_depth'] = Parameter('fs_tree_depth','integer',half_step_limits = config.tree_depth_half_step)
+    #parameters['fs_num_of_trees'] = Parameter('fs_num_of_trees','integer',half_step_limits = config.forest_size_half_step)
+    #parameters['fs_min_impurity_decrease_exp'] = Parameter('fs_min_impurity_decrease_exp','real',half_step_limits = config.min_impurity_decrease_exp_half_step)
     parameters['fs_min_sample_split'] = Parameter('fs_min_sample_split','integer',half_step_limits = config.min_sample_split_half_step)
     parameters['fs_tree_min_leaf_samples'] = Parameter('fs_tree_min_leaf_samples','integer',half_step_limits = config.min_sample_leaf_half_step)
     parameters['fs_max_sample_parameter'] = Parameter('fs_max_sample_parameter','real',half_step_limits = config.max_sample_half_step)
