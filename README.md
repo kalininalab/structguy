@@ -35,5 +35,26 @@ structguy generate_features -i [path to structguy_project.conf] -n [number of th
 ```
 
 ### Model Training
+>[!TIP]
+>Easiest way to use StructGuy is by downloading the model we trained in (add_link_to_publication_later) from [Hugging Face](https://huggingface.co/AGress/StructGuy/blob/main/StructGuy_trained_on_goldstandard.dump)
+
+#### Without Hyperparameter Optimization
+
+```
+structguy build_model -i [path to name_of_dataset.structguy_project.conf] --nocv --nohpo -n [number of threads]
+```
+
+#### With Hyperparameter Optimization
+
+>[!WARNING]
+>This will consume great amounts of computing resources and time.
+
+```
+structguy build_model -i [path to name_of_dataset.structguy_project.conf] -n [number of threads]
+```
 
 ### Applying a Model
+
+```
+structguy predict -i [path to name_of_dataset.structguy_project.conf] -m [path to model.dump file] -n [number of threads]
+```
