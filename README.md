@@ -1,9 +1,10 @@
 # StructGuy
 ## Installation
+>[!WARNING]
+>StructGuy is designed for the application on high performance computing machines. The installation includes the download of UniRef50 and UniRef90 and the calculation of their search index tables with MMseqs2 requires **1 Tb of disc space and 800 Gb of memory**. StructGuy can still be installed on regular computers that can provide the disc space, however we do not suggest to run a full model training.  
 
 ### Step 0:
-StructGuy needs to be installed on top of [StructMAn](https://github.com/kalininalab/StructMAn) and can only be installed on a dedicated high performance computing machine. The installation includes the download of UniRef50 and UniRef90 and the calculation of their search index tables with MMseqs2 requires **1 Tb of disc space and 800 Gb of memory**.
-
+StructGuy needs to be installed on top of [StructMAn](https://github.com/kalininalab/StructMAn). 
 ### Step 1:
 Clone the repository:
 ```
