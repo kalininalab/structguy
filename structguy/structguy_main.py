@@ -27,8 +27,12 @@ def parse_arguments(argument_start = 2, manual_args = None):
                 'overwrite',
                 'feats=',
                 'type=',
+                'test_config=',
+                'support_features=',
+                'splits=',
+                'skip_final_model'
             ]
-            opts, args = getopt.getopt(argv, "i:n:m:", long_paras)
+            opts, args = getopt.getopt(argv, "i:n:m:d", long_paras)
 
         except getopt.GetoptError:
             print("Illegal Input\n\n", disclaimer)
@@ -48,8 +52,15 @@ def parse_arguments(argument_start = 2, manual_args = None):
     force_lopo = False
     overwrite = False
 
+    debug = False
+
     overwrite_proc_n = None
     forest_type = None
+    test_config_path = None
+
+    path_to_splits_file = None
+    path_to_support_features = None
+    skip_final_model = None
 
     for opt, arg in opts:
         if opt == '-i':
@@ -63,6 +74,9 @@ def parse_arguments(argument_start = 2, manual_args = None):
             if not os.path.isfile(path_to_model):
                 print('ERROR: path to model file is invalid')
                 return
+
+        if opt == '-d':
+            debug = True
 
         if opt == '--verbosity':
             verbosity_overwrite = int(arg)
@@ -91,6 +105,18 @@ def parse_arguments(argument_start = 2, manual_args = None):
         if opt == '--type':
             forest_type = arg
 
+        if opt == '--test_config':
+            test_config_path = arg
+
+        if opt == '--splits':
+            path_to_splits_file = arg
+
+        if opt == '--support_features':
+            path_to_support_features = arg
+
+        if opt == '--skip_final_model':
+            skip_final_model = True
+
     if path_to_model is not None:
         if path_to_model.count('/') > 0:
             model_name = path_to_model.rsplit("/",1)[1].rsplit('.',1)[0]
@@ -102,10 +128,20 @@ def parse_arguments(argument_start = 2, manual_args = None):
 
     config = util.Config(path_to_project_file, hyperparameters_path = path_to_hyperparameters_file)
 
+    if skip_final_model is not None:
+        config.skip_final_model = True
+
     config.path_to_model = path_to_model
     config.model_name = model_name
     config.overwrite = overwrite
     
+    config.debug_mode = debug
+
+    config.path_to_splits_file = path_to_splits_file
+    if path_to_splits_file is not None:
+        config.crossValidation = 'specific'
+    config.path_to_support_features = path_to_support_features
+
     if force_lopo:
         config.crossValidation = 'LOPO'
 
@@ -130,10 +166,15 @@ def parse_arguments(argument_start = 2, manual_args = None):
         if forest_type == 'gradient_boost' or forest_type == 'xgboost':
             config.impute_missing_values = True
 
-    return config
+    if test_config_path is not None:
+        test_config = util.Config(test_config_path)
+    else:
+        test_config = None
+
+    return config, test_config
 
 def feature_generator_main():
-    config = parse_arguments()
+    config, test_config = parse_arguments()
 
     ray_utils.ray_init(config, overwrite_logging_level = 0)
 
@@ -141,27 +182,26 @@ def feature_generator_main():
         featureGenerator.expand_structural_feature_table(config)
 
 def build_model_main(manual_args = None):
-    config = parse_arguments(manual_args = manual_args)
-    # if config.verbosity > 0:
-    #     print(config.printHyperParameter())
+    config, test_config = parse_arguments(manual_args = manual_args)
 
     config.saveHyperParameter()
 
     ray_utils.ray_init(config, overwrite_logging_level = 0, total_memory_quantile = 0.74)
 
-    learn.learn(config)
+    out_value = learn.learn(config, test_config=test_config)
 
     config.saveHyperParameter()
+    return out_value
 
 def predict_main(manual_args = None):
-    config = parse_arguments(manual_args = manual_args)
+    config, test_config = parse_arguments(manual_args = manual_args)
     config.predict_mode = True
     ray_utils.ray_init(config, overwrite_logging_level = 0)
     score, y_true, y_pred = learn.evaluate_dataset(config)
     return score, y_true, y_pred
 
 def generate_info():
-    config = parse_arguments()
+    config, test_config = parse_arguments()
 
     forest, extern_feature_names_list, model_config = learn.loadModel(config.path_to_model)
     n_of_trees, n_of_nodes = featureAnalysis.get_base_stats(forest)

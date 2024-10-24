@@ -4,6 +4,7 @@ import getopt
 import statistics
 import numpy as np
 from psutil import virtual_memory
+from scipy import stats
 
 import matplotlib
 # Force matplotlib to not use any Xwindows backend.
@@ -63,6 +64,7 @@ class Config:
         self.gigs_of_ram = mem.total / 1024 / 1024 / 1024
         self.errorlog = Errorlog()
 
+        self.overwrite = False
         self.dataset_name = ''
         self.path_to_sequence_fasta = None
         self.path_to_features_file = None
@@ -71,6 +73,7 @@ class Config:
         self.path_structural_feature_table = None
         self.path_to_multi_savs_table = None
         self.outfolder = None
+        self.skip_final_model = False
 
         self.debug = 1
         self.proc_n = 48
@@ -171,7 +174,7 @@ class Config:
         self.transform = False
         self.produce_scatterplot = False
 
-        self.weighting = None #'subsample_distance'
+        self.weighting = None#'subsample_distance'
         self.geometric_exponent = 2
 
         #HPO setup
@@ -209,14 +212,17 @@ class Config:
         self.reg_thresh_exp = 20.
         self.list_ranking_thresh = 150
         self.learning_rate = 0.1
+        self.min_child_weight = 1.5
+        self.early_stopping = 30
+
 
         self.fs_tree_depth = 5
         self.fs_num_of_trees = 100
         self.fs_min_impurity_decrease_exp = 15.
-        self.fs_min_sample_split = 70
-        self.fs_tree_min_leaf_samples = 20
+        self.fs_min_sample_split = 20
+        self.fs_tree_min_leaf_samples = 3
         self.fs_ccp_alpha_exp = 30.
-        self.fs_max_sample_parameter = 0.8
+        self.fs_max_sample_parameter = 0.0583
 
         self.maximal_exp = 19.0
 
@@ -701,6 +707,12 @@ class Config:
                 if opt == 'learning_rate':
                     self.learning_rate = float(arg)
                     continue
+                if opt == 'min_child_weight':
+                    self.min_child_weight = float(arg)
+                    continue
+                if opt == 'early_stopping':
+                    self.early_stopping = int(arg)
+                    continue
                 if opt == 'fs_tree_depth':
                     self.fs_tree_depth = int(arg)
                     continue
@@ -768,7 +780,7 @@ class Config:
                 self.sequential_confusion_rank_threshold, self.err_warping_exp, self.confusion_normalization_exp,
                 self.number_of_bins, self.list_ranking_thresh, self.confusion_goodwill,
                 self.p_val_thresh,self.sample_weight_parameter,self.reg_alpha_exp, self.reg_c_exp, self.reg_thresh_exp, self.geometric_exponent,
-                self.learning_rate, self.fs_tree_depth, self.fs_num_of_trees, self.fs_min_impurity_decrease_exp, self.fs_min_sample_split,
+                self.learning_rate, self.min_child_weight, self.early_stopping, self.fs_tree_depth, self.fs_num_of_trees, self.fs_min_impurity_decrease_exp, self.fs_min_sample_split,
                 self.fs_tree_min_leaf_samples, self.fs_ccp_alpha_exp, self.fs_max_sample_parameter
                 )
         return sct
@@ -786,6 +798,8 @@ class Config:
         print('Out of bag:',self.oob_score)
         print('CCP alpha exponent:',self.ccp_alpha_exp)
         print(f'Learning rate: {self.learning_rate}')
+        print(f'Min Child Weight: {self.min_child_weight}')
+        print(f'Early stopping: {self.early_stopping}')
         print('Max sample:',self.max_sample_parameter)
 
         print('TVMB rank threshold:',self.tvmb_rank_threshold)
@@ -826,7 +840,9 @@ class Config:
         print("min_impurity_decrease_exp", self.min_impurity_decrease_exp)
         print("oob_score", self.oob_score)
         print("ccp_alpha_exp", self.ccp_alpha_exp)
-        print(f'Learning rate: {self.learning_rate}')
+        print(f'learning_rate: {self.learning_rate}')
+        print(f'min_child_weight: {self.min_child_weight}')
+        print(f'early_stopping" {self.early_stopping}')
         print("max_sample_parameter", self.max_sample_parameter)
         print("number_of_bins", self.number_of_bins)
         print("p_val_thresh", self.p_val_thresh)
@@ -1102,6 +1118,11 @@ def calc_protein_wise_corr(y_test, y_pred, sample_ids, corr_function, mono_retur
         mean_corr = 0
     return prot_wise_corrs, mean_corr
 
+
+def rho_eval_for_xgboost(predt, y):
+    corr, _ = stats.spearmanr(predt, y)
+    return corr
+
 def objective_function_criterium(config, scores, best_scores, feature_penalty = None):
     if best_scores is None:
         if scores is None:
@@ -1110,7 +1131,15 @@ def objective_function_criterium(config, scores, best_scores, feature_penalty = 
     if scores is None:
         return False
 
-    return get_objective_score(config, scores, feature_penalty = feature_penalty) > get_objective_score(config, best_scores, feature_penalty = feature_penalty)
+    obj_score = get_objective_score(config, scores, feature_penalty = feature_penalty)
+    obj_best_score = get_objective_score(config, best_scores, feature_penalty = feature_penalty)
+
+    better = obj_score > obj_best_score
+
+    if config.verbosity >= 3:
+        print(f'Objective function criterium: {better} {type(obj_score)} {type(obj_best_score)}')
+
+    return better
 
 def get_objective_score(config, scores, feature_penalty = None):
     if scores is None:
@@ -1750,7 +1779,10 @@ def printMean(score_list,name):
         weighted_score = score*quant*N/total_quant
         weighted_scores.append(weighted_score)
 
-    print('Mean %s:' % name, statistics.mean(weighted_scores),'STD:',statistics.stdev(weighted_scores))
+    try:
+        print('Mean %s:' % name, statistics.mean(weighted_scores),'STD:',statistics.stdev(weighted_scores))
+    except:
+        print('Error in printMean')
     return
 
 def median(l):

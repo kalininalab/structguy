@@ -145,6 +145,16 @@ class SampleSpace:
         self.sequence_map = seq_map
         self.impute_map = {}
 
+    def fuse_samples(self, other_samples):
+        self.samples.update(other_samples.samples)
+        self.features.update(other_samples.features)
+        self.feature_matrix_dict.update(other_samples.feature_matrix_dict)
+        self.sequence_map.update(other_samples.sequence_map)
+        self.fillDefaultValues()
+        self.feature_names = list(self.features.keys())
+
+        self.transform_matrix_dict()
+
     def addFeature(self,name,f_type,group=None,default_value=None,mutation_specific=False):
         feat = Feature(name = name, f_type = f_type,group=group,default_value=default_value,mutation_specific=mutation_specific)
         self.features[name] = feat
@@ -405,12 +415,18 @@ class SampleSpace:
                     self.feat_pos_dict[feat_name] = feat_pos
                     fixed_feat_names.append(feat_name)
             for feat_name in fixed_feat_names:
-                self.raw_feature_matrix[sample_pos].append(self.feature_matrix_dict[sample_id][feat_name])
+                try:
+                    self.raw_feature_matrix[sample_pos].append(self.feature_matrix_dict[sample_id][feat_name])
+                except:
+                    self.raw_feature_matrix[sample_pos].append(0.)
         del self.feature_matrix_dict
 
 
     def get_feature_value(self, sample_id, feat_name):
-        feat_value = self.raw_feature_matrix[self.sample_pos_dict[sample_id]][self.feat_pos_dict[feat_name]]
+        try:
+            feat_value = self.raw_feature_matrix[self.sample_pos_dict[sample_id]][self.feat_pos_dict[feat_name]]
+        except:
+            feat_value = None
         return feat_value
 
     def get_feature_value_vector(self, sample_ids, feat_name):
@@ -455,7 +471,10 @@ class SampleSpace:
   
         sample_pos_vec = []
         for sample_id in sample_ids:
-            sample_pos_vec.append(self.sample_pos_dict[sample_id])
+            try:
+                sample_pos_vec.append(self.sample_pos_dict[sample_id])
+            except:
+                sample_pos_vec.append(None)
         return self.get_feat_matrix(feat_id_vec, sample_pos_vec)
 
     def setGeometricDistanceMap(self,config):
@@ -636,7 +655,7 @@ class SampleSpace:
             config.confusion_rank_threshold_bounds[-1] = len(self.feature_names) -1
         return
 
-cv_slots = ['slices', 'slice_ids', 'cv_counter', 'isSlice']
+cv_slots = ['slices', 'slice_ids', 'cv_counter', 'isSlice', 'slice_slices']
 
 class CrossValidation:
     __slots__ = cv_slots
@@ -645,6 +664,7 @@ class CrossValidation:
         self.slice_ids = []
         self.cv_counter = 0
         self.isSlice = False
+        self.slice_slices = {}
 
     def getCurrentSlice(self):
         return self.slices[self.slice_ids[self.cv_counter]]
@@ -843,6 +863,55 @@ def write_weight_map(weight_map, outfile):
     f = open(outfile,'w')
     f.write(''.join(lines))
     f.close()
+
+def parse_splits(filepath):
+    f = open(filepath, 'r')
+    lines = f.readlines()
+    f.close()
+
+    test_id_dict = {}
+    for line in lines:
+        words = line[:-1].split('\t')
+        dms_id = words[0]
+        aac = words[1]
+        test_bin = int(words[2])
+
+        if test_bin not in test_id_dict:
+            test_id_dict[test_bin] = set()
+        test_id_dict[test_bin].add((dms_id, aac))
+
+    return test_id_dict
+
+class Given_split(CrossValidation):
+    __slots__ = cv_slots
+    def __init__(self, samplespace, config):
+        super().__init__()
+        
+        test_id_dict = parse_splits(config.path_to_splits_file)
+        for slice_id in test_id_dict:
+            test_ids = test_id_dict[slice_id]
+            train_ids = []
+            for sample_id in samplespace.samples:
+                if sample_id not in test_ids:
+                    train_ids.append(sample_id)
+            cv_slice = CrossValidationSlice(test_ids = test_ids, train_ids = train_ids, sample_dict= samplespace.samples, raw_feature_names = samplespace.feature_names, config = config)
+            self.slices[slice_id] = cv_slice
+            self.slice_ids.append(slice_id)
+
+            slice_slices = []
+            for sub_slice_id in test_id_dict:
+                if sub_slice_id == slice_id:
+                    continue
+                sub_slice_test_ids = test_ids | test_id_dict[sub_slice_id]
+                train_ids = []
+                for sample_id in samplespace.samples:
+                    if sample_id not in sub_slice_test_ids:
+                        train_ids.append(sample_id)
+                cv_slice_slice = CrossValidationSlice(test_ids = test_id_dict[sub_slice_id], train_ids = train_ids, raw_feature_names = samplespace.feature_names, sample_dict = samplespace.samples, config = config, name = f'{cv_slice.name}_subslice_{sub_slice_id}')
+                slice_slices.append(cv_slice_slice)
+
+            cv_slice.slice_slices = slice_slices
+            self.slice_slices[slice_id] = slice_slices
 
 class DataSAIL_cv(CrossValidation):
     __slots__ = cv_slots + ['prots']

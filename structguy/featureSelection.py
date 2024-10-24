@@ -32,7 +32,11 @@ def check_for_confmap_calculation(config, slice_slices, active_exp, sequence_num
 @ray.remote(max_calls = 1)
 def crossFold_confusion_internal_loop_wrapper(store, slice_slice, sample_store_id_list):
     pre_filter, sequence_number, config, distance_map, overwrite_proc_n, force_confusion = store
-    conf_map, slice_slice, loop_time_1, loop_time_2, loop_time_2_1, loop_time_2_2 = crossFold_confusion_internal_loop(unpack(slice_slice), pre_filter, sequence_number, config, distance_map, overwrite_proc_n, samples_store_id = sample_store_id_list[0], force_confusion = force_confusion)
+    try:
+        unpacked_slice_slice = unpack(slice_slice)
+    except:
+        unpacked_slice_slice = slice_slice
+    conf_map, slice_slice, loop_time_1, loop_time_2, loop_time_2_1, loop_time_2_2 = crossFold_confusion_internal_loop(unpacked_slice_slice, pre_filter, sequence_number, config, distance_map, overwrite_proc_n, samples_store_id = sample_store_id_list[0], force_confusion = force_confusion)
     return pack(conf_map), slice_slice, loop_time_1, loop_time_2, loop_time_2_1, loop_time_2_2
 
 def crossFold_confusion_internal_loop(slice_slice, pre_filter, sequence_number, config, distance_map, overwrite_proc_n, samples = None, samples_store_id = None, force_confusion = False):
@@ -75,11 +79,14 @@ def crossFold_confusion_internal_loop(slice_slice, pre_filter, sequence_number, 
         t_l_2_1 = time.time()
         loop_time_2_1 = (t_l_2_1 - t_l_2_0)
 
-        if config.verbosity >= 4:
-            print(f'Calculating conf map: # of features {len(slice_slice.features)}')
-        
-        conf_map, raw_conf_map = featureAnalysis.calcSliceConfusion(forest, slice_slice, samples = samples, samples_store_id = samples_store_id, remote = True, para_number = overwrite_proc_n, err_warping_exp = config.err_warping_exp, goodwill_interval = config.confusion_goodwill, norm_exp = config.confusion_normalization_exp)
-        
+        if config.verbosity >= 3:
+            print(f'Calculating conf map: # of features {len(slice_slice.feature_names)}')
+        if forest is not None:        
+            conf_map, raw_conf_map = featureAnalysis.calcSliceConfusion(forest, slice_slice, samples = samples, samples_store_id = samples_store_id, remote = True, para_number = overwrite_proc_n, err_warping_exp = config.err_warping_exp, goodwill_interval = config.confusion_goodwill, norm_exp = config.confusion_normalization_exp)
+        else:
+            conf_map = {}
+            raw_conf_map = {}
+
         if config.verbosity >= 4:
             print(f'Resulting conf map {slice_slice.name}: {len(conf_map)}, {len(raw_conf_map)}')
 
@@ -184,7 +191,7 @@ def crossFoldConfusionSelect(config, cv_slice, slice_slices, samples = None, sam
         else:
             para_conf_calculation = False
 
-        if para_conf_calculation:
+        if not para_conf_calculation:
             updated_slice_slices = []
             for packed_slice_slice in slice_slices:
                 try:
@@ -306,11 +313,11 @@ def crossFoldConfusionSelect(config, cv_slice, slice_slices, samples = None, sam
         print(f'ERROR: Illegal rank_thresh: {rank_thresh}\n{e}\n{f}\n{g}')
         sys.exit()
 
-    if debug:
-        print(fused_confusion_map[-rank_thresh:])
+    #if debug:
+    #    print(fused_confusion_map[-rank_thresh:])
 
     if print_out or config.verbosity >= 5:
-        print('confusion filtered:',len(to_filter))
+        print('confusion filtered:', len(to_filter), return_list)
 
     t4 = time.time()
     times.append(('4',t4-t3))
@@ -359,7 +366,7 @@ def crossFoldConfusionSelect(config, cv_slice, slice_slices, samples = None, sam
     t6 = time.time()
     times.append(('6',t6-t5))
 
-    return True, times, slice_slices
+    return True, to_filter, times, slice_slices
     
 
 def confusionSelect(config, cv_slice, samples, distance_map = None, print_out = False, pre_filter = None, debug = False, return_list = False, overwrite_proc_n = None, rank_thresh = None, sequence_number = 0, return_score_list = False):
@@ -482,7 +489,7 @@ def pre_defined_feature_selection(config, cv_slice):
         if feat_name not in good_feats:
             to_filter.append(feat_name)
     cv_slice.filterFeatures(to_filter)
-    return True, [], None
+    return True, to_filter, [], None
 
 def regu_fs_wrapper(config, cross_val_object, samples, print_out = False, pre_filter = None, debug = False, return_list = False, overwrite_proc_n = None, return_score_list = False):
     cv_repeat = not cross_val_object.isSlice
@@ -880,8 +887,8 @@ def select_features(config, cross_val_object, slice_slices, samples_store_id = N
         if print_out:
             print('=== Feature selection by feature confusion ===')
         meanCorrelationWrapper(config, cross_val_object, samples = samples, samples_store_id = samples_store_id, dummy_call=True, print_out = print_out, debug = debug, return_score_list = True)
-        filtered, times, slice_slices = crossFoldConfusionSelect(config, cross_val_object, slice_slices, samples = samples, samples_store_id = samples_store_id, print_out = print_out, debug = debug, overwrite_proc_n = overwrite_proc_n, force_confusion = force_confusion)
-        return filtered, times, slice_slices
+        filtered, to_filter, times, slice_slices = crossFoldConfusionSelect(config, cross_val_object, slice_slices, samples = samples, samples_store_id = samples_store_id, print_out = print_out, debug = debug, overwrite_proc_n = overwrite_proc_n, force_confusion = force_confusion)
+        return filtered, to_filter, times, slice_slices
 
 
     elif config.feature_selection == 'sequential_confusion':

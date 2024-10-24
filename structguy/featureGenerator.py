@@ -49,6 +49,7 @@ def parseLines(config, left, right, features, lines, primary_protein_id_col, amo
         if line == '':
 
             continue
+        force_filter = False
         words = line.split('\t')
         if len(words) == 1:
             print(list(line))
@@ -159,14 +160,16 @@ def parseLines(config, left, right, features, lines, primary_protein_id_col, amo
                 [e, f, g] = sys.exc_info()
                 g = traceback.format_exc()
                 print(f'Feature parse error, sample will be filtered: {primary_protein_id} {aac} {tags} {feat_name} {x}\n{e}\n{f}\n{g}')
-                target_value = None
+                #force_filter = True
                 continue
 
             feat_out.append((value, feat_name))
 
-        if target_value is None and print_n < max_print:
+        if target_value is None and print_n < max_print and config.verbosity >= 1:
             print(f'In parseLines - Target value is None for {sample_id}')
             print_n += 1
+        if force_filter:
+            continue            
 
         output.append((sample_id, target_value, amount_of_structures, tags, feat_out))
 
@@ -181,7 +184,7 @@ def parse_structural_features(samples, config, non_feature_cols = [0,1,2,4,7,19]
             )
 
 
-def parse_feature_table(file_path, samples, config, non_feature_cols = [0,1,2,3,4], primary_protein_id_col = 0, aac_col_s = [1], tags_col = 3, amount_of_struct_col = 4, effect_col = 2):
+def parse_feature_table(file_path, samples, config, filter_none_tv, non_feature_cols = [0,1,2,3,4], primary_protein_id_col = 0, aac_col_s = [1], tags_col = 3, amount_of_struct_col = 4, effect_col = 2):
     if config.verbosity >= 1:
         print(f'Reading feature file: {file_path}, non_feature_cols: {non_feature_cols}, primary_protein_id_col: {primary_protein_id_col}, aac_col_s: {aac_col_s}, effect_col: {effect_col}, tags_col: {tags_col}')
 
@@ -229,6 +232,8 @@ def parse_feature_table(file_path, samples, config, non_feature_cols = [0,1,2,3,
     max_print = 10
     n_print = 0
     for sample_id, target_value, amount_of_structures, tags, feat_out in output:
+        if filter_none_tv and target_value is None:
+            continue
         for value, feat_name in feat_out:
             samples.addValue(sample_id,value,feat_name)
             n_f += 1
@@ -253,7 +258,7 @@ def parse_feature_table(file_path, samples, config, non_feature_cols = [0,1,2,3,
     if config.verbosity >= 1:
         print('Finished parsing of feature file')
 
-def createTrainingSet(config, external_impute = None, for_prediction = False):
+def createTrainingSet(config, external_impute = None, for_prediction = False, stop_matrix_transformation = False, other_features_path = None, filter_none_tv = False):
 
     if config.verbosity >= 2:
         print(f'Call of createTrainingSet: external_impute: {external_impute}, for_prediction: {for_prediction}')
@@ -265,12 +270,12 @@ def createTrainingSet(config, external_impute = None, for_prediction = False):
     #strfg.initFeatures(samples)
     seqfg.initFeatures(config, samples)
 
-    if (config.path_to_processed_features_file == None and config.path_to_imputed_features_file == None) or config.overwrite:
+    if (config.path_to_processed_features_file == None and config.path_to_imputed_features_file == None and other_features_path is None) or config.overwrite:
 
-        parse_feature_table(config.path_to_features_file, samples, config)
+        parse_feature_table(config.path_to_features_file, samples, config, filter_none_tv)
 
         for additonal_infile in config.add_more_sample_files:
-            parse_feature_table(additonal_infile, samples, config)
+            parse_feature_table(additonal_infile, samples, config, filter_none_tv)
 
         if config.fusePositions:
             config.regression = False
@@ -327,13 +332,17 @@ def createTrainingSet(config, external_impute = None, for_prediction = False):
 
                 config.add_entry_to_project_file('path_to_processed_features_file', config.path_to_processed_features_file)
 
+    elif other_features_path is not None:
+        parse_feature_table(other_features_path, samples, config, filter_none_tv)
+
     elif external_impute is not None:
-        parse_feature_table(config.path_to_imputed_features_file, samples, config)
+        parse_feature_table(config.path_to_imputed_features_file, samples, config, filter_none_tv)
     else:
-        parse_feature_table(config.path_to_processed_features_file, samples, config)
+        parse_feature_table(config.path_to_processed_features_file, samples, config, filter_none_tv)
         if config.verbosity >= 4:
             samples.print_feat_types()
         #Propably call some stuff here, TODO
     config.n_of_features = len(samples.feature_names)
-    samples.transform_matrix_dict()
+    if not stop_matrix_transformation:
+        samples.transform_matrix_dict()
     return samples

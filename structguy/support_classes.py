@@ -93,11 +93,13 @@ class Feature:
                             value = string
             else:
                 print(f'Error in value_from_string: {self.f_type} {self.name} {string}')
+                value = None
         except:
             if string in possible_na_values:
                 value = None
             else:
                 print(f'Error in value_from_string: {self.f_type} {self.name} {string}')
+                value = None
         return value
 
     def string_convert(self,value):
@@ -147,6 +149,8 @@ class CrossValidationSlice:
                 if feat_name not in keep_features:
                     features_to_remove.append(feat_name)
 
+        self.feature_names.sort()
+
         self.name = name
         if train_prots is None:
             self.train_prots =  set([])
@@ -167,10 +171,6 @@ class CrossValidationSlice:
         self.subslice = None
         self.subslices = None
         self.random_subslice = None
-
-        self.features = {}
-        for pos,feat in enumerate(self.feature_names):
-            self.features[feat] = pos
 
         self.deactivated_features = set()
         self.slice_specific_features = {}
@@ -218,8 +218,14 @@ class CrossValidationSlice:
 
         if not train_equal_test:
             for sample_id in self.test_sample_ids:
-                sample = sample_dict[sample_id]
-                self.test_targets.append(sample.targetValue)
+                try:
+                    sample = sample_dict[sample_id]
+                    self.test_targets.append(sample.targetValue)
+                except:
+                    print(f'In init CrossValidationSlice - Sample id: {sample_id} was not in the sample_dict')
+                    self.test_targets.append(1.0)
+                    continue
+                
                 self.slice_specific_features[sample_id] = {}
 
         if config.verbosity >= 2:
@@ -279,13 +285,7 @@ class CrossValidationSlice:
             print(f'Init CV slice part 8: {t8-t7}')
 
 
-    def featureSanityCheck(self, verbose = False):
-        if verbose:
-            print(f'\n\nCall of featureSanityCheck for slice {self.name}\n\n')
-        for pos_1,feat in enumerate(self.feature_names):
-            pos_2 = self.features[feat]
-            if pos_1 != pos_2:
-                raise 'Features are not continuous anymore'
+    def featureSanityCheck(self, verbose = False):  
             
         return
 
@@ -455,8 +455,13 @@ class CrossValidationSlice:
 
     def printBalance(self, config):
         if config.regression:
-            print(f'{self.name} Mean target value: {sum(self.train_targets)/len(self.train_targets)}')
-            print(f'{self.name} Test set size: {len(self.test_targets)}, Train set size: {len(self.train_targets)}')
+            if len(self.test_targets) > 0:
+                print(f'{self.name} Mean train target value: {sum(self.train_targets)/len(self.train_targets)} Mean test target value: {sum(self.test_targets)/len(self.test_targets)}')
+            print(f'{self.name} Test set size: {len(self.test_targets)}, Train set size: {len(self.train_targets)}, Feats: {len(self.feature_names)}')
+            try:
+                print(f'{self.feature_names[:5]}\n...\n{self.feature_names[-5:]}')
+            except:
+                print(self.feature_names)
             return
         balance_map = {}
         for ttv in self.train_targets:
@@ -798,31 +803,31 @@ class CrossValidationSlice:
         for ff in filtered_features:
             self.deactivateFeature(ff)
 
-        #self.featureSanityCheck()
+        self.feature_names.sort()
 
         if print_out:
             print('======\n',self.name,'filter features:',len(filtered_features),'remaining features:',len(self.feature_names),'\n=====')
 
     def removeFeature(self,feat_name):
-        feat_pos = self.features[feat_name]
-        del self.features[feat_name]
+        for feat_pos, feature_name in enumerate(self.feature_names):
+            if feature_name == feat_name:
+                del_pos = feat_pos
+                break
+
         try:
-            del self.feature_names[feat_pos]
+            del self.feature_names[del_pos]
         except:
+            if feat_name not in self.feature_names:
+                return
             [e, f, g] = sys.exc_info()
             g = traceback.format_exc()
-            print('Remove feature failed: ', feat_name, e, f, g, '\n', feat_pos, '\n', self.feature_names, '\n', self.features)
+            print('Remove feature failed: ', feat_name, e, f, g, '\n', feat_pos, feat_name in self.feature_names, '\n', self.feature_names)
             sys.exit()
-
-        for other_feat in self.features:
-            if self.features[other_feat] > feat_pos:
-                self.features[other_feat] -= 1
 
     def deactivateFeature(self,feat_name, print_out = False):
         if print_out:
             print('Slice:',self.name,'Deactivate feature:',feat_name)
-        if not feat_name in self.features:
-            return
+
         self.deactivated_features.add(feat_name)
         self.removeFeature(feat_name)
 
@@ -831,7 +836,6 @@ class CrossValidationSlice:
             print('Slice:',self.name,'Reactivate feature:',feat_name)
         if not feat_name in self.deactivated_features:
             return
-        self.features[feat_name] = len(self.feature_names)
         self.feature_names.append(feat_name)
         
         self.deactivated_features.remove(feat_name)
@@ -896,7 +900,7 @@ class CrossValidationSlice:
                 if not feat_name in self.tvmb_map:
                     continue
             if not feat_name in self.tvmb_map:
-                print('Error debug out:',self.name,len(self.feature_names),len(self.features))
+                print('Error debug out:',self.name,len(self.feature_names))
             tvmb_score,_ = self.tvmb_map[feat_name]
             self.ranked_tvmb.append((feat_name,tvmb_score))
         self.ranked_tvmb.sort(key=lambda x:x[1],reverse=True)
@@ -939,3 +943,17 @@ class CrossValidationSlice:
     def get_train_feature_matrix(self, samples):
         feat_matrix = samples.get_feat_matrix_from_ids(self.train_sample_ids, self.feature_names)
         return feat_matrix
+    
+    def get_prot_wise_test_data_tuples(self, samples):
+        test_pred_pairs = {}
+        for sample_nr, yt_value in enumerate(self.test_targets):
+            prot_id, _ = self.test_sample_ids[sample_nr]
+            if not prot_id in test_pred_pairs:
+                test_pred_pairs[prot_id] = [[], []]
+            test_pred_pairs[prot_id][1].append(yt_value)
+            test_pred_pairs[prot_id][0].append(self.test_sample_ids[sample_nr])
+
+        for prot_id in test_pred_pairs:
+            feat_matrix = samples.get_feat_matrix_from_ids(test_pred_pairs[prot_id][0], self.feature_names)
+            test_pred_pairs[prot_id][0] = feat_matrix
+        return test_pred_pairs

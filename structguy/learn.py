@@ -69,7 +69,7 @@ def save_feature_importances(outfile, feature_importance_map):
     f.write(''.join(lines))
     f.close()
 
-def learn(config, effectRegressor=None):
+def learn(config, effectRegressor=None, test_config = None):
     crossValidation = config.crossValidation
 
     if config.verbosity >= 1:
@@ -92,7 +92,11 @@ def learn(config, effectRegressor=None):
             print(f'Using feature file: {config.path_to_processed_features_file}')
         print(f'Writing output to: {config.outfolder}')
 
-    samples = featureGenerator.createTrainingSet(config)
+    samples = featureGenerator.createTrainingSet(config, stop_matrix_transformation = (config.path_to_support_features is not None))
+    if config.path_to_support_features is not None:
+        support_samples = featureGenerator.createTrainingSet(config, stop_matrix_transformation = True, other_features_path = config.path_to_support_features, filter_none_tv = True)
+        samples.fuse_samples(support_samples)
+
 
     if config.weighting == 'geometric' and config.regression:
         samples.setGeometricDistanceMap(config)
@@ -100,12 +104,16 @@ def learn(config, effectRegressor=None):
     else:
         distance_map = None
 
+    out_value = None
+
     if not config.skip_cv:
 
         if crossValidation == 'LOPO':
             cross_val_obj = sampleSpace.LOPO(samples, config)
         elif crossValidation == 'DataSAIL':
             cross_val_obj = sampleSpace.DataSAIL_cv(sampleSpace = samples, config = config)
+        elif crossValidation == 'specific':
+            cross_val_obj = sampleSpace.Given_split(samples, config)
         else:
             cross_val_obj = sampleSpace.X_fold_cv(samples, config, crossValidation)
 
@@ -115,7 +123,7 @@ def learn(config, effectRegressor=None):
             print(len(cv_slice.train_targets))
             print('Testset length: ',len(cv_slice.test_targets))
 
-        debug = False
+        debug = config.debug_mode
         if config.feature_selection == 'confusion' or config.feature_selection == 'confusion_and_regu' or config.feature_selection == 'sequential_confusion' or config.feature_selection == 'threeStaged' or config.feature_selection == 'sequential_confusion_and_regu' or config.feature_selection == 'threeStaged_listranking':
             samples_store_id = ray.put(samples)
         else:
@@ -127,14 +135,14 @@ def learn(config, effectRegressor=None):
             initial_training_input = cv_slice
 
         if config.hyperOptimization == 'bayesianComplete':
-            forest,scores,initial_training_input, slice_slices = trainForest.trainForest(config, initial_training_input, samples_store_id = samples_store_id, samples = samples, distance_map = distance_map, repeat = config.repeat_training, cv_repeat = config.cv_hpo, print_out = True, debug = debug)
+            forest,scores,initial_training_input, slice_slices = trainForest.trainForest(config, initial_training_input, samples_store_id = samples_store_id, slice_slices = initial_training_input.slice_slices, samples = samples, distance_map = distance_map, repeat = config.repeat_training, cv_repeat = config.cv_hpo, print_out = True, debug = debug)
             hpo.bayesianComplete(config, initial_training_input, scores, samples = samples_store_id, distance_map = distance_map)
         elif config.hyperOptimization == 'threeDim':
-            forest, scores, initial_training_input, slice_slices = trainForest.trainForest(config, initial_training_input, samples_store_id = samples_store_id, samples = samples, distance_map = distance_map, repeat = config.repeat_training, cv_repeat = config.cv_hpo, print_out = True, debug = debug)
+            forest, scores, initial_training_input, slice_slices = trainForest.trainForest(config, initial_training_input, samples_store_id = samples_store_id, slice_slices = initial_training_input.slice_slices, samples = samples, distance_map = distance_map, repeat = config.repeat_training, cv_repeat = config.cv_hpo, print_out = True, debug = debug)
             hpo.threeDimHyperOptimization(config, initial_training_input, scores, slice_slices, samples = samples, samples_store_id = samples_store_id, distance_map = distance_map, debug = debug)
         else:
             if debug:
-                forest,scores,initial_training_input, slice_slices = trainForest.trainForest(config, initial_training_input, samples_store_id = samples_store_id, samples = samples, distance_map = distance_map, repeat = config.repeat_training, cv_repeat = config.cv_hpo, print_out = True, debug = debug)
+                forest,scores,initial_training_input, slice_slices = trainForest.trainForest(config, initial_training_input, samples_store_id = samples_store_id, slice_slices = initial_training_input.slice_slices, samples = samples, distance_map = distance_map, repeat = config.repeat_training, cv_repeat = config.cv_hpo, print_out = True, debug = debug)
                 scores.printOut()
             if config.verbosity >= 1:
                 print('Hyperparamter optimization skipped')
@@ -148,6 +156,7 @@ def learn(config, effectRegressor=None):
         if config.regression:
             mses = []
             pearsons = []
+            spears = []
         else:
             rocs = []
             accs = []
@@ -167,9 +176,13 @@ def learn(config, effectRegressor=None):
                 print(cv_counter, len(cv_slice.train_targets))
                 print('Testset length: ',len(cv_slice.test_targets))
 
-            cv_slice.printBalance(config)
+                cv_slice.printBalance(config)
 
-            forest, scores, cv_slice, slice_slices = trainForest.trainForest(config, cv_slice, samples = samples, samples_store_id = samples_store_id, distance_map = distance_map, print_out = True, debug = debug)
+            print_out = config.verbosity >= 2
+            forest, scores, cv_slice, slice_slices = trainForest.trainForest(config, cv_slice, samples = samples, samples_store_id = samples_store_id, slice_slices = cv_slice.slice_slices, distance_map = distance_map, print_out = print_out, debug = debug)
+
+            if forest is None:
+                continue
 
             forests[cv_counter] = forest
 
@@ -183,6 +196,17 @@ def learn(config, effectRegressor=None):
             if config.regression:
                 mses.append((scores.mse,len(cv_slice.test_targets)))
                 pearsons.append((scores.pearson_r,1))
+                spears.append(scores.corr)
+                prot_wise_spearmans, mean_spearman = util.calc_protein_wise_corr(cv_slice.test_targets, y_pred, cv_slice.test_sample_ids, stats.spearmanr)
+
+                if config.verbosity >= 1:
+                    print(f'Prot-wise RHO: {mean_spearman}')
+                    print(prot_wise_spearmans)
+                    for prot_id, spear_ in prot_wise_spearmans:
+                        if spear_ < 0.2:
+                            print(f'Low prot-wise rho: {prot_id} - {spear_}')
+
+
             else:
                 rocs.append((scores.roc,len(cv_slice.test_targets)))
                 accs.append((scores.acc,len(cv_slice.test_targets)))
@@ -217,8 +241,19 @@ def learn(config, effectRegressor=None):
                     append = True
 
         if config.regression:
-            util.printMean(mses,'MSE')
-            util.printMean(pearsons,"Pearson's correlation")
+            if config.verbosity >= 1:
+                util.printMean(mses,'MSE')
+                util.printMean(pearsons,"Pearson's correlation")
+            if len(accum_y_pred) > 0:
+                cum_spear, _ = stats.spearmanr(accum_y_pred, accum_true_vals)
+            else:
+                cum_spear = None
+            if len(spears) > 0:
+                mean_spear = sum(spears)/len(spears)
+            else:
+                mean_spear = None
+
+            out_value = (cum_spear, mean_spear)
         else:
             util.printMean(rocs,'auROC')
             util.printMean(accs,'ACC')
@@ -231,31 +266,34 @@ def learn(config, effectRegressor=None):
 
             #scatterplot(y_pred,test_feature_matrix,feature_names,test_targets,target_values,0.5,observed_value_threshold,scatterfile,feature_highlight='Class')
             #middle_value = (max(accum_y_pred) + min(accum_y_pred))/2.
-            y_pred_median = util.median(accum_y_pred)
-            tv_median = util.median(accum_true_vals)
-            util.scatterplot(accum_y_pred,cv_slice.get_test_feature_matrix(samples),cv_slice.feature_names,accum_true_vals,config.target_values,y_pred_median,tv_median,scatterfile)
-            util.hexbinplot(accum_y_pred,accum_true_vals,config.target_values,hexbinfile)
-            if config.crossValidation == 'LOPO':
-                labels = []
-                values = []
-                for lopo_id in lopo_scores:
-                    pearson_r = lopo_scores[lopo_id].pearson_r
-                    labels.append(str(lopo_id))
-                    values.append(pearson_r)
-                title = 'Pearson\'s correlation'
-                radarfile = '%s_radar.png' % (base_name)
-                util.radar(labels,values,title,radarfile)
+            if len(accum_y_pred) > 0:
+                y_pred_median = util.median(accum_y_pred)
+                tv_median = util.median(accum_true_vals)
+                util.scatterplot(accum_y_pred,cv_slice.get_test_feature_matrix(samples),cv_slice.feature_names,accum_true_vals,config.target_values,y_pred_median,tv_median,scatterfile)
+                util.hexbinplot(accum_y_pred,accum_true_vals,config.target_values,hexbinfile)
+                if config.crossValidation == 'LOPO':
+                    labels = []
+                    values = []
+                    for lopo_id in lopo_scores:
+                        pearson_r = lopo_scores[lopo_id].pearson_r
+                        labels.append(str(lopo_id))
+                        values.append(pearson_r)
+                    title = 'Pearson\'s correlation'
+                    radarfile = '%s_radar.png' % (base_name)
+                    util.radar(labels,values,title,radarfile)
     elif config.feature_selection == 'confusion' or config.feature_selection == 'confusion_and_regu' or config.feature_selection == 'sequential_confusion' or config.feature_selection == 'threeStaged' or config.feature_selection == 'sequential_confusion_and_regu' or config.feature_selection == 'threeStaged_listranking':
         if crossValidation == 'LOPO':
             cross_val_obj = sampleSpace.LOPO(samples, config)
         elif crossValidation == 'DataSAIL':
             cross_val_obj = sampleSpace.DataSAIL_cv(sampleSpace = samples, config = config)
+        elif crossValidation == 'specific':
+            cross_val_obj = sampleSpace.Given_split(samples, config)
         else:
             cross_val_obj = sampleSpace.X_fold_cv(samples, config, crossValidation)
     else:
         cross_val_obj = None
 
-    if config.outfolder != None:
+    if config.outfolder != None and not config.skip_final_model:
         base_name = f'{config.outfolder}/{config.dataset_name}'
         modelfile = f'{config.outfolder}/StructGuy_trained_on_{config.dataset_name}.dump'
 
@@ -269,9 +307,13 @@ def learn(config, effectRegressor=None):
             cv_file = '%s_full_cv_forests.dump' % (base_name)
             storeCV(forests, config, cross_val_obj, cv_file)
 
+    return out_value
 
 def evaluate_dataset(config):
     forest, extern_feature_names_list, impute_map, model_config = loadModel(config.path_to_model)
+
+    if config.verbosity >= 2:
+        print(f'{extern_feature_names_list[:5]}\n...\n{extern_feature_names_list[-5:]}')
 
     samples = featureGenerator.createTrainingSet(config, external_impute = impute_map, for_prediction=True)
 
@@ -443,7 +485,6 @@ def evaluate_dataset(config):
 
         return mean_spearman, combined_test_targets, combined_y_pred
     elif model_config.regression:
-        #print(test_targets[:100], y_pred[:100])
         int_targets = []
         for x in test_targets:
             if x == 'Benign':
@@ -456,7 +497,28 @@ def evaluate_dataset(config):
             print(f'Total roc_auc: {total_roc_auc}')
             print(f'Prot-wise mean roc_auc: {mean_roc_auc}')
 
+        header = 'Protein ID\tSAV\tPredicted effect value\n'
+        lines = [header]
+        if mm_y_pred is None:
+            combined_sample_id_list = sample_id_list
+            combined_y_pred = y_pred
+            combined_test_targets = test_targets
+
+        for pos, sample_id in enumerate(combined_sample_id_list):
+            pred_value = combined_y_pred[pos]
+            prot_id, aac = sample_id
+            words = [prot_id, aac, str(pred_value)]
+            
+            line = '\t'.join(words) + '\n'
+            lines.append(line)
+
+        predictions_file = f'{config.outfolder}/predictions.tsv'
+        f = open(predictions_file, 'w')
+        f.write(''.join(lines))
+        f.close()
+
         #write_protein_wise_pearsons(f'{config.outfolder}/protein_wise_results.tsv', prot_wise_roc_aucs, protein_info)
+        return mean_roc_auc, int_targets, y_pred
 
     else:
         acc = accuracy_score(test_targets, y_pred)
@@ -579,6 +641,10 @@ def buildFinalModel(samples, config, internal_cv = None, outfile = None, filtere
 
     print_out = config.verbosity >= 1
     forest, scores, full_slice, slice_slices = trainForest.trainForest(config, full_slice, samples = samples, distance_map = samples.geometric_distance_map, print_out = print_out ,skip_scoring = True)
+
+    if config.verbosity >= 1:
+        print('Full Slice Info after training:')
+        full_slice.printBalance(config)
 
     feat_importance_map = calcFeatureImportances(forest, samples, full_slice, config, print_them = print_out)
 

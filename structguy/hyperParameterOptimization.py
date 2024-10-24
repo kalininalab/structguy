@@ -143,14 +143,15 @@ def bayes_random_init(config, parameters, score_matrix, initial_cv_obj, best_sco
     if n_pre_samples is None:
         n_pre_samples = min([config.proc_n, 2**n_params])
 
-    #n_pre_samples = 1 #Just for testing
+    if debug:
+        n_pre_samples = 2 #Just for testing
 
     sample_size_threshold = config.gigs_of_ram * 3000
     n_of_samples = len(initial_cv_obj.slices[0].train_targets) + len(initial_cv_obj.slices[0].test_targets)
 
-    number_of_sub_jobs = len(initial_cv_obj.slices) * (len(initial_cv_obj.slices) -1)
+    number_of_sub_jobs = min([len(initial_cv_obj.slices) * (len(initial_cv_obj.slices) -1), 1])
 
-    if n_of_samples < sample_size_threshold:
+    if n_of_samples < sample_size_threshold and config.crossValidation == 'DataSAIL':
         para_random_init = True
     else:
         para_random_init = False
@@ -179,14 +180,18 @@ def bayes_random_init(config, parameters, score_matrix, initial_cv_obj, best_sco
         scores, cv_obj, slice_slices = get_scores(config, score_matrix, initial_cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, debug = debug, force_confusion = force_confusion)
         results = [(scores, init_params, cv_obj)]
 
+        if config.verbosity >= 1:
+            print(f'Objective score: {util.get_objective_score(config, scores, feature_penalty = config.feature_penalty)}, unpenalized: {scores.objective_value(config)}')
+
         store = ray.put((config, pack(cv_obj.serialize()), parameters, samples_store_id, slice_slices, force_confusion))
 
         print(f'after store init, samples is None: {samples is None}, max_packages: {max_packages}, package_size: {packagesize}')
 
         para_number = config.proc_n//max_packages
 
-        if para_number % number_of_sub_jobs != 0:
-            para_number = ((para_number//number_of_sub_jobs)+1)*number_of_sub_jobs
+        if number_of_sub_jobs > 0:
+            if para_number % number_of_sub_jobs != 0:
+                para_number = ((para_number//number_of_sub_jobs)+1)*number_of_sub_jobs
 
         # Get n_pre_samples amount of random points
         try:
@@ -235,7 +240,7 @@ def bayes_random_init(config, parameters, score_matrix, initial_cv_obj, best_sco
 
     return_cv_obj = initial_cv_obj
     for scores, params, cv_obj in results:
-        obj_sc = scores.objective_value(config)
+        obj_sc = util.get_objective_score(config, scores, feature_penalty = config.feature_penalty)
         if obj_sc is None or obj_sc != obj_sc:
             print('========= Warning: None or NaN objective score for:', param_names, params)
             scores = util.Scores(zero=True)
@@ -270,7 +275,7 @@ def bayes_random_init(config, parameters, score_matrix, initial_cv_obj, best_sco
             scores.printOut()
             print('====================================================')
         elif config.verbosity >= 3:
-            print(f'No new optimun ({util.get_objective_score(config, best_scores)}): {util.get_objective_score(config, scores)}')
+            print(f'No new optimun ({util.get_objective_score(config, best_scores, feature_penalty = config.feature_penalty)}): {util.get_objective_score(config, scores, feature_penalty = config.feature_penalty)}')
 
 
         if fix_cat:
@@ -320,7 +325,7 @@ def bayes_random_init(config, parameters, score_matrix, initial_cv_obj, best_sco
 # Taken from https://github.com/thuijskens/bayesian-optimization
 # Changed to match the specific problem
 def bayesian_optimisation(n_iters, config, parameters, score_matrix, cv_obj, best_scores, distance_map, slice_slices, samples = None, samples_store_id = None, n_pre_samples=5,
-                          gp_params=None, random_search=False, alpha=1e-5, epsilon=1e-7, debug = False, force_confusion = False):
+                          gp_params=None, random_search=False, alpha=1e-6, epsilon=1e-8, debug = False, force_confusion = False):
     """ bayesian_optimisation
     Uses Gaussian Processes to optimise the loss function `sample_loss`.
     Arguments:
@@ -360,7 +365,7 @@ def bayesian_optimisation(n_iters, config, parameters, score_matrix, cv_obj, bes
     scaled_bounds = np.array([[0.,1.]]*len(bounds))
 
     if config.verbosity >= 2:
-        print(f'In bayesian_optimization, scaled_bounds: {scaled_bounds}')
+        print(f'In bayesian_optimization, bounds: {bounds}')
 
     scaler = MinMaxScaler()
     scaler.fit(min_max_samples)
@@ -382,11 +387,16 @@ def bayesian_optimisation(n_iters, config, parameters, score_matrix, cv_obj, bes
 
     if n_iters is None:
         n_iters = 2**(n_params+1)
+    if debug:
+        n_iters = 4
 
     return_cv_obj = cv_obj
     return_slice_slices = slice_slices
 
     count_dups = 0
+
+    if config.verbosity >= 1:
+        print(f'Number of bayesian optimization iterations: {n_iters}')
 
     for n in range(n_iters):
         if config.verbosity >= 2:
@@ -415,19 +425,20 @@ def bayesian_optimisation(n_iters, config, parameters, score_matrix, cv_obj, bes
             print(f'Bayesian optimisation loop part 2: {tl2-tl1}')
 
         # Duplicates will break the GP. In case of a duplicate, we will randomly sample a next query point.
-        if np.any(np.abs(next_sample - xp) <= epsilon):
+        if np.any(np.abs(next_sample - scaled_xp) <= epsilon):
+            if config.verbosity >= 2:
+                print(f'Sampled a duplicate: {next_sample} {bounds}')
             next_sample = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
             count_dups += 1
-            if config.verbosity >= 2:
-                print('Sampled a duplicate')
         else:
             next_sample = scaler.inverse_transform([next_sample])[0]
 
-        if count_dups == 2:
-            break
-
         if config.verbosity >= 1:
             print(f'Try out next sampled HP: {next_sample}')
+
+        if count_dups == 2:
+            print('Break bayesian optimization, due to double dups')
+            break
 
         if config.verbosity >= 2:
             tl3 = time.time()
@@ -441,21 +452,21 @@ def bayesian_optimisation(n_iters, config, parameters, score_matrix, cv_obj, bes
             tl4 = time.time()
             print(f'Bayesian optimisation loop part 4: {tl4-tl3}')
 
-        scores, cv_obj, slice_slices = get_scores(config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, force_confusion = force_confusion)
+        scores, cv_obj, slice_slices = get_scores(config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, force_confusion = force_confusion, debug = debug)
 
         if config.verbosity >= 2:
             tl5 = time.time()
             print(f'Bayesian optimisation loop part 5: {tl5-tl4}')
 
-        cv_score = scores.objective_value(config)
+        cv_score = util.get_objective_score(config, scores, feature_penalty = config.feature_penalty)
 
         if config.verbosity >= 2:
             tl6 = time.time()
             print(f'Bayesian optimisation loop part 6: {tl6-tl5}')
 
-        print('Bayesian optimization, iteration:',n)
-        if config.verbosity >= 3:
-            print(f'Objective score: {cv_score}')
+        if config.verbosity >= 1:
+            print('Bayesian optimization, iteration:',n)
+            print(f'Objective score: {cv_score}, unpenalized: {scores.objective_value(config)}')
         #print('===========================\nBayesian optimization, iteration:',n,'\n===\n')
         #config.printParameter()
         #scores.printOut()
@@ -478,7 +489,7 @@ def bayesian_optimisation(n_iters, config, parameters, score_matrix, cv_obj, bes
             return_cv_obj = cv_obj
             return_slice_slices = slice_slices
         elif config.verbosity >= 3:
-            print(f'No new optimun ({util.get_objective_score(config, best_scores)}): {util.get_objective_score(config, scores)}')
+            print(f'No new optimun ({util.get_objective_score(config, best_scores, feature_penalty = config.feature_penalty)}): {util.get_objective_score(config, scores, feature_penalty = config.feature_penalty)}')
 
         if cv_score is None or cv_score != cv_score:
             print(' === cv_score is None or Nan:',next_sample)
@@ -569,7 +580,7 @@ def addToScoreMatrix(scores_obj, config, score_matrix):
     score_matrix[score_tuple] = scores_obj
     return
 
-def twoDim(parameter_1, parameter_2, best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = None, samples_store_id = None):
+def twoDim(parameter_1, parameter_2, best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = None, samples_store_id = None, debug = False):
     cat_count = 0
     for p_type in [parameter_1.param_type, parameter_2.param_type]:
         if p_type == 'categorical':
@@ -580,13 +591,13 @@ def twoDim(parameter_1, parameter_2, best_scores, config, score_matrix, cv_obj, 
 
     if cat_count == 1:
         if parameter_1.param_type == 'categorical':
-            return bayesianAndCat(parameter_1, [parameter_2], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id)
+            return bayesianAndCat(parameter_1, [parameter_2], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, debug = debug)
         elif parameter_2.param_type == 'categorical':
-            return bayesianAndCat(parameter_2, [parameter_1], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id)
+            return bayesianAndCat(parameter_2, [parameter_1], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, debug = debug)
 
-    return bayesian_optimisation(None, config, [parameter_1, parameter_2], score_matrix, cv_obj, best_scores, distance_map, slice_slices, n_pre_samples = None, samples = samples, samples_store_id = samples_store_id)
+    return bayesian_optimisation(None, config, [parameter_1, parameter_2], score_matrix, cv_obj, best_scores, distance_map, slice_slices, n_pre_samples = None, samples = samples, samples_store_id = samples_store_id, debug = debug)
 
-def threeDim(parameter_1, parameter_2, parameter_3, best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = None, samples_store_id = None, force_confusion = False):
+def threeDim(parameter_1, parameter_2, parameter_3, best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = None, samples_store_id = None, force_confusion = False, debug = False):
     cat_count = 0
     for p_type in [parameter_1.param_type, parameter_2.param_type, parameter_3.param_type]:
         if p_type == 'categorical':
@@ -600,15 +611,15 @@ def threeDim(parameter_1, parameter_2, parameter_3, best_scores, config, score_m
 
     if cat_count == 1:
         if parameter_1.param_type == 'categorical':
-            return bayesianAndCat(parameter_1, [parameter_2, parameter_3], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, force_confusion = force_confusion)
+            return bayesianAndCat(parameter_1, [parameter_2, parameter_3], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, force_confusion = force_confusion, debug = debug)
         elif parameter_2.param_type == 'categorical':
-            return bayesianAndCat(parameter_2, [parameter_1, parameter_3], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, force_confusion = force_confusion)
+            return bayesianAndCat(parameter_2, [parameter_1, parameter_3], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, force_confusion = force_confusion, debug = debug)
         elif parameter_3.param_type == 'categorical':
-            return bayesianAndCat(parameter_3, [parameter_1, parameter_2], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, force_confusion = force_confusion)
+            return bayesianAndCat(parameter_3, [parameter_1, parameter_2], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, force_confusion = force_confusion, debug = debug)
 
-    return bayesian_optimisation(None, config, [parameter_1, parameter_2, parameter_3], score_matrix, cv_obj, best_scores, distance_map, slice_slices, n_pre_samples = None, samples = samples, samples_store_id = samples_store_id, force_confusion = force_confusion)
+    return bayesian_optimisation(None, config, [parameter_1, parameter_2, parameter_3], score_matrix, cv_obj, best_scores, distance_map, slice_slices, n_pre_samples = None, samples = samples, samples_store_id = samples_store_id, force_confusion = force_confusion, debug = debug)
 
-def bayesianAndCat(parameter_1, parameters, best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = None, samples_store_id = None, force_confusion = False):
+def bayesianAndCat(parameter_1, parameters, best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = None, debug = False, samples_store_id = None, force_confusion = False):
     print('bayesian optimization and Cat', parameter_1.name)
 
     new_optimimum = False
@@ -621,7 +632,7 @@ def bayesianAndCat(parameter_1, parameters, best_scores, config, score_matrix, c
     for parameter_value_1 in parameter_1.possible_values:
         parameter_1.setValue(config,parameter_value_1)
 
-        bay_optimimum, scores, cv_obj, slice_slices = bayesian_optimisation(None, config, parameters, score_matrix, cv_obj, best_scores, distance_map, slice_slices, n_pre_samples = None, samples = samples, samples_store_id = samples_store_id, force_confusion = force_confusion)
+        bay_optimimum, scores, cv_obj, slice_slices = bayesian_optimisation(None, config, parameters, score_matrix, cv_obj, best_scores, distance_map, slice_slices, n_pre_samples = None, samples = samples, samples_store_id = samples_store_id, force_confusion = force_confusion, debug = debug)
 
         if util.objective_function_criterium(config, scores, best_scores):
             best_scores = scores
@@ -744,16 +755,18 @@ def initParameters(config, do_feat_selection = True, do_forest_param = True, do_
         parameters['tree_depth'] = Parameter('tree_depth','integer',half_step_limits = config.tree_depth_half_step)
         parameters['num_of_trees'] = Parameter('num_of_trees','integer',half_step_limits = config.forest_size_half_step)
         parameters['min_impurity_decrease_exp'] = Parameter('min_impurity_decrease_exp','real',half_step_limits = config.min_impurity_decrease_exp_half_step)
-        
+        parameters['max_sample_parameter'] = Parameter('max_sample_parameter','real',half_step_limits = config.max_sample_half_step)
+
         if config.forest_type == 'random' or 'gradient_boost':
             parameters['min_sample_split'] = Parameter('min_sample_split','integer',half_step_limits = config.min_sample_split_half_step)
             parameters['max_feature_cont_parameter'] = Parameter('max_feature_cont_parameter','real',half_step_limits = config.max_feature_cont_parameter_bounds)
             parameters['tree_min_leaf_samples'] = Parameter('tree_min_leaf_samples','integer',half_step_limits = config.min_sample_leaf_half_step)
             parameters['ccp_alpha_exp'] = Parameter('ccp_alpha_exp','real',half_step_limits = config.ccp_alpha_exp_half_step)
-        if config.forest_type == 'random':
-            parameters['max_sample_parameter'] = Parameter('max_sample_parameter','real',half_step_limits = config.max_sample_half_step)
-        elif config.forest_type == 'gradient_boost' or config.forest_type == 'xgboost':
+        if config.forest_type == 'gradient_boost' or config.forest_type == 'xgboost':
             parameters['learning_rate'] = Parameter('learning_rate', 'real', half_step_limits = [0.0, 2.0])
+        if config.forest_type == 'xgboost':
+            parameters['early_stopping'] = Parameter('early_stopping', 'integer', half_step_limits = [1, 1000])
+            parameters['min_child_weight'] = Parameter('min_child_weight', 'real', half_step_limits = [0, 100])
         
         if not config.regression:
             parameters['criterion'] = Parameter('criterion','categorical',possible_values = config.criteria,classification_specific = True)
@@ -787,35 +800,52 @@ def threeDimHyperOptimization(config, cv_obj, best_scores, slice_slices, samples
         if n > 1:
             cv_obj.reset_confusion_maps()
 
-        for param in [fss_parameters]:
-            param_names = list(param.keys())
-            random.shuffle(param_names)
+        if not debug:
+            for param in [fss_parameters]:
+                param_names = list(param.keys())
+                random.shuffle(param_names)
 
-            while len(param_names) > 2:
-                param_trio = param_names.pop(), param_names.pop(), param_names.pop()
-                new_opti, best_scores, cv_obj, slice_slices = threeDim(param[param_trio[0]], param[param_trio[1]], param[param_trio[2]], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, force_confusion = True)
+                while len(param_names) > 2:
+                    param_trio = param_names.pop(), param_names.pop(), param_names.pop()
+                    new_opti, best_scores, cv_obj, slice_slices = threeDim(param[param_trio[0]], param[param_trio[1]], param[param_trio[2]], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, force_confusion = True, debug = debug)
+                    if new_opti:
+                        converged = False
+
+            cv_obj.reset_confusion_maps()
+
+            if len(fs_parameters) > 0:
+
+                new_opti, best_scores, cv_obj, slice_slices = bayesian_optimisation(None, config, list(fs_parameters.values()), score_matrix, cv_obj, best_scores, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, n_pre_samples = None, debug = debug)
                 if new_opti:
                     converged = False
-
-        new_opti, best_scores, cv_obj, slice_slices = bayesian_optimisation(None, config, list(fs_parameters.values()), score_matrix, cv_obj, best_scores, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, n_pre_samples = None, debug = debug)
-        if new_opti:
-            converged = False
             
         for param in [parameters]:
             param_names = list(param.keys())
             random.shuffle(param_names)
 
-            while len(param_names) > 1:
-                param_trio = param_names.pop(), param_names.pop()#, 'confusion_rank_threshold'#param_names.pop()
-                new_opti, best_scores, cv_obj, slice_slices = threeDim(param[param_trio[0]], param[param_trio[1]], fs_parameters['confusion_rank_threshold'], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id)
-                if new_opti:
-                    converged = False
 
-            while len(param_names) == 1:
-                new_opti, best_scores, cv_obj, slice_slices = twoDim(param_names.pop(), fs_parameters['confusion_rank_threshold'], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id)
-                if new_opti:
-                    converged = False
+            if 'confusion_rank_threshold' in fs_parameters:
+                while len(param_names) > 1:
+                    param_trio = param_names.pop(), param_names.pop()#, 'confusion_rank_threshold'#param_names.pop()
+                    new_opti, best_scores, cv_obj, slice_slices = threeDim(param[param_trio[0]], param[param_trio[1]], fs_parameters['confusion_rank_threshold'], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, debug = debug)
+                    if new_opti:
+                        converged = False
 
+                while len(param_names) == 1:
+                    new_opti, best_scores, cv_obj, slice_slices = twoDim(param[param_names.pop()], fs_parameters['confusion_rank_threshold'], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, debug = debug)
+                    if new_opti:
+                        converged = False
+            else:
+                while len(param_names) > 2:
+                    param_trio = param_names.pop(), param_names.pop(), param_names.pop()
+                    new_opti, best_scores, cv_obj, slice_slices = threeDim(param[param_trio[0]], param[param_trio[1]], param[param_trio[2]], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, debug = debug)
+                    if new_opti:
+                        converged = False 
+
+                if len(param_names) == 2:
+                    new_opti, best_scores, cv_obj, slice_slices = twoDim(param[param_names.pop()], param[param_names.pop()], best_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples = samples, samples_store_id = samples_store_id, debug = debug)
+                    if new_opti:
+                        converged = False
 
         print('Iteration: ',n)
         config.printParameter()
@@ -823,7 +853,7 @@ def threeDimHyperOptimization(config, cv_obj, best_scores, slice_slices, samples
         if best_scores is not None:
             best_scores.printOut()
         n += 1
-        slice_slices = None
+        #slice_slices = None
  
     cv_obj.reset_confusion_maps()
     return

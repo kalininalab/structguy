@@ -71,7 +71,7 @@ def lookup(config, prot_id, ref_db_ids=['ref50','ref90'], gpw_ref_db_ids=['ref50
             if os.path.isfile(psic_name):
                 os.remove(psic_name)
             try:
-                os.system("gzip %s" % psic_name[:-3])
+                os.system(f'gzip "{psic_name[:-3]}"')
             except:
                 pass
 
@@ -106,7 +106,7 @@ def lookup(config, prot_id, ref_db_ids=['ref50','ref90'], gpw_ref_db_ids=['ref50
                 if debug >= 1:
                     print('removed old psic file: ',psic_name)
             try:
-                os.system("gzip %s" % psic_name[:-3])
+                os.system(f'gzip "{psic_name[:-3]}"')
             except:
                 pass
 
@@ -484,7 +484,7 @@ def saveMSA(config, msa, prot_id, ref_db_id, pdb_tuple):
 
     if os.path.isfile('%s.gz' % filename):
         os.remove('%s.gz' % filename)
-    os.system("gzip %s" % filename)
+    os.system(f'gzip "{filename}"')
 
     return f'{filename}.gz'
 
@@ -502,7 +502,7 @@ def saveGpw(config, gpw, prot_id, ref_db_id, pdb_tuple):
 
     if os.path.isfile('%s.gz' % filename):
         os.remove('%s.gz' % filename)
-    os.system("gzip %s" % filename)
+    os.system(f'gzip "{filename}"')
 
     return f'{filename}.gz'
 
@@ -754,7 +754,7 @@ def getMSA(config, prot_id, sequence_maps=None, sequence=None, ref_db_ids=['ref5
             if os.path.isfile(psic_name):
                 os.remove(psic_name)
             try:
-                os.system("gzip %s" % psic_name[:-3])
+                os.system(f'gzip "{psic_name[:-3]}"')
             except:
                 pass
 
@@ -792,7 +792,7 @@ def getMSA(config, prot_id, sequence_maps=None, sequence=None, ref_db_ids=['ref5
             if os.path.isfile(psic_name):
                 os.remove(psic_name)
             try:
-                os.system("gzip %s" % psic_name[:-3])
+                os.system(f'gzip "{psic_name[:-3]}"')
             except:
                 pass
 

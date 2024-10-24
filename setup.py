@@ -44,6 +44,7 @@ setup(
 
     package_data = {
         "": [
+            'resources/search_db_settings.conf',
             'resources/psic/psic.c',
             'resources/psic/Makefile',
             'resources/psic/Blosum62.txt',
