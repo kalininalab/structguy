@@ -1,9 +1,10 @@
 # StructGuy
 ## Installation
+>[!WARNING]
+>StructGuy is designed for the application on high performance computing machines. The installation includes the download of UniRef50 and UniRef90 and the calculation of their search index tables with MMseqs2 requires **1 Tb of disc space and 800 Gb of memory**. StructGuy can still be installed on regular computers that can provide the disc space, however we do not suggest to run a full model training.  
 
 ### Step 0:
-StructGuy needs to be installed on top of [StructMAn](https://github.com/kalininalab/StructMAn) and can only be installed on a dedicated high performance computing machine. The installation includes the download of UniRef50 and UniRef90 and the calculation of their search index tables with MMseqs2 requires **1 Tb of disc space and 800 Gb of memory**.
-
+StructGuy needs to be installed on top of [StructMAn](https://github.com/kalininalab/StructMAn). 
 ### Step 1:
 Clone the repository:
 ```
@@ -35,5 +36,26 @@ structguy generate_features -i [path to structguy_project.conf] -n [number of th
 ```
 
 ### Model Training
+>[!TIP]
+>Easiest way to use StructGuy is by downloading the model we trained in (add_link_to_publication_later) from [Hugging Face](https://huggingface.co/AGress/StructGuy/blob/main/StructGuy_trained_on_goldstandard.dump)
+
+#### Without Hyperparameter Optimization
+
+```
+structguy build_model -i [path to name_of_dataset.structguy_project.conf] --nocv --nohpo -n [number of threads]
+```
+
+#### With Hyperparameter Optimization
+
+>[!WARNING]
+>This will consume great amounts of computing resources and time.
+
+```
+structguy build_model -i [path to name_of_dataset.structguy_project.conf] -n [number of threads]
+```
 
 ### Applying a Model
+
+```
+structguy predict -i [path to name_of_dataset.structguy_project.conf] -m [path to model.dump file] -n [number of threads]
+```
