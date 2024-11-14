@@ -32,7 +32,7 @@ Go into the cloned repository and call the installation script:
 ## Usage
 
 ### Feature Generation
-Whether to train on or to predict a dataset, a respective feature table has to be calculated. The first step to do so is the calculation of structural features by applying the [StructMAn](https://github.com/kalininalab/StructMAn) annotation pipeline. Therefor a dataset needs to be prepared to be processable by StructMAn, which is explained in this tutorial (add link).
+Whether to train on or to predict a dataset, a respective feature table has to be calculated. The first step to do so is the calculation of structural features by applying the [StructMAn](https://github.com/kalininalab/StructMAn) annotation pipeline. Therefor a dataset needs to be prepared to be processable by StructMAn, which is explained in this [tutorial](https://structman.readthedocs.io/en/main/input_formats.html#inputs-dedicated-for-further-procession-with-structguy).
 #### Calling StructMAn:
 ```
 structman -i [path to dataset] -n [number of threads]
