@@ -203,7 +203,7 @@ def predict_main(manual_args = None):
 def generate_info():
     config, test_config = parse_arguments()
 
-    forest, extern_feature_names_list, model_config = learn.loadModel(config.path_to_model)
+    forest, extern_feature_names_list, impute_map, model_config = learn.loadModel(config.path_to_model)
     n_of_trees, n_of_nodes = featureAnalysis.get_base_stats(forest)
 
     print(f'Random Forest model consits of {n_of_trees} trees and a total of {n_of_nodes} Nodes')
