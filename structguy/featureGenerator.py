@@ -176,9 +176,9 @@ def parseLines(config, left, right, features, lines, primary_protein_id_col, amo
     return output
 
 
-def parse_structural_features(samples, config, non_feature_cols = [0,1,2,4,7,19], primary_protein_id_col = 1, aac_col_s = [3,4,5], tags_col = 7, amount_of_struct_col = 19, effect_col = None):
+def parse_structural_features(samples, config, non_feature_cols = [0,1,2,4,7,19], primary_protein_id_col = 1, aac_col_s = [3,4,5], tags_col = 7, amount_of_struct_col = 19, effect_col = None, filter_none_tv = False):
     file_path = config.path_structural_feature_table
-    parse_feature_table(file_path, samples, config,
+    parse_feature_table(file_path, samples, config, filter_none_tv,
             non_feature_cols = non_feature_cols, primary_protein_id_col = primary_protein_id_col, aac_col_s = aac_col_s,
             tags_col = tags_col, amount_of_struct_col = amount_of_struct_col, effect_col = effect_col
             )
