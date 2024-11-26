@@ -395,15 +395,16 @@ class SampleSpace:
         f.write('\n'.join(outlines))
         f.close()
 
-        base_name,file_type = outfile.rsplit('.',1)
-        if not os.path.isdir(base_name):
-            os.mkdir(base_name)
+        if len(class_out_lines) > 0:
+            base_name,file_type = outfile.rsplit('.',1)
+            if not os.path.isdir(base_name):
+                os.mkdir(base_name)
 
-        for class_name in class_out_lines:
-            class_outfile = '%s_%s.%s' % (base_name,class_name,file_type)
-            f = open(class_outfile,'w')
-            f.write('\n'.join(class_out_lines[class_name]))
-            f.close()
+            for class_name in class_out_lines:
+                class_outfile = '%s_%s.%s' % (base_name,class_name,file_type)
+                f = open(class_outfile,'w')
+                f.write('\n'.join(class_out_lines[class_name]))
+                f.close()
 
     def transform_matrix_dict(self):
         fixed_feat_names = []

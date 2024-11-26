@@ -115,7 +115,7 @@ def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False):
 
     initFeatures(config, samples)
 
-    n = 0
+
     u_acs = set([])
     pdb_ids = set()
 
@@ -265,6 +265,8 @@ def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False):
 
     optimal_cost = total_cost / n_of_processes
 
+    n = 0
+
     chunks = []
     current_chunk = 0
     for prot_id, cost in prots_sorted_by_cost:
@@ -286,6 +288,7 @@ def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False):
                     if prot_id in sequence_maps[db]:
                         for hit_id in sequence_maps[db][prot_id]:
                             chunks[current_chunk][3][prot_id][db][hit_id] = sequence_maps[db][prot_id][hit_id]
+                            n += 1
                 assigned = True
             current_chunk += 1
             if current_chunk == n_of_processes:
@@ -298,6 +301,7 @@ def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False):
 
     if config.verbosity >= 2:
         print(f'Going into ray_paraMSA, msa_dbs: {msa_dbs}, gpw_dbs: {gpw_dbs}, optimal cost: {optimal_cost}, number of chunks: {len(chunks)}')
+
 
     ray_process_ids = []
     for chunk in chunks:
