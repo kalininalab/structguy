@@ -23,6 +23,9 @@ Go into the cloned repository and call the installation script:
 * `-s` Path to download the search tables, **needs to provide 1 Tb of disc space!**
 * `-v` Activates verbose Output
 
+>[!WARNING]
+>**You need to be in conda base environment to call the install.sh script.**
+
 ```
 ./install.sh -e [name of StructMAn environment] -s [path to storage folder] -v
 ```
