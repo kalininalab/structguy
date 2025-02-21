@@ -30,7 +30,9 @@ def parse_arguments(argument_start = 2, manual_args = None):
                 'test_config=',
                 'support_features=',
                 'splits=',
-                'skip_final_model'
+                'skip_final_model',
+                'trace_decisions',
+                'filter_syn'
             ]
             opts, args = getopt.getopt(argv, "i:n:m:d", long_paras)
 
@@ -61,6 +63,8 @@ def parse_arguments(argument_start = 2, manual_args = None):
     path_to_splits_file = None
     path_to_support_features = None
     skip_final_model = None
+    trace_decisions = False
+    filter_syn = False
 
     for opt, arg in opts:
         if opt == '-i':
@@ -117,6 +121,12 @@ def parse_arguments(argument_start = 2, manual_args = None):
         if opt == '--skip_final_model':
             skip_final_model = True
 
+        if opt == '--trace_decisions':
+            trace_decisions = True
+
+        if opt == '--filter_syn':
+            filter_syn = True
+
     if path_to_model is not None:
         if path_to_model.count('/') > 0:
             model_name = path_to_model.rsplit("/",1)[1].rsplit('.',1)[0]
@@ -136,11 +146,14 @@ def parse_arguments(argument_start = 2, manual_args = None):
     config.overwrite = overwrite
     
     config.debug_mode = debug
+    config.filter_synonymous = filter_syn
 
     config.path_to_splits_file = path_to_splits_file
     if path_to_splits_file is not None:
         config.crossValidation = 'specific'
     config.path_to_support_features = path_to_support_features
+
+    config.trace_decisions = trace_decisions
 
     if force_lopo:
         config.crossValidation = 'LOPO'

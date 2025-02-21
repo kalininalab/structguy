@@ -1,4 +1,3 @@
-from ossaudiodev import SNDCTL_SEQ_GETINCOUNT
 import sys
 import traceback
 import random

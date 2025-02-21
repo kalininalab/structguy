@@ -39,7 +39,7 @@ def parseLines_remote_wrapper(store, left, right):
 def parseLines(config, left, right, features, lines, primary_protein_id_col, amount_of_struct_col, effect_col, aac_col_s, tags_col, non_feature_cols, feature_names):
     output = []
     if config.verbosity >= 1:
-        print(f'parseLines: non_feature_cols: {non_feature_cols}, primary_protein_id_col: {primary_protein_id_col}, aac_col_s: {aac_col_s}, effect_col: {effect_col}, tags_col: {tags_col}, config.target_values: {config.target_values}')
+        print(f'parseLines: non_feature_cols: {non_feature_cols}, primary_protein_id_col: {primary_protein_id_col}, aac_col_s: {aac_col_s}, effect_col: {effect_col}, tags_col: {tags_col}, config.target_values: {config.target_values}, lines: {left}-{right} of {len(lines)}')
 
     max_print = 10
     print_n = 0
@@ -69,6 +69,11 @@ def parseLines(config, left, right, features, lines, primary_protein_id_col, amo
             aac = words[aac_col_s[0]]
         else:
             aac = f'{words[aac_col_s[0]]}{words[aac_col_s[1]]}{words[aac_col_s[2]]}'
+
+        if config.filter_synonymous:
+            if aac[0] == aac[-1]:
+                continue
+
         tags = words[tags_col]
         try:
             amount_of_structures = int(words[amount_of_struct_col])
@@ -115,7 +120,7 @@ def parseLines(config, left, right, features, lines, primary_protein_id_col, amo
                 target_value = sum(target_values)/len(target_values)
         else:
             if effect_col is not None:
-                if words[effect_col] == 'None':
+                if words[effect_col] == 'None' and config.target_values is not None:
                     if config.verbosity >= 4:
                         print(f'Sample rejected: effect is None, while effect_col is not')
 
@@ -124,7 +129,10 @@ def parseLines(config, left, right, features, lines, primary_protein_id_col, amo
                 if not config.regression:
                     target_value = words[effect_col]
                 else:
-                    target_value = float(words[effect_col])
+                    try:
+                        target_value = float(words[effect_col])
+                    except:
+                        target_value = None
             else:
                 target_value = None
                 for tag in tags.split(','):
@@ -186,7 +194,7 @@ def parse_structural_features(samples, config, non_feature_cols = [0,1,2,4,7,19]
 
 def parse_feature_table(file_path, samples, config, filter_none_tv, non_feature_cols = [0,1,2,3,4], primary_protein_id_col = 0, aac_col_s = [1], tags_col = 3, amount_of_struct_col = 4, effect_col = 2):
     if config.verbosity >= 1:
-        print(f'Reading feature file: {file_path}, non_feature_cols: {non_feature_cols}, primary_protein_id_col: {primary_protein_id_col}, aac_col_s: {aac_col_s}, effect_col: {effect_col}, tags_col: {tags_col}')
+        print(f'Reading feature file: {file_path}, non_feature_cols: {non_feature_cols}, primary_protein_id_col: {primary_protein_id_col}, aac_col_s: {aac_col_s}, effect_col: {effect_col}, tags_col: {tags_col}, filter none TV: {filter_none_tv}')
 
     f = open(file_path,'r')
     lines = f.read().split('\n')
@@ -225,7 +233,7 @@ def parse_feature_table(file_path, samples, config, filter_none_tv, non_feature_
 
     if config.verbosity >= 1:
         t5 = time.time()
-        print(f'parse_feature_table, part 5: {t5-t2}')
+        print(f'parse_feature_table, part 5: {t5-t2}, {len(output)}')
 
     n_f = 0
     n_s = 0

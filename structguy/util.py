@@ -63,6 +63,7 @@ class Config:
         mem = virtual_memory()
         self.gigs_of_ram = mem.total / 1024 / 1024 / 1024
         self.errorlog = Errorlog()
+        self.python_env_expanded_for_ray = False
 
         self.overwrite = False
         self.dataset_name = ''
@@ -158,6 +159,7 @@ class Config:
         self.class_labels = None
         self.binary_thresh = 0.5
         self.protein_filter = set([])
+        self.filter_synonymous = False
 
         self.print_scores_greater_than = 0.0005
 

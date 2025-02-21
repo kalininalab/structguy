@@ -42,7 +42,7 @@ fi
 
 
 #Check if conda environment already exits, create it if not
-env_list_result=$(conda env list | grep "$env_name")
+env_list_result=$(conda env list | grep -w "$env_name")
 if [ -z "$env_list_result" ]
 then
     echo "Conda environment with name $env_name not in current environment list, please provide a valid environment including a StructMAn installation"
@@ -86,6 +86,8 @@ fi
 
 #install dependencies
 {
+    mamba install -y -c conda-forge scip==9.0.0
+    mamba install -y -c conda-forge numpy==1.26.4    
     echo "Installing package DataSAIL ..."
     mamba install -y -c conda-forge -c kalininalab -c bioconda -c mosek datasail==0.2.1
     pip install grakel

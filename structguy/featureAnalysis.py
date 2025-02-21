@@ -96,10 +96,19 @@ def calculate_tree_weights(store, chunk):
     for sample_id, pred_x, feat_vec in chunk:
         weight_vector = []
         tree_preds = []
+        errs = []
         for tree in forest.estimators_:
             tree_pred = tree.predict([feat_vec])[0]
             tree_preds.append(tree_pred)
-            weight = max([0, abs(pred_x - tree_pred)])
+            errs.append(abs(pred_x - tree_pred))
+
+        if len(errs) > 0:
+            mean_err = sum(errs)/len(errs)
+        else:
+            mean_err = 0
+
+        for err in errs:
+            weight = mean_err - err
             weight_vector.append(weight)
 
         pred_std = statistics.stdev(tree_preds)
@@ -132,6 +141,9 @@ def explain_decisions(config, forest, prediction_vector, feat_vecs, feature_name
                 chunk_process_ids.append(calculate_tree_weights.remote(store, chunk))
                 chunk = []
                 continue
+
+    if len(chunk) > 0:
+        chunk_process_ids.append(calculate_tree_weights.remote(store, chunk))
 
     para_results = ray.get(chunk_process_ids)
 
@@ -180,7 +192,7 @@ def explain_decisions(config, forest, prediction_vector, feat_vecs, feature_name
                     threshs = threshold_map[feat_name]
                     if feat_name not in weighted_feat_threshs[sample_id]:
                         weighted_feat_threshs[sample_id][feat_name] = [0, []]
-                    weighted_feat_threshs[sample_id][feat_name][0] += weight*len(threshs)
+                    weighted_feat_threshs[sample_id][feat_name][0] += weight
                     weighted_feat_threshs[sample_id][feat_name][1] += threshs
 
     feat_name_backmap = {}
@@ -198,17 +210,18 @@ def explain_decisions(config, forest, prediction_vector, feat_vecs, feature_name
             total_weight, all_threshs = weighted_feat_thresh_map[feat_name]
             l = None
             r = None
-            for thresh in all_threshs:
-                if thresh <= feat_value:
-                    if l is None:
-                        l = thresh
-                    elif thresh > l:
-                        l = thresh
-                else:
-                    if r is None:
-                        r = thresh
-                    elif thresh < r:
-                        r = thresh
+            if feat_value is not None:
+                for thresh in all_threshs:
+                    if thresh <= feat_value:
+                        if l is None:
+                            l = thresh
+                        elif thresh > l:
+                            l = thresh
+                    else:
+                        if r is None:
+                            r = thresh
+                        elif thresh < r:
+                            r = thresh
             processed_feat_thresh_vector.append((feat_name, total_weight, l, r))
         processed_feat_thresh_vector.sort(key=lambda x:x[1],reverse=True)
         decisions.append(processed_feat_thresh_vector)

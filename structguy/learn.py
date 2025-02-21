@@ -354,6 +354,11 @@ def evaluate_dataset(config):
                 new_test_targets.append(true_value)
                 new_sample_id_list.append(sample_id)
                 new_y_pred.append(pred_value)
+            elif config.target_values is None:
+                new_sample_id_list.append(sample_id)
+                new_y_pred.append(pred_value)
+                combined_sample_id_list.append(sample_id)
+                combined_y_pred.append(pred_value)
 
         for (prot_id, aacs, effect) in multi_savs:
             individual_effect_preds = []
@@ -379,11 +384,14 @@ def evaluate_dataset(config):
     protein_info = {}
     protein_wise_results = {}
     for pos, sample_id in enumerate(sample_id_list):
-        true_value = test_targets[pos]
+        if config.target_values is not None:
+            true_value = test_targets[pos]
 
-        if true_value is None:
-            print(f'Ground truth is None for: {sample_id}')
-            sys.exit()
+            if true_value is None:
+                print(f'Ground truth is None for: {sample_id}')
+                sys.exit()
+        else:
+            true_value = None
 
         pred_value = y_pred[pos]
 
@@ -404,17 +412,29 @@ def evaluate_dataset(config):
         protein_wise_results[prot_id].add_result(aac, true_value, pred_value)
 
     if config.regression:
-        r2 = r2_score(test_targets,y_pred)
-        mse = mean_squared_error(test_targets,y_pred)
-        corr,p_value = stats.spearmanr(test_targets,y_pred)
+        if config.target_values is not None:
+            r2 = r2_score(test_targets,y_pred)
+            mse = mean_squared_error(test_targets,y_pred)
+            corr,p_value = stats.spearmanr(test_targets,y_pred)
+        else:
+            r2 = None
+            mse = None
+            corr = None
+            p_value = None
 
         if config.verbosity >= 1:
             print('R2-Score: ',r2)
             print('MSE: ',mse)
             print('Spearman correlation and p-value: ',corr,p_value)
 
-        prot_wise_spearmans, mean_spearman = util.calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.spearmanr)
-        prot_wise_pearsons, mean_pearson = util.calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.pearsonr)
+        if config.target_values is not None:
+            prot_wise_spearmans, mean_spearman = util.calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.spearmanr)
+            prot_wise_pearsons, mean_pearson = util.calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.pearsonr)
+        else:
+            prot_wise_spearmans = None
+            mean_spearman = None
+            prot_wise_pearsons = None
+            mean_pearson = None
 
         if config.verbosity >= 1:
             print(f'Number of samples: {len(sample_id_list)} {len(test_targets)} {len(y_pred)}')
@@ -443,7 +463,8 @@ def evaluate_dataset(config):
 
         write_protein_wise_performances(f'{config.outfolder}/protein_wise_results.tsv', prot_wise_spearmans, protein_info)
 
-        #decisions, pred_std_vector = featureAnalysis.explain_decisions(config, forest, y_pred, test_feature_matrix, extern_feature_names_list)
+        if config.trace_decisions:
+            decisions, pred_std_vector = featureAnalysis.explain_decisions(config, forest, y_pred, test_feature_matrix, extern_feature_names_list)
 
         header = 'Protein ID\tSAV\tPredicted effect value\tTree-wise standard deviation\tFeature 1\tFeature 2\t Feature 3\t Feature 4\t Feature 5\n'
         lines = [header]
@@ -455,16 +476,22 @@ def evaluate_dataset(config):
         for pos, sample_id in enumerate(combined_sample_id_list):
             pred_value = combined_y_pred[pos]
             prot_id, aac = sample_id
-            pred_std = ''#pred_std_vector[pos]
-            feature_decisions = ''#decisions[pos]
+            if config.trace_decisions:
+                pred_std = pred_std_vector[pos]
+                feature_decisions = decisions[pos]
+            else:
+                pred_std = ''
+                feature_decisions = ''
             words = [prot_id, aac, str(pred_value), str(pred_std)]
-            for feat_name, weight, left_thresh, right_thresh in feature_decisions[:5]:
-                if left_thresh is None:
-                    decision_string = f'{feat_name} < {right_thresh}'
+            for feat_name, weight, left_thresh, right_thresh in feature_decisions[:50]:
+                if left_thresh is None and right_thresh is None:
+                    decision_string = f'{feat_name} is None (Weight: {weight})'
+                elif left_thresh is None:
+                    decision_string = f'{feat_name} < {right_thresh} (Weight: {weight})'
                 elif right_thresh is None:
-                    decision_string = f'{feat_name} >= {left_thresh}'
+                    decision_string = f'{feat_name} >= {left_thresh} (Weight: {weight})'
                 else:
-                    decision_string = f'{feat_name} in [{left_thresh}, {right_thresh}]'
+                    decision_string = f'{feat_name} in [{left_thresh}, {right_thresh}] (Weight: {weight})'
                 words.append(decision_string)
             line = '\t'.join(words) + '\n'
             lines.append(line)
@@ -474,7 +501,7 @@ def evaluate_dataset(config):
         f.write(''.join(lines))
         f.close()
 
-        if config.produce_scatterplot:
+        if config.produce_scatterplot and config.target_values is not None:
             scatterfile = f'{config.outfolder}/predicted_value_scatterplot.png'
             hexbinfile = f'{config.outfolder}/predicted_value_hexbinplot.png'
 
