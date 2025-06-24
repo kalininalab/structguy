@@ -293,7 +293,7 @@ def calcSliceConfusion(forest, cv_slice, samples = None, samples_store_id = None
         remote = False
 
     if samples is None:
-        samples = ray.get(samples_store_id)
+        samples = unpack(ray.get(samples_store_id))
 
     X_test = cv_slice.get_test_feature_matrix(samples)
     y_test = cv_slice.test_targets

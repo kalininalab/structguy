@@ -13,7 +13,7 @@ import time
 import ray
 from scipy import stats
 import xgboost as xgb
-
+from filelock import FileLock
 from structguy import featureSelection, util
 from structman.base_utils.base_utils import pack, unpack
 
@@ -198,33 +198,53 @@ def trainRegressionForest(config, cv_slice, samples = None, samples_store_id = N
         zero_return = None, zero_scores, cv_counter, None, times_collection, slice_slices
 
     if depth < 1:
+        if config.verbosity >= 3:
+            print(f'Return Zero: {depth=}')
         return return_zero(zero_return, remote, cv_slice)
     if leaf_samples < 1:
+        if config.verbosity >= 3:
+            print(f'Return Zero: {leaf_samples=}')
         return return_zero(zero_return, remote, cv_slice)
     if min_sample_split < 2:
+        if config.verbosity >= 3:
+            print(f'Return Zero: {min_sample_split=}')
         return return_zero(zero_return, remote, cv_slice)
     if n_of_trees < 1:
+        if config.verbosity >= 3:
+            print(f'Return Zero: {n_of_trees=}')
         return return_zero(zero_return, remote, cv_slice)
     if min_impurity_decrease < 0.0 or min_impurity_decrease > 1.0:
+        if config.verbosity >= 3:
+            print(f'Return Zero: {min_impurity_decrease=}')
         return return_zero(zero_return, remote, cv_slice)
     if ccp_alpha < 0.0:
+        if config.verbosity >= 3:
+            print(f'Return Zero: {ccp_alpha=}')
         return return_zero(zero_return, remote, cv_slice)
     
     if max_sample_parameter <= 0.0 or max_sample_parameter > 1.0:
+        if config.verbosity >= 3:
+            print(f'Return Zero: {max_sample_parameter=}')
         return return_zero(zero_return, remote, cv_slice)
     
     if skip_feature_selection and (config.fs_max_sample_parameter <= 0.0 or config.fs_max_sample_parameter > 1.0):
+        if config.verbosity >= 3:
+            print(f'Return Zero: {config.fs_max_sample_parameter=}')
         return return_zero(zero_return, remote, cv_slice)
     
     if isinstance(max_feature_parameter,float):
        if max_feature_parameter <= 0.0 or max_feature_parameter > 1.0:
-           return return_zero(zero_return, remote, cv_slice)
+            if config.verbosity >= 3:
+                print(f'Return Zero: {max_feature_parameter=}')
+            return return_zero(zero_return, remote, cv_slice)
     if number_of_bins < 1:
+        if config.verbosity >= 3:
+            print(f'Return Zero: {number_of_bins=}')
         return return_zero(zero_return, remote, cv_slice)
 
     t1 = time.time()
     if config.verbosity >= 2:
-        print(f'Train regression forest part 1: {t1-t0}, Threads: {proc}, Feature selection: {not skip_feature_selection}')
+        print(f'Train regression forest part 1: {t1-t0}, Threads: {proc}, Feature selection: {not skip_feature_selection} {samples is None=}')
     times.append(('1', t1-t0))
 
     if not skip_feature_selection:
@@ -264,83 +284,84 @@ def trainRegressionForest(config, cv_slice, samples = None, samples_store_id = N
 
     t2 = time.time()
     if config.verbosity >= 3:
-        print(f'Train regression forest part 2: {t2-t1}, {proc}')
+        print(f'Train regression forest part 2: {t2-t1}, {proc=} {samples is None=}')
     times.append(('2', t2-t1))
 
-    if config.forest_type == 'gradient_boost' and not skip_feature_selection:
-        forest = GradientBoostingRegressor(
-            n_estimators = n_of_trees,
-            max_depth = depth,
-            min_samples_leaf = leaf_samples,
-            max_features = max_feature_parameter,
-            min_samples_split = min_sample_split,
-            ccp_alpha = ccp_alpha,
-            min_impurity_decrease = min_impurity_decrease,
-            learning_rate = config.learning_rate,
-            #no_iter_no_change = config.early_stopping,
-            subsample = max_sample_parameter
-        )
-    elif config.forest_type == 'xgboost' and not skip_feature_selection:
-        import xgboost as xgb
-        packed_slice_slice = slice_slices[0]
-        try:
-            slice_slice = unpack(packed_slice_slice)
-        except:
-            slice_slice = packed_slice_slice
-        slice_slice.filterFeatures(filtered_features)
-        if debug:
-            slice_slice.printBalance(config)
-        if samples is None:
-            samples = ray.get(samples_store_id)
-        protwise_test_data_tuples = slice_slice.get_prot_wise_test_data_tuples(samples)
-        es_list = []
-        data_tuple_list = []
-        for n, prot_id in enumerate(protwise_test_data_tuples):
-            es = xgb.callback.EarlyStopping(
-                rounds = config.early_stopping,
-                min_delta=1e-3,
-                save_best=True,
-                maximize=True,
-                data_name=f"validation_{n}"
+    with FileLock('rf_regressor.lock'):
+        if config.forest_type == 'gradient_boost' and not skip_feature_selection:
+            forest = GradientBoostingRegressor(
+                n_estimators = n_of_trees,
+                max_depth = depth,
+                min_samples_leaf = leaf_samples,
+                max_features = max_feature_parameter,
+                min_samples_split = min_sample_split,
+                ccp_alpha = ccp_alpha,
+                min_impurity_decrease = min_impurity_decrease,
+                learning_rate = config.learning_rate,
+                #no_iter_no_change = config.early_stopping,
+                subsample = max_sample_parameter
             )
-            es_list.append(es)
-            data_tuple_list.append(protwise_test_data_tuples[prot_id])
-        forest = xgb.XGBRegressor(
-            n_jobs = proc,
-            n_estimators = n_of_trees,
-            max_depth = depth,
-            gamma = min_impurity_decrease,
-            learning_rate = config.learning_rate,
-            min_child_weight = config.min_child_weight,
-            early_stopping_rounds = config.early_stopping,
-            subsample = max_sample_parameter,
-            verbosity = 0,
-            callbacks = es_list,
-            eval_metric = util.rho_eval_for_xgboost
-        )
-    elif skip_feature_selection:
-        forest = RandomForestRegressor(
-                    n_estimators = config.fs_num_of_trees,
-                    max_depth = config.fs_tree_depth,
-                    min_samples_leaf = config.fs_tree_min_leaf_samples,
-                    n_jobs = proc,
-                    min_samples_split = config.fs_min_sample_split,
-                    ccp_alpha = fs_ccp_alpha,
-                    min_impurity_decrease = fs_min_impurity_decrease,
-                    max_samples = config.fs_max_sample_parameter,
-                    criterion = criterion)
-    else:
-        forest = RandomForestRegressor(
-                    n_estimators=n_of_trees,
-                    max_depth = depth,
-                    min_samples_leaf = leaf_samples,
-                    max_features=max_feature_parameter,
-                    n_jobs=proc,
-                    min_samples_split=min_sample_split,
-                    ccp_alpha=ccp_alpha,
-                    min_impurity_decrease=min_impurity_decrease,
-                    max_samples = max_sample_parameter,
-                    criterion = criterion)
+        elif config.forest_type == 'xgboost' and not skip_feature_selection:
+            import xgboost as xgb
+            packed_slice_slice = slice_slices[0]
+            try:
+                slice_slice = unpack(packed_slice_slice)
+            except:
+                slice_slice = packed_slice_slice
+            slice_slice.filterFeatures(filtered_features)
+            if debug:
+                slice_slice.printBalance(config)
+            if samples is None:
+                samples = unpack(ray.get(samples_store_id))
+            protwise_test_data_tuples = slice_slice.get_prot_wise_test_data_tuples(samples)
+            es_list = []
+            data_tuple_list = []
+            for n, prot_id in enumerate(protwise_test_data_tuples):
+                es = xgb.callback.EarlyStopping(
+                    rounds = config.early_stopping,
+                    min_delta=1e-3,
+                    save_best=True,
+                    maximize=True,
+                    data_name=f"validation_{n}"
+                )
+                es_list.append(es)
+                data_tuple_list.append(protwise_test_data_tuples[prot_id])
+            forest = xgb.XGBRegressor(
+                n_jobs = config.proc_n,
+                n_estimators = n_of_trees,
+                max_depth = depth,
+                gamma = min_impurity_decrease,
+                learning_rate = config.learning_rate,
+                min_child_weight = config.min_child_weight,
+                early_stopping_rounds = config.early_stopping,
+                subsample = max_sample_parameter,
+                verbosity = 0,
+                callbacks = es_list,
+                eval_metric = util.rho_eval_for_xgboost
+            )
+        elif skip_feature_selection:
+            forest = RandomForestRegressor(
+                        n_estimators = config.fs_num_of_trees,
+                        max_depth = config.fs_tree_depth,
+                        min_samples_leaf = config.fs_tree_min_leaf_samples,
+                        n_jobs = config.proc_n,
+                        min_samples_split = config.fs_min_sample_split,
+                        ccp_alpha = fs_ccp_alpha,
+                        min_impurity_decrease = fs_min_impurity_decrease,
+                        max_samples = config.fs_max_sample_parameter,
+                        criterion = criterion)
+        else:
+            forest = RandomForestRegressor(
+                        n_estimators=n_of_trees,
+                        max_depth = depth,
+                        min_samples_leaf = leaf_samples,
+                        max_features=max_feature_parameter,
+                        n_jobs=config.proc_n,
+                        min_samples_split=min_sample_split,
+                        ccp_alpha=ccp_alpha,
+                        min_impurity_decrease=min_impurity_decrease,
+                        max_samples = max_sample_parameter,
+                        criterion = criterion)
 
     t3 = time.time()
     if config.verbosity >= 3:    
@@ -357,14 +378,14 @@ def trainRegressionForest(config, cv_slice, samples = None, samples_store_id = N
 
     t5 = time.time()
     if config.verbosity >= 3:    
-        print(f'Train regression forest part 5: {t5-t4}, # of features: {len(cv_slice.feature_names)}')
+        print(f'Train regression forest part 5: {t5-t4}, {len(cv_slice.feature_names)=} {samples is None=}')
     times.append(('5', t5-t4))
 
     if print_out or config.verbosity >= 3:
         print(f'Train regression {config.forest_type} forest, call of fit with # of features: {len(cv_slice.feature_names)}, skip feature selection {skip_feature_selection}, slice update {slice_updated}, skip scoring {skip_scoring}')
     
     if samples is None:
-        samples = ray.get(samples_store_id)
+        samples = unpack(ray.get(samples_store_id))
 
     weights_updated = False
     if config.forest_type == 'xgboost' and not skip_feature_selection:
@@ -407,6 +428,8 @@ def trainRegressionForest(config, cv_slice, samples = None, samples_store_id = N
     if test_for_constant_array(y_pred):
         if print_out:
             zero_scores.printOut()
+        if config.verbosity >= 3:
+            print(f'Return Zero: test_for_constant_array was True')
         return return_zero(zero_return, remote, cv_slice)
 
     if config.verbosity >= 5:
@@ -460,8 +483,8 @@ def trainRegressionForest(config, cv_slice, samples = None, samples_store_id = N
 def trainForest(config, cross_val_object, samples_store_id = None, samples = None, slice_slices = None, distance_map = None, repeat = 1, print_out = False, cv_repeat = False, skip_scoring=False, remote = True, debug = False, para_number = None, skip_feature_selection = False, force_confusion = False):
     #if cv_repeat is False, the cross_val_object is a cross validation slice object instead
     zero_scores_obj = util.Scores(zero=True)
-    if para_number == 1:
-        remote = False
+    #if para_number == 1:
+    remote = False
 
     if config.suppress_remote_forests or debug:
         remote = False
@@ -540,11 +563,11 @@ def trainForest(config, cross_val_object, samples_store_id = None, samples = Non
             cv_slice = cross_val_object.slices[cv_counter]
             if remote:
                 t01 = time.time()
-                packed_cv_slice = pack(cv_slice)
+                packed_cv_slice: bytes = pack(cv_slice)
                 cv_slice_stores[cv_counter] = packed_cv_slice
                 t02 = time.time()
                 if config.verbosity >= 2:
-                    print(f'Time for packing cv_slice {cv_counter} in trainForest: {t02-t01} {slice_slices is None} {para_number}')
+                    print(f'Time for packing cv_slice {cv_counter=} in trainForest: {t02-t01} {slice_slices is None=} {para_number=}')
 
             if slice_slices is not None:
                 s_slice_slices = slice_slices[cv_counter]

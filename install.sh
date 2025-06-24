@@ -6,7 +6,7 @@ SCRIPT=$(readlink -f $0)
 SCRIPTPATH=$(dirname "$SCRIPT")
 
 #Init constants
-current_python_version="3.11"
+current_python_version="3.12"
 username=$(whoami)
 
 #Init default arguments
@@ -53,6 +53,15 @@ fi
 conda_base_path=$(conda info --base)
 conda_bash_path="$conda_base_path"/etc/profile.d/conda.sh
 
+current_env=$(conda info | grep 'active environment' | awk '{sub(/^[ \t\r\n]+active environment.:./,""); print}')
+if ! [ "$current_env" = "base" ]
+then
+    echo "Conda needs to be in base environment, but is $current_env"
+    echo "Please call 'conda deactivate'."
+    echo "exiting installer ..."
+    exit 1
+fi
+
 #activate the environment
 {
     echo "Activating environment inside shell ..."
@@ -87,9 +96,8 @@ fi
 #install dependencies
 {
     mamba install -y -c conda-forge scip==9.0.0
-    mamba install -y -c conda-forge numpy==1.26.4    
     echo "Installing package DataSAIL ..."
-    mamba install -y -c conda-forge -c kalininalab -c bioconda -c mosek datasail==0.2.1
+    mamba install -y -c conda-forge -c kalininalab -c bioconda -c mosek datasail
     pip install grakel
 } >&$verbose_stdout
 

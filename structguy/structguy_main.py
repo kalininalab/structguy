@@ -136,6 +136,8 @@ def parse_arguments(argument_start = 2, manual_args = None):
         model_name = None
 
 
+    print(f'Parsing config: {path_to_project_file=}')
+
     config = util.Config(path_to_project_file, hyperparameters_path = path_to_hyperparameters_file)
 
     if skip_final_model is not None:

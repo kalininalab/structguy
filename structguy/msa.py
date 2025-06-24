@@ -84,6 +84,13 @@ def lookup(config, prot_id, ref_db_ids=['ref50','ref90'], gpw_ref_db_ids=['ref50
 
         """
         else:
+            
+        """
+
+        psic_name = util.get_msa_path(out_directory, prot_id, ref_db_id, psic = True, gpw = True)
+        if (not os.path.isfile(psic_name)) or update_mode:
+            if debug >= 1:
+                print('Calc psic profiles from lookup', prot_id, ref_db_id)
             try:
                 f = gzip.open(filename,'r')
                 gpw = f.read()
@@ -93,12 +100,6 @@ def lookup(config, prot_id, ref_db_ids=['ref50','ref90'], gpw_ref_db_ids=['ref50
                 continue
             if gpw == '':
                 continue
-        """
-
-        psic_name = util.get_msa_path(out_directory, prot_id, ref_db_id, psic = True, gpw = True)
-        if (not os.path.isfile(psic_name)) or update_mode:
-            if debug >= 1:
-                print('Calc psic profiles from lookup', prot_id, ref_db_id)
             psic.psicFromGPW(gpw,psic_name[:-3],config,debug=debug)
             
             if os.path.isfile(psic_name):

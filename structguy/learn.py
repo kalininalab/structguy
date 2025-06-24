@@ -92,7 +92,7 @@ def learn(config, effectRegressor=None, test_config = None):
             print(f'Using feature file: {config.path_to_processed_features_file}')
         print(f'Writing output to: {config.outfolder}')
 
-    samples = featureGenerator.createTrainingSet(config, stop_matrix_transformation = (config.path_to_support_features is not None))
+    samples: sampleSpace.SampleSpace = featureGenerator.createTrainingSet(config, stop_matrix_transformation = (config.path_to_support_features is not None))
     if config.path_to_support_features is not None:
         support_samples = featureGenerator.createTrainingSet(config, stop_matrix_transformation = True, other_features_path = config.path_to_support_features, filter_none_tv = True)
         samples.fuse_samples(support_samples)
@@ -120,12 +120,12 @@ def learn(config, effectRegressor=None, test_config = None):
         cv_slice = cross_val_obj.getCurrentSlice()
 
         if config.verbosity >= 1:
-            print(len(cv_slice.train_targets))
+            print(f'{len(cv_slice.train_targets)=}')
             print('Testset length: ',len(cv_slice.test_targets))
 
         debug = config.debug_mode
         if config.feature_selection == 'confusion' or config.feature_selection == 'confusion_and_regu' or config.feature_selection == 'sequential_confusion' or config.feature_selection == 'threeStaged' or config.feature_selection == 'sequential_confusion_and_regu' or config.feature_selection == 'threeStaged_listranking':
-            samples_store_id = ray.put(samples)
+            samples_store_id = ray.put(pack(samples))
         else:
             samples_store_id = None
 
@@ -133,6 +133,9 @@ def learn(config, effectRegressor=None, test_config = None):
             initial_training_input = cross_val_obj
         else:
             initial_training_input = cv_slice
+
+        if config.verbosity >= 3:
+            print(f'Before initial model training: {config.cv_hpo=} {initial_training_input.slice_slices=}')
 
         if config.hyperOptimization == 'bayesianComplete':
             forest,scores,initial_training_input, slice_slices = trainForest.trainForest(config, initial_training_input, samples_store_id = samples_store_id, slice_slices = initial_training_input.slice_slices, samples = samples, distance_map = distance_map, repeat = config.repeat_training, cv_repeat = config.cv_hpo, print_out = True, debug = debug)
@@ -197,13 +200,13 @@ def learn(config, effectRegressor=None, test_config = None):
                 mses.append((scores.mse,len(cv_slice.test_targets)))
                 pearsons.append((scores.pearson_r,1))
                 spears.append(scores.corr)
-                prot_wise_spearmans, mean_spearman = util.calc_protein_wise_corr(cv_slice.test_targets, y_pred, cv_slice.test_sample_ids, stats.spearmanr)
+                prot_wise_spearmans, mean_spearman, raw_corrs = util.calc_protein_wise_corr(cv_slice.test_targets, y_pred, cv_slice.test_sample_ids, stats.spearmanr)
 
                 if config.verbosity >= 1:
                     print(f'Prot-wise RHO: {mean_spearman}')
                     print(prot_wise_spearmans)
-                    for prot_id, spear_ in prot_wise_spearmans:
-                        if spear_ < 0.2:
+                    for prot_id, spear_ in raw_corrs:
+                        if spear_ < 0.3:
                             print(f'Low prot-wise rho: {prot_id} - {spear_}')
 
 
@@ -428,8 +431,8 @@ def evaluate_dataset(config):
             print('Spearman correlation and p-value: ',corr,p_value)
 
         if config.target_values is not None:
-            prot_wise_spearmans, mean_spearman = util.calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.spearmanr)
-            prot_wise_pearsons, mean_pearson = util.calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.pearsonr)
+            prot_wise_spearmans, mean_spearman, _ = util.calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.spearmanr)
+            prot_wise_pearsons, mean_pearson, _ = util.calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.pearsonr)
         else:
             prot_wise_spearmans = None
             mean_spearman = None
@@ -443,8 +446,8 @@ def evaluate_dataset(config):
             print(f'Prot-wise mean spearman: {mean_spearman}')
 
         if mm_y_pred is not None:
-            prot_wise_spearmans, mean_mm_spearman = util.calc_protein_wise_corr(mm_test_targets, mm_y_pred, mm_sample_id_list, stats.spearmanr)
-            prot_wise_pearsons, mean_pearson = util.calc_protein_wise_corr(mm_test_targets, mm_y_pred, mm_sample_id_list, stats.pearsonr)
+            prot_wise_spearmans, mean_mm_spearman, _ = util.calc_protein_wise_corr(mm_test_targets, mm_y_pred, mm_sample_id_list, stats.spearmanr)
+            prot_wise_pearsons, mean_pearson, _ = util.calc_protein_wise_corr(mm_test_targets, mm_y_pred, mm_sample_id_list, stats.pearsonr)
 
             if config.verbosity >= 1:
                 print(f'Number of samples: {len(mm_sample_id_list)} {len(mm_test_targets)} {len(mm_y_pred)}')
@@ -452,8 +455,8 @@ def evaluate_dataset(config):
                 print(f'Prot-wise mean pearson for multi savs: {mean_pearson}')
                 print(f'Prot-wise mean spearman for multi savs: {mean_mm_spearman}')
 
-            prot_wise_spearmans, mean_comb_spearman = util.calc_protein_wise_corr(combined_test_targets, combined_y_pred, combined_sample_id_list, stats.spearmanr)
-            prot_wise_pearsons, mean_pearson = util.calc_protein_wise_corr(combined_test_targets, combined_y_pred, combined_sample_id_list, stats.pearsonr)
+            prot_wise_spearmans, mean_comb_spearman, _ = util.calc_protein_wise_corr(combined_test_targets, combined_y_pred, combined_sample_id_list, stats.spearmanr)
+            prot_wise_pearsons, mean_pearson, _ = util.calc_protein_wise_corr(combined_test_targets, combined_y_pred, combined_sample_id_list, stats.pearsonr)
 
             if config.verbosity >= 1:
                 print(f'Number of samples: {len(combined_sample_id_list)} {len(combined_test_targets)} {len(combined_y_pred)}')
@@ -519,7 +522,7 @@ def evaluate_dataset(config):
             else: 
                 int_targets.append(0)
         total_roc_auc = roc_auc_score(int_targets, y_pred)
-        prot_wise_roc_aucs, mean_roc_auc = util.calc_protein_wise_corr(int_targets, y_pred, sample_id_list, roc_auc_score, mono_return_score_function = True)
+        prot_wise_roc_aucs, mean_roc_auc, _ = util.calc_protein_wise_corr(int_targets, y_pred, sample_id_list, roc_auc_score, mono_return_score_function = True)
         if config.verbosity >= 1:
             print(f'Total roc_auc: {total_roc_auc}')
             print(f'Prot-wise mean roc_auc: {mean_roc_auc}')

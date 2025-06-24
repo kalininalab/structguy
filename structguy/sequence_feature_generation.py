@@ -143,7 +143,7 @@ def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False):
         print(f'Parsed protein sequences from: {config.path_to_sequence_fasta}\nLength of the map:{len(gene_seq_map)}, Length of in_db: {len(in_db)}')
     
     if config.verbosity >= 2:
-        print(f'Query proteins that are in_db:\n{in_db}')
+        print(f'Query proteins that are in_db:\n{in_db=}')
 
     N = 0
     mmseq_searchs = []
@@ -167,7 +167,7 @@ def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False):
         t1 = time.time()
         print('getSequenceFeature part 1: ',t1-t0)
 
-    mmseqs2_search_dbs = {'ref50':config.mmseqs_search_db_ref50,'ref90':config.mmseqs_search_db_ref90,'ref100':config.mmseqs_search_db_ref100}
+    mmseqs2_search_dbs = {'ref50':config.mmseqs_search_db_ref50, 'ref90':config.mmseqs_search_db_ref90, 'ref100':config.mmseqs_search_db_ref100}
 
     mmseqs_tmp_folder = config.mmseqs_tmp_folder
 
@@ -190,7 +190,7 @@ def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False):
 
                 if config.verbosity >= 1:
                     M += 1
-                    print('Starting sequence search with MMseqs2 on database: ',mmseqs2_search_db,M)
+                    print(f'Starting sequence search with MMseqs2 on database: {db=} {mmseqs2_search_db=}, {M=}')
                     t20 = time.time()
 
                 temp_outfile = '%s/tmp_outfile_%s.fasta' % (mmseqs_tmp_folder,randomString())
@@ -257,6 +257,9 @@ def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False):
         cost_map[primary_protein_id] = cost
         cost_tuples.append((primary_protein_id, cost))
 
+        if config.verbosity >= 3:
+            print(f'Adding {primary_protein_id=} to cost_map  with {cost=}')
+
         #for db in dbs:
         #    n += 1
         #    inqueue.put((primary_protein_id, db, n))
@@ -307,7 +310,7 @@ def getSequenceFeatures(config, samples, n_of_processes = 6, update_mode=False):
     for chunk in chunks:
         chunk_cost = chunk[0]
         if optimal_cost > 0:
-            sub_threads = max([chunk_cost // optimal_cost, 1])
+            sub_threads = max([(chunk_cost // optimal_cost), 1])
         else:
             sub_threads = 1
         if config.verbosity >= 2:
@@ -572,6 +575,11 @@ def paraCalcSeqFeat(config, lock, inqueue, outqueue, debug, msa_map, gpw_map,):
                 if pos >= len(seed_seq):
                     if debug >= 1:
                         print('Filtered',u_ac,pos,',since it was outside of the seed_seq, len:',len(seed_seq))
+                    continue
+
+                if aac not in psic_wt_map:
+                    if debug >= 1:
+                        print(f'Filtered {u_ac=} {aac=} not in {len(psic_wt_map)=}')
                     continue
 
                 n_wt_aa = 0.

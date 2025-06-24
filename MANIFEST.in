@@ -2,4 +2,4 @@ include resources/psic/psic.c
 include resources/psic/Makefile
 include resources/psic/Blosum62.txt
 include resources/psic/psic_wrapper
-include resources/search_db_settings.conf
+#include resources/search_db_settings.conf

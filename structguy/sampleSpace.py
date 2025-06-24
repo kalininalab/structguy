@@ -16,10 +16,11 @@ from structguy.sequence_util import parseFromFasta
 from structguy.support_classes import CrossValidationSlice, Feature
 
 from structman.base_utils.base_utils import pack, unpack
+from structman.lib.sdsc.sdsc_utils import Slotted_obj
 
-
-class Sample:
-    def __init__(self,sample_id,nr):
+class Sample(Slotted_obj):
+    __slots__ = ['sample_id', 'targetValue', 'nr', 'amount_of_structures', 'tags']
+    def __init__(self,sample_id = None, nr = None):
         self.sample_id = sample_id
         self.targetValue = None
         self.nr = nr
@@ -120,8 +121,16 @@ def splitDataSet(config, sample_dict, specific_id=None, protein_wise=False, debu
         print(f'Splitted into empty test set: {specific_id}, {ignored_prots}')
     return test_ids, train_ids
 
-class SampleSpace:
-    def __init__(self, config):
+class SampleSpace(Slotted_obj):
+    __slots__ = [
+        'samples', 'features', 'feature_matrix_dict',
+        'raw_feature_matrix', 'sample_nr', 'feature_names',
+        'feat_pos_dict', 'sample_pos_dict', 'vector_store',
+        'current_vector',
+        'geometric_distance_map', 'current_geometric_exponent', 'sequence_map',
+        'impute_map'
+    ]
+    def __init__(self, config=None):
         self.samples = {}
         self.features = {}
         self.feature_matrix_dict = {}
@@ -137,12 +146,13 @@ class SampleSpace:
         self.geometric_distance_map = {}
         self.current_geometric_exponent = None
 
-        if config.addBias:
-            self.addFeature('Protein bias','real',group='amino acid property',default_value='0.5')
-
-        seq_map , _ = parseFromFasta(config.path_to_sequence_fasta)
-
-        self.sequence_map = seq_map
+        if config is not None:
+            if config.addBias:
+                self.addFeature('Protein bias','real',group='amino acid property',default_value='0.5')
+            seq_map , _ = parseFromFasta(config.path_to_sequence_fasta)
+            self.sequence_map = seq_map
+        else:
+            self.sequence_map = None
         self.impute_map = {}
 
     def fuse_samples(self, other_samples):
@@ -665,7 +675,7 @@ class CrossValidation:
         self.slice_ids = []
         self.cv_counter = 0
         self.isSlice = False
-        self.slice_slices = {}
+        self.slice_slices = None
 
     def getCurrentSlice(self):
         return self.slices[self.slice_ids[self.cv_counter]]
@@ -941,28 +951,51 @@ class DataSAIL_cv(CrossValidation):
 
         names = [f'split_{x}' for x in range(config.crossValidation_fold)]
 
+        eps = 0.05
+
         t1 = time.time()
         if config.verbosity >= 2:
-            print(f'Time for init DataSAIL_cv Part 1: {t1-t0}')
+            print(f'Time for init DataSAIL_cv Part 1: {t1-t0} {eps=}')
 
         if config.verbosity >= 3:
             print(f'Call of datasail with: e_data: {config.path_to_sequence_fasta}, e_weights: {weight_map} ({len(weight_map)}), splits: {splits}, names: {names}')
 
             write_weight_map(weight_map, 'weight_map_for_datasail.tsv')
-            raw_datasail_splits = datasail(e_data = config.path_to_sequence_fasta, e_weights = weight_map, splits = splits, techniques = ['C1e'], names = names, e_type = 'P', solver = 'SCIP', verbose = 'I')
+            raw_datasail_splits = datasail(
+                e_data = config.path_to_sequence_fasta,
+                e_weights = weight_map,
+                splits = splits,
+                techniques = ['C1e'],
+                names = names,
+                e_type = 'P',
+                solver = 'SCIP',
+                epsilon = eps,
+                overflow = 'assign',
+                e_sim = 'mmseqs',
+                verbose = 'I')
 
         else:
 
-            raw_datasail_splits = datasail(e_data = config.path_to_sequence_fasta, e_weights = weight_map, splits = splits, techniques = ['C1e'], names = names, e_type = 'P', solver = 'SCIP')
+            raw_datasail_splits = datasail(
+                e_data = config.path_to_sequence_fasta,
+                e_weights = weight_map,
+                splits = splits,
+                techniques = ['C1e'],
+                names = names,
+                e_type = 'P',
+                solver = 'SCIP',
+                epsilon = eps,
+                overflow = 'assign',
+                )
 
         t2 = time.time()
         if config.verbosity >= 2:
             print(f'Time for init DataSAIL_cv Part 2: {t2-t1}')
 
-        print(raw_datasail_splits)
+        #print(raw_datasail_splits)
 
         datasail_splits = raw_datasail_splits[0]['C1e'][0]
-        print(datasail_splits)
+        #print(datasail_splits)
 
         train_test_pairs = {}
         for cv_counter in range(config.crossValidation_fold):
@@ -999,7 +1032,7 @@ class DataSAIL_cv(CrossValidation):
             train_set, test_set, _ = train_test_pairs[cv_counter]
 
             if config.verbosity >= 2:
-                print(f'Init datasail slice {cv_counter}: {test_set}')
+                print(f'Init datasail slice {cv_counter=}: {len(test_set)=}')
 
             init_ids.append(init_lopo_slice.remote(store, set(test_set), cv_counter = cv_counter))
 

@@ -112,7 +112,7 @@ def crossFoldConfusionSelect(config, cv_slice, slice_slices, samples = None, sam
         available_threads = overwrite_proc_n
 
     if config.verbosity >= 4:
-        print(f'Call of crossFoldconfusionSelect: print_out {print_out}, overwrite_proc_n {overwrite_proc_n}, rank_thresh {rank_thresh}, sequence_number {sequence_number}, force_confusion {force_confusion}')
+        print(f'Call of crossFoldconfusionSelect: {print_out=}, {overwrite_proc_n=}, {rank_thresh=}, {sequence_number=}, {force_confusion=}')
 
     t1 = time.time()
     times.append(('1',t1-t0))
@@ -127,13 +127,13 @@ def crossFoldConfusionSelect(config, cv_slice, slice_slices, samples = None, sam
                 subslices = [set([x]) for x in cv_slice.train_prots]
 
             else:
-                print(f'Sublices: {cv_slice.subslices}')
+                #print(f'Sublices: {cv_slice.subslices}')
                 subslices = cv_slice.subslices
 
             slice_slices = []
 
             if samples is None:
-                samples = ray.get(samples_store_id)
+                samples = unpack(ray.get(samples_store_id))
 
             for i, subslice_test_proteins in enumerate(subslices):
                 remaining_prots = set(cv_slice.train_prots) - subslice_test_proteins
@@ -180,6 +180,8 @@ def crossFoldConfusionSelect(config, cv_slice, slice_slices, samples = None, sam
         if pre_filter is None:
             cv_slice.filterFeatures([])
         else:
+            if config.verbosity >= 3:
+                print(f'In crossFoldConfusionSelect: {len(pre_filter)=}')
             cv_slice.filterFeatures(pre_filter)
 
         sample_size_threshold = config.gigs_of_ram * 3000
@@ -225,7 +227,7 @@ def crossFoldConfusionSelect(config, cv_slice, slice_slices, samples = None, sam
             if calc_at_least_once:
                 store = ray.put((pre_filter, sequence_number, config, distance_map, n_sub_threads, force_confusion))
                 if samples_store_id is None:
-                    samples_store_id = ray.put(samples)
+                    samples_store_id = ray.put(pack(samples))
             else:
                 store = ray.put((pre_filter, sequence_number, config, distance_map, n_sub_threads, force_confusion))
             loop_ray_ids = []
@@ -387,6 +389,7 @@ def confusionSelect(config, cv_slice, samples, distance_map = None, print_out = 
 
         try:
             samples = ray.get(samples)
+            samples = unpack(samples)
         except:
             pass
         print(f'Subslice prots: {random_proteins}')
@@ -532,6 +535,7 @@ def regu_fs(config, cv_slice, samples, print_out = False, pre_filter = None, deb
 
             try:
                 samples = ray.get(samples)
+                samples = unpack(samples)
             except:
                 pass
 
@@ -590,7 +594,7 @@ def meanCorrelationWrapper(config, cross_val_object, samples = None, samples_sto
         return None
     
     if samples is None:
-        samples = ray.get(samples_store_id)
+        samples = unpack(ray.get(samples_store_id))
 
     if not cv_repeat:
         return detectBiasedFeaturesByMeanCorrelation(config, cross_val_object, samples, dummy_call= dummy_call, print_out = print_out, pre_filter = pre_filter, debug = debug, return_list = return_list, return_score_list = return_score_list)
@@ -636,9 +640,11 @@ def detectBiasedFeaturesByMeanCorrelation(config, cv_slice, samples, dummy_call 
         to_filter = pre_filter
     if print_out:
         print('===========================================================================================')
-        print(f'Biased feature detection (by mean correlation), TVMB thresh: {thresh}, return_score_list: {return_score_list}, pre_filter: {pre_filter}')
-        print('tvmb prefiltered:',len(to_filter))
+        print(f'Biased feature detection (by mean correlation), TVMB {thresh=}, {return_score_list=}, {pre_filter=} {dummy_call=} {cv_slice.tvmb_map is None=}')
+        print(f'tvmb prefiltered: {len(to_filter)=}')
 
+
+    t0 = time.time()
     if config.verbosity >= 5:
         cv_slice.featureSanityCheck(verbose = True)
 
@@ -660,15 +666,23 @@ def detectBiasedFeaturesByMeanCorrelation(config, cv_slice, samples, dummy_call 
                     feats_to_remove.append(feat_name)
             #else:
             #    tvmb_score,target_p_val = cv_slice.tvmb_map[feat_name]
+        if config.verbosity >= 4:
+            print(f'Init tvmb_map for {cv_slice.name=} {len(feats_to_remove)=}')
         for feat_name in feats_to_remove:
             cv_slice.removeFeature(feat_name)
 
+    t1 = time.time()
     if dummy_call:
+        if print_out:
+            print(f'Time for tvmb filtering dummy call: {t1-t0}')
         return
     
     cv_slice.rank_tvmb(samples, config)
 
     if return_score_list:
+        if print_out:
+            print(f'tvmb filtered: {len(cv_slice.ranked_tvmb)=}')
+            print('===========================================================================================')
         return cv_slice.ranked_tvmb
 
     for feat_name,tvmb_score in cv_slice.ranked_tvmb[:config.tvmb_rank_threshold]:

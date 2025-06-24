@@ -9,6 +9,8 @@ from scipy import stats
 from structguy import dicts
 from structguy.sanity_util import sanity_check_value_list
 
+from structman.lib.sdsc.sdsc_utils import Slotted_obj
+
 def calculate_chunksizes(n_of_chunks, n_of_items):
     small_chunksize = n_of_items // n_of_chunks
     big_chunksize = small_chunksize + 1
@@ -33,7 +35,7 @@ def distance_weighting_subroutine(store, package):
     return outputs
 
 possible_na_values = set(['-', 'None'])
-class Feature:
+class Feature(Slotted_obj):
     __slots__ = ['name', 'f_type', 'group', 'default', 'mutation_specific', 'category_map', 'category_counter', 'category_backmap']
     def __init__(self, name = None, f_type = None,group=None,default_value=None,mutation_specific=False):
         self.name = name
@@ -108,7 +110,7 @@ class Feature:
         else:
             return str(self.category_backmap[value])
 
-class CrossValidationSlice:
+class CrossValidationSlice(Slotted_obj):
     __slots__ = ['isSlice', 'test_targets', 'test_sample_ids',
                  'train_targets', 'train_sample_ids',
                  'feature_names', 'name', 'train_prots', 'test_prots', 'train_equal_test',
@@ -122,18 +124,23 @@ class CrossValidationSlice:
                  'train_class_weight_vector', 'test_class_weight_vector',
                  'fused_confusion_map', 'raw_confusion_map']
     
-    def __init__(self, test_ids = [], train_ids = [], raw_feature_names = None, sample_dict = None, geometric_distance_map = None, config = None, name = '', train_prots = None, test_prots = None, train_equal_test = False, para_number = None, feature_names = None, raw_init = False):
+    def __init__(self, test_ids = None, train_ids = None, raw_feature_names = None, sample_dict = None, geometric_distance_map = None, config = None, name = '', train_prots = None, test_prots = None, train_equal_test = False, para_number = None, feature_names = None, raw_init = False):
 
         for slot in self.__slots__:
             self.__setattr__(slot, None)
-        if raw_init:
+        if raw_init or config is None:
+            self.feature_names = []
             return
         self.isSlice = True
 
         self.test_targets = []
+        if test_ids is None:
+            test_ids = []
         self.test_sample_ids = [x for x in test_ids]
 
         self.train_targets = []
+        if train_ids is None:
+            train_ids = []
         self.train_sample_ids = [x for x in train_ids]
 
         features_to_remove = []
@@ -143,6 +150,8 @@ class CrossValidationSlice:
             keep_features = set(feature_names)
 
         self.feature_names = []
+        if raw_feature_names is None:
+            raw_feature_names = []
         for feat_name in raw_feature_names:
             self.feature_names.append(feat_name)
             if keep_features is not None:
@@ -150,6 +159,9 @@ class CrossValidationSlice:
                     features_to_remove.append(feat_name)
 
         self.feature_names.sort()
+
+        if sample_dict is None:
+            sample_dict = {}
 
         self.name = name
         if train_prots is None:
@@ -214,7 +226,7 @@ class CrossValidationSlice:
             print(f'Init CV slice part 1: {t1-t0}')
 
         if config.verbosity >=3:
-            print(f'In CVSLice init of {self.name}: train equal test: {train_equal_test}, train prots: {train_prots}, Test set: {len(self.test_sample_ids)}, Train set: {len(self.train_sample_ids)}')
+            print(f'In CVSLice init of {self.name=}: {train_equal_test=}, Test set: {len(self.test_sample_ids)=}, Train set: {len(self.train_sample_ids)=}')
 
         if not train_equal_test:
             for sample_id in self.test_sample_ids:
@@ -803,7 +815,10 @@ class CrossValidationSlice:
         for ff in filtered_features:
             self.deactivateFeature(ff)
 
-        self.feature_names.sort()
+        if len(self.feature_names) > 0:
+            if isinstance(self.feature_names, tuple):
+                self.feature_names = list(self.feature_names)
+            self.feature_names.sort()
 
         if print_out:
             print('======\n',self.name,'filter features:',len(filtered_features),'remaining features:',len(self.feature_names),'\n=====')
@@ -836,8 +851,11 @@ class CrossValidationSlice:
             print('Slice:',self.name,'Reactivate feature:',feat_name)
         if not feat_name in self.deactivated_features:
             return
-        self.feature_names.append(feat_name)
-        
+        try:
+            self.feature_names.append(feat_name)
+        except AttributeError:
+            self.feature_names = list(self.feature_names)
+            self.feature_names.append(feat_name)
         self.deactivated_features.remove(feat_name)
 
 
@@ -860,7 +878,9 @@ class CrossValidationSlice:
         except:
             #self.removeFeature(feat_name)
             if config.verbosity >= 5:
-                print('Error: cant get feature target corr for:',feat_name)
+                [e, f, g] = sys.exc_info()
+                g = traceback.format_exc()
+                print(f'Error: cant get feature target corr for: {feat_name=} due to:\n{e}\n{f}\n{g}')
             return True 
         if target_corr == 'const':
             #self.removeFeature(feat_name)

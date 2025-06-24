@@ -54,6 +54,7 @@ class Config:
     def __init__(self, path_to_project_file, hyperparameters_path = None):
         util_scriptpath = os.path.abspath(resolve_path(__file__))
         settings_path = f'{util_scriptpath.rsplit("/",1)[0]}/resources/search_db_settings.conf'
+        print(f'Parsing search db settings: {settings_path=}')
         search_db_opt_args = parse_conf(settings_path)
 
         self.profiling = False
@@ -104,7 +105,7 @@ class Config:
         self.verbosity = 1
 
         self.crossValidation=True
-        self.crossValidation_fold = 5
+        self.crossValidation_fold = 4
         self.multiple_lopo = 1
 
         self.split_rate = 0.2
@@ -1105,20 +1106,22 @@ def calc_protein_wise_corr(y_test, y_pred, sample_ids, corr_function, mono_retur
         test_pred_pairs[prot_id][1].append(y_pred[sample_nr])
 
     prot_wise_corrs = []
+    prot_wise_raw_corrs = []
     corrs = []
     for prot_id in test_pred_pairs:
         if not mono_return_score_function:
-            corr, _ = corr_function(test_pred_pairs[prot_id][0], test_pred_pairs[prot_id][1])
+            raw_corr, _ = corr_function(test_pred_pairs[prot_id][0], test_pred_pairs[prot_id][1])
         else:
-            corr = corr_function(test_pred_pairs[prot_id][0], test_pred_pairs[prot_id][1])
-        corr = abs(corr)
+            raw_corr = corr_function(test_pred_pairs[prot_id][0], test_pred_pairs[prot_id][1])
+        corr = abs(raw_corr)
         prot_wise_corrs.append((prot_id, corr))
+        prot_wise_raw_corrs.append((prot_id, corr))
         corrs.append(corr)
     if len(corrs) > 0:
         mean_corr = sum(corrs)/len(corrs)
     else:
         mean_corr = 0
-    return prot_wise_corrs, mean_corr
+    return prot_wise_corrs, mean_corr, prot_wise_raw_corrs
 
 
 def rho_eval_for_xgboost(predt, y):
