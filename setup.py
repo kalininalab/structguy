@@ -39,17 +39,25 @@ setup(
     include_package_data=True,
     install_requires=[
         "scikit-learn==1.5.0",
-        "xgboost==2.0.3"
+        "xgboost==2.0.3",
+        "torch==2.8.0",
+        "fgclustering==2.0.2",
+        "shap==0.48.0",
+        "supertree==0.5.5"
     ],
 
     package_data = {
         "": [
-            #'resources/search_db_settings.conf',
             'resources/psic/psic.c',
             'resources/psic/Makefile',
             'resources/psic/Blosum62.txt',
-            'reosurces/psic/psic_wrapper.py'
+            'resources/psic/psic_wrapper.py'
             ]
+    },
+    exclude_package_data={
+        '': [
+            'resources/search_db_settings.conf'
+        ]
     },
     python_requires=">=3.8, <4",
     keywords="bioinformatics",

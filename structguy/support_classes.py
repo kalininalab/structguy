@@ -94,13 +94,13 @@ class Feature(Slotted_obj):
 
                             value = string
             else:
-                print(f'Error in value_from_string: {self.f_type} {self.name} {string}')
+                print(f'Error in value_from_string: {self.f_type=} {self.name=} {string=}')
                 value = None
         except:
             if string in possible_na_values:
                 value = None
             else:
-                print(f'Error in value_from_string: {self.f_type} {self.name} {string}')
+                print(f'Error in value_from_string: {self.f_type=} {self.name=} {string=}')
                 value = None
         return value
 
@@ -111,18 +111,23 @@ class Feature(Slotted_obj):
             return str(self.category_backmap[value])
 
 class CrossValidationSlice(Slotted_obj):
-    __slots__ = ['isSlice', 'test_targets', 'test_sample_ids',
-                 'train_targets', 'train_sample_ids',
-                 'feature_names', 'name', 'train_prots', 'test_prots', 'train_equal_test',
-                 'slice_slice', 'slice_slices', 'subslice', 'subslices', 'random_subslice',
-                 'features', 'deactivated_features',
-                 'slice_specific_features', 'slice_specific_feature_names', 'slice_specific_feature_map',
-                 'current_geometric_exponent', 'weight_vector_store', 'geometric_distance_map',
-                 'int_map', 'int_counter', 'tvmb_map', 'ranked_tvmb', 'active_tvmb_threshold',
-                 'tvpmb_map', 'ranked_tvpmb', 'active_tvpmb_threshold', 'current_number_of_bins',
-                 'active_exp', 'active_reg', 'alpha_map', 'c_map', 'confusion_map',
-                 'train_class_weight_vector', 'test_class_weight_vector',
-                 'fused_confusion_map', 'raw_confusion_map']
+    __slots__ = [
+        'isSlice',                      'test_targets',                 'test_sample_ids',
+        'train_targets',                'train_sample_ids',             'feature_names',
+        'name',                         'train_prots',                  'test_prots',
+        'train_equal_test',             'slice_slice',                  'slice_slices',
+        'subslice',                     'subslices',                    'random_subslice',
+        'features',                     'deactivated_features',         'slice_specific_features',
+        'slice_specific_feature_names', 'slice_specific_feature_map',   'current_geometric_exponent',
+        'weight_vector_store',          'geometric_distance_map',       'int_map',
+        'int_counter',                  'tvmb_map',                     'ranked_tvmb',
+        'active_tvmb_threshold',        'tvpmb_map',                    'ranked_tvpmb',
+        'active_tvpmb_threshold',       'current_number_of_bins',       'active_exp',
+        'active_reg',                   'alpha_map',                    'c_map',
+        'confusion_map',                'train_class_weight_vector',    'test_class_weight_vector',
+        'fused_confusion_map',          'raw_confusion_map',            'loss_map',
+        'sub_sampled_train_ids',        'sub_sampled_train_targets',    'sub_sampled_train_class_weight_vector'
+        ]
     
     def __init__(self, test_ids = None, train_ids = None, raw_feature_names = None, sample_dict = None, geometric_distance_map = None, config = None, name = '', train_prots = None, test_prots = None, train_equal_test = False, para_number = None, feature_names = None, raw_init = False):
 
@@ -142,6 +147,9 @@ class CrossValidationSlice(Slotted_obj):
         if train_ids is None:
             train_ids = []
         self.train_sample_ids = [x for x in train_ids]
+
+        self.sub_sampled_train_ids = None
+        self.sub_sampled_train_class_weight_vector = None
 
         features_to_remove = []
         if feature_names is None:
@@ -210,19 +218,19 @@ class CrossValidationSlice(Slotted_obj):
         self.alpha_map = {}
         self.c_map = {}
 
+        self.loss_map = None
         self.confusion_map = None
         self.fused_confusion_map = None
         self.raw_confusion_map = None
 
-        if config.verbosity >= 2:
-            t0 = time.time()
+        t0 = time.time()
 
         if not self.train_equal_test:
             print_out = config.verbosity >= 1
             self.checkCircularity(remove_t2=config.remove_t2, print_out=print_out)
 
-        if config.verbosity >= 2:
-            t1 = time.time()
+        t1 = time.time()
+        if config.verbosity >= 3:
             print(f'Init CV slice part 1: {t1-t0}')
 
         if config.verbosity >=3:
@@ -240,8 +248,8 @@ class CrossValidationSlice(Slotted_obj):
                 
                 self.slice_specific_features[sample_id] = {}
 
-        if config.verbosity >= 2:
-            t2 = time.time()
+        t2 = time.time()
+        if config.verbosity >= 3:   
             print(f'Init CV slice part 2 {train_equal_test}: {t2-t1}')
 
         for sample_id in self.train_sample_ids:
@@ -251,36 +259,40 @@ class CrossValidationSlice(Slotted_obj):
             if train_equal_test:
                 self.test_targets.append(sample.targetValue)
 
-        if config.verbosity >= 2:
-            t3 = time.time()
+        self.sub_sampled_train_targets = self.train_targets
+
+        t3 = time.time()
+        if config.verbosity >= 3:
             print(f'Init CV slice part 3: {t3-t2}')
 
         if train_equal_test:
             self.test_sample_ids = [x for x in self.train_sample_ids]
 
-        if config.verbosity >= 2:
-            t4 = time.time()
+
+        t4 = time.time()
+        if config.verbosity >= 3:
             print(f'Init CV slice part 4: {t4-t3}')
 
         if config.addBias:
             self.setProteinBias(config)
 
-        if config.verbosity >= 2:
-            t5 = time.time()
+        t5 = time.time()
+        if config.verbosity >= 3:
             print(f'Init CV slice part 5: {t5-t4}')
 
-        if config.balanceSubsampling != None:
+        if config.balanceSubsampling is not None:
             self.balanceSubSampleTrainSet(config)
 
-        if config.verbosity >= 2:
-            t6 = time.time()
+        t6 = time.time()
+        if config.verbosity >= 3:
+
             print(f'Init CV slice part 6: {t6-t5}')
 
         if config.verbosity >= 1:
             self.printBalance(config)
 
-        if config.verbosity >= 2:
-            t7 = time.time()
+        t7 = time.time()
+        if config.verbosity >= 3:
             print(f'Init CV slice part 7: {t7-t6}')
 
         if config.regression:
@@ -292,8 +304,8 @@ class CrossValidationSlice(Slotted_obj):
         for feat_name in features_to_remove:
             self.removeFeature(feat_name)
 
-        if config.verbosity >= 2:
-            t8 = time.time()
+        t8 = time.time()
+        if config.verbosity >= 3:
             print(f'Init CV slice part 8: {t8-t7}')
 
 
@@ -543,6 +555,45 @@ class CrossValidationSlice(Slotted_obj):
         if complete:
             self.class_weight_vector = self.train_class_weight_vector + self.test_class_weight_vector
 
+    def check_auto_weights(self):
+        if self.train_class_weight_vector is not None:
+            return
+        weight_vector = []
+
+        count_dict = {}
+        for sample_id in self.train_sample_ids:
+            prot_id, aac = sample_id
+            if prot_id not in count_dict:
+                count_dict[prot_id] = 0
+            count_dict[prot_id] += 1
+
+        for sample_id in self.test_sample_ids:
+            prot_id, aac = sample_id
+            if prot_id not in count_dict:
+                count_dict[prot_id] = 0
+            count_dict[prot_id] += 1
+
+        for sample_id in self.train_sample_ids:
+            prot_id, _ = sample_id
+            weight = len(self.train_sample_ids) / count_dict[prot_id]
+            weight_vector.append(weight)
+        self.train_class_weight_vector = weight_vector
+
+        weight_vector = []
+        for sample_id in self.test_sample_ids:
+            prot_id, _ = sample_id
+            weight = len(self.test_sample_ids) / count_dict[prot_id]
+            weight_vector.append(weight)
+        self.test_class_weight_vector = weight_vector
+
+
+    def update_train_weight_vector(self, weight_map):
+        weight_vector = []
+        for sample_id in self.train_sample_ids:
+            weight = weight_map[sample_id]
+            weight_vector.append(weight)
+        self.train_class_weight_vector = weight_vector
+
     def calcSubsampleDistanceWeights(self, config, para_number = None):
         rounded_exp = round(10*config.geometric_exponent)/10
         if rounded_exp in self.weight_vector_store:
@@ -764,11 +815,9 @@ class CrossValidationSlice(Slotted_obj):
             self.slice_specific_features[sample_id]['Position means'] = value
 
         
-    def featureTargetCorr(self, feat_name, samples, config):
+    def featureTargetCorr(self, feat_name, feature_value_vector, config):
         val_list_1 = []
         val_list_2 = []
-
-        feature_value_vector = samples.get_feature_value_vector(self.train_sample_ids, feat_name)
 
         for pos,tv in enumerate(self.train_targets):
             value = feature_value_vector[pos]
@@ -776,13 +825,13 @@ class CrossValidationSlice(Slotted_obj):
                 continue
             val_list_1.append(value)
             if not config.regression:
-                if not tv in self.int_map:
+                if tv not in self.int_map:
                     self.int_map[tv] = self.int_counter
                     self.int_counter += 1
                 tv = self.int_map[tv]
             val_list_2.append(tv)
         if min(val_list_1) == max(val_list_1):
-            return f'const', f'Min Val: {min(val_list_1)}, Max Val: {max(val_list_1)}, Val-type: {type(val_list_1[0])} , len vals : {len(val_list_1)}, in deac features: {feat_name in self.deactivated_features}'
+            return 'const', f'Min Val: {min(val_list_1)}, Max Val: {max(val_list_1)}, Val-type: {type(val_list_1[0])} , len vals : {len(val_list_1)}, in deac features: {feat_name in self.deactivated_features}'
         try:
             corr,p_val = stats.spearmanr(val_list_1,val_list_2)
         except:
@@ -806,7 +855,7 @@ class CrossValidationSlice(Slotted_obj):
         dont_reactivate = set(filtered_features)
         reacs = []
         for deac_feat in self.deactivated_features:
-            if not deac_feat in dont_reactivate:
+            if deac_feat not in dont_reactivate:
                 reacs.append(deac_feat)
 
         for reac in reacs:
@@ -824,14 +873,20 @@ class CrossValidationSlice(Slotted_obj):
             print('======\n',self.name,'filter features:',len(filtered_features),'remaining features:',len(self.feature_names),'\n=====')
 
     def removeFeature(self,feat_name):
+        del_pos = None
         for feat_pos, feature_name in enumerate(self.feature_names):
             if feature_name == feat_name:
                 del_pos = feat_pos
                 break
+        if del_pos is None:
+            return
 
         try:
             del self.feature_names[del_pos]
-        except:
+        except TypeError:
+            self.feature_names = list(self.feature_names)
+            del self.feature_names[del_pos]
+        except:    
             if feat_name not in self.feature_names:
                 return
             [e, f, g] = sys.exc_info()
@@ -873,8 +928,11 @@ class CrossValidationSlice(Slotted_obj):
     def addToTvmbMap(self, feat_name, samples, config, dummy_call = False):
         if config.verbosity >= 5:
             print(f'Calling of addToTvmbMap of feature: {feat_name} in slice {self.name}')
+
+        feature_value_vector = samples.get_feature_value_vector(self.train_sample_ids, feat_name)
+
         try:
-            target_corr,target_p_val = self.featureTargetCorr(feat_name, samples, config)
+            target_corr,target_p_val = self.featureTargetCorr(feat_name, feature_value_vector, config)
         except:
             #self.removeFeature(feat_name)
             if config.verbosity >= 5:
@@ -894,6 +952,7 @@ class CrossValidationSlice(Slotted_obj):
             return True
         if dummy_call:
             return False
+        
         mean_value_corr,p_val = self.featureCorr(feat_name,'Protein bias',slice_specific_feature = True)
         if mean_value_corr != mean_value_corr:
             #self.removeFeature(feat_name)
@@ -915,11 +974,11 @@ class CrossValidationSlice(Slotted_obj):
             print(f'Call of rank_tvmb in slice {self.name}')
         self.ranked_tvmb = []
         for feat_name in list(self.feature_names):
-            if not feat_name in self.tvmb_map:
+            if feat_name not in self.tvmb_map:
                 self.addToTvmbMap(feat_name, samples, config)
-                if not feat_name in self.tvmb_map:
+                if feat_name not in self.tvmb_map:
                     continue
-            if not feat_name in self.tvmb_map:
+            if feat_name not in self.tvmb_map:
                 print('Error debug out:',self.name,len(self.feature_names))
             tvmb_score,_ = self.tvmb_map[feat_name]
             self.ranked_tvmb.append((feat_name,tvmb_score))
@@ -941,7 +1000,7 @@ class CrossValidationSlice(Slotted_obj):
     def rank_tvpmb(self,config):
         self.ranked_tvpmb = []
         for feat_name in self.feature_names:
-            if not feat_name in self.tvpmb_map:
+            if feat_name not in self.tvpmb_map:
                 self.addToTvpmbMap(feat_name,config)
             tvpmb_score = self.tvpmb_map[feat_name]
             self.ranked_tvpmb.append((feat_name,tvpmb_score))
@@ -950,7 +1009,7 @@ class CrossValidationSlice(Slotted_obj):
     def classToInt(self,data):
         int_data = []
         for class_name in data:
-            if not class_name in self.int_map:
+            if class_name not in self.int_map:
                 self.int_map[class_name] = self.int_counter
                 self.int_counter += 1
             int_data.append(self.int_map[class_name])
@@ -960,15 +1019,27 @@ class CrossValidationSlice(Slotted_obj):
         feat_matrix = samples.get_feat_matrix_from_ids(self.test_sample_ids, self.feature_names)
         return feat_matrix
     
-    def get_train_feature_matrix(self, samples):
-        feat_matrix = samples.get_feat_matrix_from_ids(self.train_sample_ids, self.feature_names)
+    def set_sub_sampled_train_ids(self, sub_sampling_factor: float):
+        k = int(len(self.train_sample_ids)*sub_sampling_factor)
+        sub_sampled_ids = random.sample(range(len(self.train_sample_ids)), k)
+        self.sub_sampled_train_ids = [self.train_sample_ids[pos] for pos in sub_sampled_ids]
+        self.sub_sampled_train_targets = [self.train_targets[pos] for pos in sub_sampled_ids]
+        self.sub_sampled_train_class_weight_vector = [self.train_class_weight_vector[pos] for pos in sub_sampled_ids]
+
+    def get_train_feature_matrix(self, samples, sub_sampling = 1.0):
+        if sub_sampling == 1.0:
+            feat_matrix = samples.get_feat_matrix_from_ids(self.train_sample_ids, self.feature_names)
+        else:
+            if self.sub_sampled_train_ids is None:
+                self.set_sub_sampled_train_ids(sub_sampling)
+            feat_matrix = samples.get_feat_matrix_from_ids(self.sub_sampled_train_ids, self.feature_names)
         return feat_matrix
     
     def get_prot_wise_test_data_tuples(self, samples):
         test_pred_pairs = {}
         for sample_nr, yt_value in enumerate(self.test_targets):
             prot_id, _ = self.test_sample_ids[sample_nr]
-            if not prot_id in test_pred_pairs:
+            if prot_id not in test_pred_pairs:
                 test_pred_pairs[prot_id] = [[], []]
             test_pred_pairs[prot_id][1].append(yt_value)
             test_pred_pairs[prot_id][0].append(self.test_sample_ids[sample_nr])

@@ -103,7 +103,7 @@ def gpwToClustal(page,debug=0):
 
 def callPsic(config,infile,outfile=None,debug=0):
     outf_opt = False
-    if outfile == None:
+    if outfile is None:
         outf_opt = True
         outfile = '%s_psic_out' % infile
 
@@ -119,7 +119,7 @@ def callPsic(config,infile,outfile=None,debug=0):
 
     if debug >= 1:
         errors = p.communicate()[1]
-        if errors != None:
+        if errors is not None:
             print('PSIC errors: ',errors)
 
     if outf_opt:
@@ -132,13 +132,13 @@ def callPsic(config,infile,outfile=None,debug=0):
         return
 
 def psicFromFasta(fasta_page,outfile,config):
-    if fasta_page == None:
+    if fasta_page is None:
         print('Error in psicFromFasta: fasta_page is None')
         return
 
     cl_page = fastaToClustal(fasta_page)
 
-    if cl_page == None:
+    if cl_page is None:
         print('Error in psicFromFasta: could not convert from fasta to clustal')
         return
 

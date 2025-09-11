@@ -7,6 +7,16 @@ import time
 from structguy import featureGenerator, util, learn, featureAnalysis
 
 import structman.base_utils.ray_utils as ray_utils
+## Import the Forest-Guided Clustering package
+from fgclustering import (
+    forest_guided_clustering, 
+    forest_guided_feature_importance, 
+    plot_forest_guided_feature_importance, 
+    plot_forest_guided_decision_paths,
+    DistanceRandomForestProximity,
+    ClusteringKMedoids,
+    ClusteringClara
+)
 
 disclaimer = """
 structguy_main.py generate_features [-i -o --verbosity]\n
@@ -23,16 +33,21 @@ def parse_arguments(argument_start = 2, manual_args = None):
                 'hp=',
                 'nocv', # Skip Cross Validation
                 'nohpo', # Skip Hyperparameter Optimization
-                'lopo', # Activate LOPO training setup
+                'lopo', # Activate LOPO training setup,
+                'endless_hpo',
                 'overwrite',
                 'feats=',
                 'type=',
                 'test_config=',
                 'support_features=',
                 'splits=',
+                'random_split',
                 'skip_final_model',
                 'trace_decisions',
-                'filter_syn'
+                'filter_syn',
+                'penalize_ttg',
+                'nofshpo',
+                'forces'
             ]
             opts, args = getopt.getopt(argv, "i:n:m:d", long_paras)
 
@@ -63,8 +78,15 @@ def parse_arguments(argument_start = 2, manual_args = None):
     path_to_splits_file = None
     path_to_support_features = None
     skip_final_model = None
+
     trace_decisions = False
+    plot_sample_forces = False
+
     filter_syn = False
+    random_split = False
+    bayesianComplete = False
+    penalize_train_test_gap = False
+    skip_fshpo = False
 
     for opt, arg in opts:
         if opt == '-i':
@@ -127,6 +149,21 @@ def parse_arguments(argument_start = 2, manual_args = None):
         if opt == '--filter_syn':
             filter_syn = True
 
+        if opt == '--random_split':
+            random_split = True
+
+        if opt == '--endless_hpo':
+            bayesianComplete = True
+
+        if opt == '--penalize_ttg':
+            penalize_train_test_gap = True
+
+        if opt == '--nofshpo':
+            skip_fshpo = True
+
+        if opt == '--forces':
+            plot_sample_forces = True
+
     if path_to_model is not None:
         if path_to_model.count('/') > 0:
             model_name = path_to_model.rsplit("/",1)[1].rsplit('.',1)[0]
@@ -136,9 +173,9 @@ def parse_arguments(argument_start = 2, manual_args = None):
         model_name = None
 
 
-    print(f'Parsing config: {path_to_project_file=}')
+    print(f'Parsing config: {path_to_project_file=} {random_split=}')
 
-    config = util.Config(path_to_project_file, hyperparameters_path = path_to_hyperparameters_file)
+    config: util.Config = util.Config(path_to_project_file, hyperparameters_path = path_to_hyperparameters_file)
 
     if skip_final_model is not None:
         config.skip_final_model = True
@@ -146,9 +183,13 @@ def parse_arguments(argument_start = 2, manual_args = None):
     config.path_to_model = path_to_model
     config.model_name = model_name
     config.overwrite = overwrite
-    
+    config.random_split = random_split
     config.debug_mode = debug
     config.filter_synonymous = filter_syn
+    config.penalize_train_test_gap = penalize_train_test_gap
+
+    if skip_fshpo:
+        config.hpo_do_feat_selection = False
 
     config.path_to_splits_file = path_to_splits_file
     if path_to_splits_file is not None:
@@ -156,15 +197,23 @@ def parse_arguments(argument_start = 2, manual_args = None):
     config.path_to_support_features = path_to_support_features
 
     config.trace_decisions = trace_decisions
+    config.plot_sample_forces = plot_sample_forces
 
     if force_lopo:
         config.crossValidation = 'LOPO'
+
+    if random_split:
+        config.crossValidation = 'Random'
+        config.prot_based_separation = False
 
     if skip_cv is not None:
         config.skip_cv = True
 
     if skip_hpo is not None:
         config.hyperOptimization = None
+
+    if bayesianComplete:
+        config.hyperOptimization = 'bayesianComplete'
 
     if overwrite_proc_n is not None:
         config.proc_n = overwrite_proc_n
@@ -180,6 +229,12 @@ def parse_arguments(argument_start = 2, manual_args = None):
         config.forest_type = forest_type
         if forest_type == 'gradient_boost' or forest_type == 'xgboost':
             config.impute_missing_values = True
+            try:
+                import torch
+                config.gpu_mode = torch.cuda.is_available()
+            except ModuleNotFoundError:
+                config.gpu_mode = False
+
 
     if test_config_path is not None:
         test_config = util.Config(test_config_path)
@@ -191,8 +246,6 @@ def parse_arguments(argument_start = 2, manual_args = None):
 def feature_generator_main():
     config, test_config = parse_arguments()
 
-    ray_utils.ray_init(config, overwrite_logging_level = 0)
-
     if config.path_structural_feature_table is not None or config.overwrite:
         featureGenerator.expand_structural_feature_table(config)
 
@@ -201,7 +254,11 @@ def build_model_main(manual_args = None):
 
     config.saveHyperParameter()
 
-    ray_utils.ray_init(config, overwrite_logging_level = 0, total_memory_quantile = 0.74)
+    logging_level = 0
+    if config.verbosity >= 4:
+        logging_level = 20
+
+    ray_utils.ray_init(config, overwrite_logging_level = logging_level, total_memory_quantile = 0.74)
 
     out_value = learn.learn(config, test_config=test_config)
 
@@ -216,12 +273,58 @@ def predict_main(manual_args = None):
     return score, y_true, y_pred
 
 def generate_info():
-    config, test_config = parse_arguments()
+    config: util.Config
+    config, _ = parse_arguments()
 
-    forest, extern_feature_names_list, impute_map, model_config = learn.loadModel(config.path_to_model)
+    t0 = time.time()
+
+    forest, extern_feature_names_list, impute_map, model_config, feat_stats = learn.loadModel(config.path_to_model)
+
+    t1 = time.time()
+
+    print(f'Loaded model: time={t1-t0}')
+
     n_of_trees, n_of_nodes = featureAnalysis.get_base_stats(forest)
 
-    print(f'Random Forest model consits of {n_of_trees} trees and a total of {n_of_nodes} Nodes')
+    t2 = time.time()
+    print(f'Random Forest model consits of {n_of_trees} trees and a total of {n_of_nodes} Nodes, time: {t2-t1}')
+
+    samples, test_feature_matrix, test_targets, sample_id_list = learn.load_data_for_pred(config, impute_map, extern_feature_names_list)
+    
+    t3 = time.time()
+    print(f'Loaded data: time={t3-t2}')
+
+    # compute the forest-guided clusters
+    fgc = forest_guided_clustering(
+        estimator=forest, 
+        X=test_feature_matrix, 
+        y=test_targets,
+        n_jobs=config.proc_n,
+        clustering_distance_metric=DistanceRandomForestProximity(memory_efficient=True, dir_distance_matrix="./"), 
+        clustering_strategy=ClusteringClara(sub_sample_size=0.6, sampling_iter=5, method="fasterpam"),
+    )
+
+    t4 = time.time()
+    print(f'Time for clustering: {t4-t3}')
+
+    # evaluate feature importance
+    feature_importance = forest_guided_feature_importance(
+        X=test_feature_matrix, 
+        y=test_targets,
+        cluster_labels=fgc.cluster_labels,
+        model_type=fgc.model_type,
+    )
+
+    # visualize the results
+    plot_forest_guided_feature_importance(
+        feature_importance_local=feature_importance.feature_importance_local,
+        feature_importance_global=feature_importance.feature_importance_global
+    )
+
+    plot_forest_guided_decision_paths(
+        data_clustering=feature_importance.data_clustering,
+        model_type=fgc.model_type,
+    )
 
     model_config.saveHyperParameter(f'{config.model_name}_hyperparameter.conf')
 
@@ -236,7 +339,7 @@ def main():
 
     key_word = sys.argv[1]
 
-    if not key_word in possible_key_words:
+    if key_word not in possible_key_words:
         print(disclaimer)
         return
 

@@ -14,18 +14,20 @@ env_name=""
 storage_folder=""
 
 verbose=false
+overwrite=false
 
 installer_temp_folder=$(mktemp -d -t structguy.XXXXXXX)
 trap 'rm -rf -- "$installer_temp_folder"' EXIT
 
 
 #Parse arguments
-while getopts s:e:v flag
+while getopts s:e:vo flag
 do
     case "${flag}" in
         e) env_name=${OPTARG};;
         s) storage_folder=${OPTARG};;
         v) verbose=true;;
+        o) overwrite=true;;
     esac
 done
 
@@ -97,7 +99,7 @@ fi
 {
     mamba install -y -c conda-forge scip==9.0.0
     echo "Installing package DataSAIL ..."
-    mamba install -y -c conda-forge -c kalininalab -c bioconda -c mosek datasail
+    mamba install -y -c conda-forge -c kalininalab -c bioconda -c mosek datasail==1.2.1
     pip install grakel
 } >&$verbose_stdout
 
@@ -145,8 +147,12 @@ make psic
 popd
 
 #Download and construct the indices for the search databases UniRef50 and UniRef90
-resources_folder_path="$new_env_path"/lib/python"$current_python_version"/site-packages/structguy/resources/
+#resources_folder_path="$new_env_path"/lib/python"$current_python_version"/site-packages/structguy/resources/
+resources_folder_path="$new_env_path"/lib/python"$current_python_version"/site-packages/
 pushd $storage_folder
+if [ "$overwrite" = true ]; then
+    rm -rf *.gz
+fi
 if ! [ -f uniref50.fasta.gz ]
 then
     wget ftp://ftp.ebi.ac.uk/pub/databases/uniprot/uniref/uniref50/uniref50.fasta.gz

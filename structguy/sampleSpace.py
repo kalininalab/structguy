@@ -14,6 +14,7 @@ from datasail.sail import datasail
 
 from structguy.sequence_util import parseFromFasta
 from structguy.support_classes import CrossValidationSlice, Feature
+from structguy.util import median
 
 from structman.base_utils.base_utils import pack, unpack
 from structman.lib.sdsc.sdsc_utils import Slotted_obj
@@ -29,6 +30,129 @@ class Sample(Slotted_obj):
 
     def addTargetValue(self,value):
         self.targetValue = value
+
+@ray.remote
+def para_calc_feat_corr(data_store, left, right):
+    feat_matrix, tv_vector = data_store
+    corr_values = []
+    #none_replacement = -1_000_000
+    tv_corrs = {}
+    feat_stats = {}
+    for index, value_vec in enumerate(feat_matrix[left:right]):
+        feat_nr_a = index + left
+        corr_values.append([])
+        for feat_nr_b, value_vec_b in enumerate(feat_matrix):
+            if feat_nr_a == feat_nr_b:
+                corr_values[index].append(1.0)
+                continue
+            #print(f'{value_vec=} {value_vec_b=}')
+            cleaned_value_vec = []
+            n_a = 0
+            cleaned_value_vec_b = []
+            n_b = 0
+            if feat_nr_a not in tv_corrs:
+                tv_vec_a = []
+                vec_a = []
+                calc_a = True
+            else:
+                calc_a = False
+            if feat_nr_b not in tv_corrs:
+                tv_vec_b = []
+                vec_b = []
+                calc_b = True
+            else:
+                calc_b = False
+            n_both_none = 0
+
+
+            for ind, value in enumerate(value_vec):
+                value_b = value_vec_b[ind]
+                if value is not None and value_b is not None:
+                    cleaned_value_vec.append(value)
+                    cleaned_value_vec_b.append(value_b)
+                    n_a += 1
+                    n_b += 1
+                elif value is None and value_b is not None:
+                    #cleaned_value_vec.append(none_replacement)
+                    #cleaned_value_vec_b.append(value_b)
+                    n_b += 1
+                elif value is not None and value_b is None:
+                    #cleaned_value_vec.append(value)
+                    #cleaned_value_vec_b.append(none_replacement)
+                    n_a += 1
+                else:
+                    n_both_none += 1
+
+                if calc_a:
+                    if value is not None:
+                        tv_vec_a.append(tv_vector[ind])
+                        vec_a.append(value)
+                if calc_b:
+                    if value_b is not None:
+                        tv_vec_b.append(tv_vector[ind])
+                        vec_b.append(value_b)
+            if calc_a:
+                tv_corr_a, _ = stats.spearmanr(vec_a, tv_vec_a)
+                tv_corrs[feat_nr_a] = tv_corr_a
+
+                try:
+                    min_val = min(vec_a)
+                    max_val = max(vec_a)
+                except ValueError:
+                    min_val = None
+                    max_val = None
+                try:
+                    mean_val = sum(vec_a) / len(vec_a)
+                    
+                except ZeroDivisionError:
+                    mean_val = None
+                try:
+                    median_val = median(vec_a)
+                except IndexError:
+                    median_val = None
+
+                feat_stats[feat_nr_a] = (min_val, max_val, mean_val, median_val)
+
+            else:
+                tv_corr_a = tv_corrs[feat_nr_a]
+
+
+            if calc_b:
+                tv_corr_b, _ = stats.spearmanr(vec_b, tv_vec_b)
+                tv_corrs[feat_nr_b] = tv_corr_b
+                if feat_nr_b >= left and feat_nr_b < right:
+                    try:
+                        min_val = min(vec_b)
+                        max_val = max(vec_b)
+                    except ValueError:
+                        min_val = None
+                        max_val = None
+                    try:
+                        mean_val = sum(vec_b) / len(vec_b)
+                        
+                    except ZeroDivisionError:
+                        mean_val = None
+                    try:
+                        median_val = median(vec_b)
+                    except IndexError:
+                        median_val = None
+
+                    feat_stats[feat_nr_b] = (min_val, max_val, mean_val, median_val)
+
+            else:
+                tv_corr_b = tv_corrs[feat_nr_b]
+
+
+            corr, _ = stats.spearmanr(cleaned_value_vec, cleaned_value_vec_b)
+            cov_a = n_a / len(value_vec)
+            cov_b = n_b / len(value_vec)
+            try:
+                cov_both = len(cleaned_value_vec)/(len(value_vec)-n_both_none)
+            except ZeroDivisionError:
+                cov_both = 0.
+            corr_values[index].append((corr, cov_a, cov_b, cov_both, tv_corr_a, tv_corr_b))
+
+    return corr_values, left, right, feat_stats
 
 @ray.remote(max_calls = 1)
 def calc_gdm_submatrix(store,i):
@@ -58,7 +182,7 @@ def splitDataSet(config, sample_dict, specific_id=None, protein_wise=False, debu
 
     if not protein_wise:
         #simple random split
-        if specific_id == None:
+        if specific_id is None:
             test_nrs = set(np.random.choice(total_size,test_size,replace=False))
             for sample_id in sample_dict:
                 sample = sample_dict[sample_id]
@@ -79,16 +203,16 @@ def splitDataSet(config, sample_dict, specific_id=None, protein_wise=False, debu
         # Protein-nested split
         test_proteins = set()
         test_set_sum = 0
-        if specific_id == None:
+        if specific_id is None:
             protein_sizes = {}
             for u_ac,aac in sample_dict:
-                if not u_ac in protein_sizes:
+                if u_ac not in protein_sizes:
                     protein_sizes[u_ac] = 1
                 else:
                     protein_sizes[u_ac] += 1
             while test_set_sum < (test_size - test_size*split_rate):
                 random_protein = random.choice(list(protein_sizes.keys()))
-                if not random_protein in test_proteins:
+                if random_protein not in test_proteins:
                     test_proteins.add(random_protein)
                     test_set_sum += protein_sizes[random_protein]
 
@@ -128,9 +252,20 @@ class SampleSpace(Slotted_obj):
         'feat_pos_dict', 'sample_pos_dict', 'vector_store',
         'current_vector',
         'geometric_distance_map', 'current_geometric_exponent', 'sequence_map',
-        'impute_map'
+        'impute_map', 'feat_corr_matrix', 'feat_stats'
+    ]
+
+    slot_mask = [
+        False, False, False,
+        True, True, True,
+        True, True, False,
+        False,
+        False, False, False,
+        False, True, True
     ]
     def __init__(self, config=None):
+        for att in self.__slots__:
+            self.__setattr__(att, None)
         self.samples = {}
         self.features = {}
         self.feature_matrix_dict = {}
@@ -218,6 +353,68 @@ class SampleSpace(Slotted_obj):
         self.feature_names = list(self.features.keys())
         self.fillDefaultValues()
 
+    def draw_subsamples(self, n_of_subsamples: int = 50_000):
+        sample_list: list[tuple[str, str]] = list(self.samples.keys())
+        if n_of_subsamples >= len(self.samples):
+            return sample_list
+        subsamples = random.sample(sample_list, n_of_subsamples)
+        return subsamples
+
+    def calc_subsamples_feat_corr_matrix(self, config, n_of_subsamples = 50_000):
+        subsamples = self.draw_subsamples(n_of_subsamples=n_of_subsamples)
+        feat_matrix = np.array(self.get_feat_matrix_from_ids(subsamples, self.feature_names))#, dtype=float)
+        #feat_matrix = np.nan_to_num(feat_matrix, nan=-1_000_000)
+        feat_matrix = feat_matrix.transpose()
+        feats_per_process = len(self.feature_names) // config.proc_n
+        n_of_procs = config.proc_n
+        if feats_per_process == 0:
+            feats_per_process = 1
+            n_of_procs = len(self.feature_names)
+        elif len(self.feature_names) % config.proc_n != 0:
+            feats_per_process += 1
+
+        tv_vector = []
+        for sample_id in subsamples:
+            target_value = self.samples[sample_id].targetValue
+            tv_vector.append(target_value)
+
+        data_store = ray.put((feat_matrix, tv_vector))
+
+        feat_corr_processes = []
+
+        feat_corr_matrix = [[]]*len(self.feature_names) 
+
+        for proc_id in range(n_of_procs):
+            left = proc_id * feats_per_process
+            right = (proc_id+1) * feats_per_process
+            feat_corr_processes.append(para_calc_feat_corr.remote(data_store, left, right))
+            if right >= len(self.feature_names):
+                break 
+
+        results = ray.get(feat_corr_processes)
+
+        complete_feat_stats = {}
+        for feat_corr_slice, left, right, feat_stats in results:
+            #print(f'{left=} {right=} {len(feat_corr_slice)=} {feat_stats=}')
+            for index in range(left,right):
+                slice_index = index-left
+                if slice_index >= len(feat_corr_slice):
+                    break
+                feat_corr_matrix[index] = feat_corr_slice[slice_index]
+                #print(f'{index=} {slice_index=} {feat_corr_slice[slice_index][:10]=}')
+        
+            for feat_nr in feat_stats:
+                feat_name = self.feature_names[feat_nr]
+                #print(f'{feat_nr} {feat_name}')
+                complete_feat_stats[feat_name] = feat_stats[feat_nr]
+
+        self.feat_stats = complete_feat_stats
+        self.feat_corr_matrix = feat_corr_matrix
+
+        print(f'{len(self.feat_stats)=} {len(self.feat_corr_matrix)=} {len(self.feature_names)}')
+        return feat_corr_matrix
+
+
     def external_impute(self, external_impute):
         for feat_name in self.features:
             feat = self.features[feat_name]
@@ -228,7 +425,7 @@ class SampleSpace(Slotted_obj):
             else:
                 impute_value = 0.
             for sample_id in self.feature_matrix_dict:
-                if not feat_name in self.feature_matrix_dict[sample_id]:
+                if feat_name not in self.feature_matrix_dict[sample_id]:
                     self.feature_matrix_dict[sample_id][feat_name] = impute_value
                 elif self.feature_matrix_dict[sample_id][feat_name] is None:
                     self.feature_matrix_dict[sample_id][feat_name] = impute_value
@@ -263,7 +460,7 @@ class SampleSpace(Slotted_obj):
                 impute_value = 0
             self.impute_map[feat_name] = impute_value
             for sample_id in self.feature_matrix_dict:
-                if not feat_name in self.feature_matrix_dict[sample_id]:
+                if feat_name not in self.feature_matrix_dict[sample_id]:
                     self.feature_matrix_dict[sample_id][feat_name] = impute_value
                 elif self.feature_matrix_dict[sample_id][feat_name] is None:
                     self.feature_matrix_dict[sample_id][feat_name] = impute_value
@@ -278,7 +475,7 @@ class SampleSpace(Slotted_obj):
             (u_ac,aac) = sample_id
             target_value = self.samples[sample_id].targetValue
             aac_base = aac[:-1]
-            if not (u_ac,aac_base) in pos_map:
+            if (u_ac,aac_base) not in pos_map:
                 pos_map[(u_ac,aac_base)] = [1,aac[-1]]#['all neutral',aac[-1]]
             if target_value < 0.25:
                 pos_map[(u_ac,aac_base)][0] = 0#'possibly damaging'
@@ -316,7 +513,7 @@ class SampleSpace(Slotted_obj):
     def cleanFeatureValues(self):
         del_values = []
         for sample_id in self.feature_matrix_dict:
-            if not sample_id in self.samples:
+            if sample_id not in self.samples:
                 del_values.append(sample_id)
         for sample_id in del_values:
             del self.feature_matrix_dict[sample_id]
@@ -335,14 +532,14 @@ class SampleSpace(Slotted_obj):
         return
 
     def addValue(self,sample_id,value,feat_name):
-        if not sample_id in self.samples:
+        if sample_id not in self.samples:
             self.samples[sample_id] = Sample(sample_id,self.sample_nr)
             self.sample_nr += 1
             self.feature_matrix_dict[sample_id] = {}
         if not self.features[feat_name].f_type == 'categorical':
             self.feature_matrix_dict[sample_id][feat_name] = value
         else:
-            if not value in self.features[feat_name].category_map:
+            if value not in self.features[feat_name].category_map:
                 self.features[feat_name].category_map[value] = self.features[feat_name].category_counter
                 self.features[feat_name].category_backmap[self.features[feat_name].category_counter] = value
                 self.features[feat_name].category_counter += 1
@@ -363,8 +560,15 @@ class SampleSpace(Slotted_obj):
     def fillDefaultValues(self):
         for sample_id in self.samples:
             for feat_name in self.features:
-                if not feat_name in self.feature_matrix_dict[sample_id]:
+                if feat_name not in self.feature_matrix_dict[sample_id]:
                     self.feature_matrix_dict[sample_id][feat_name] = self.features[feat_name].default
+
+    def dump(self, outfile):
+        bu_slotmask = self.deactivate_slot_mask()
+        packed = pack(self)
+        with open(outfile, 'wb') as f:
+            f.write(packed)
+        self.reactivate_slot_mask(bu_slotmask)
 
     def write(self, outfile):
 
@@ -428,15 +632,15 @@ class SampleSpace(Slotted_obj):
             for feat_name in fixed_feat_names:
                 try:
                     self.raw_feature_matrix[sample_pos].append(self.feature_matrix_dict[sample_id][feat_name])
-                except:
+                except KeyError:
                     self.raw_feature_matrix[sample_pos].append(0.)
-        del self.feature_matrix_dict
+        self.feature_matrix_dict = None
 
 
     def get_feature_value(self, sample_id, feat_name):
         try:
             feat_value = self.raw_feature_matrix[self.sample_pos_dict[sample_id]][self.feat_pos_dict[feat_name]]
-        except:
+        except KeyError:
             feat_value = None
         return feat_value
 
@@ -453,13 +657,15 @@ class SampleSpace(Slotted_obj):
 
 
     def get_feat_matrix(self, feat_id_vec, sample_pos_vec):
-        feat_matrix = []
+        feat_matrix: list[list[int | float]] = []
         for sample_pos in sample_pos_vec:
             feat_vec = []
             for feat_id in feat_id_vec:
                 try:
                     feat_vec.append(self.raw_feature_matrix[sample_pos][feat_id])
-                except:
+                except KeyError:
+                    feat_vec.append(None)
+                except TypeError:
                     feat_vec.append(None)
             feat_matrix.append(feat_vec)
         return feat_matrix
@@ -469,8 +675,10 @@ class SampleSpace(Slotted_obj):
         for feat_name in feat_names:
             try:
                 feat_id_vec.append(self.feat_pos_dict[feat_name])
-            except:
+            except KeyError:
                 feat_id_vec.append(None)
+            except TypeError:
+                print(f'{self.feat_pos_dict[:100]=}')
 
         sample_pos_vec = list(range(len(self.raw_feature_matrix)))
         return self.get_feat_matrix(feat_id_vec, sample_pos_vec)
@@ -484,12 +692,12 @@ class SampleSpace(Slotted_obj):
         for sample_id in sample_ids:
             try:
                 sample_pos_vec.append(self.sample_pos_dict[sample_id])
-            except:
+            except KeyError:
                 sample_pos_vec.append(None)
         return self.get_feat_matrix(feat_id_vec, sample_pos_vec)
 
     def setGeometricDistanceMap(self,config):
-        if self.geometric_distance_map != None and self.current_geometric_exponent == config.geometric_exponent:
+        if self.geometric_distance_map is not None and self.current_geometric_exponent == config.geometric_exponent:
             return
         t0 = time.time()
         print('Start of GDM calculation with gexp:', config.geometric_exponent)
@@ -615,23 +823,30 @@ class SampleSpace(Slotted_obj):
     def filterSamplesByMappedStructures(self,config):
         del_list = []
         for sample_id in self.samples:
-            if self.samples[sample_id].amount_of_structures == None:
+            if self.samples[sample_id].amount_of_structures is None:
                 self.samples[sample_id].amount_of_structures = 0
             if self.samples[sample_id].amount_of_structures < config.structure_threshold:
                 del_list.append(sample_id)
         print('Filtered ',len(del_list),' samples in the structure filtering')
         self.removeSamples(del_list)
 
-    def standardFilter(self, config):
+    def standardFilter(self, config, filter_synon = False):
         del_list = []
         num_tv_viol = 0
         num_ff = 0
         num_tf = 0
         num_pf = 0
+        num_sf = 0
         N = len(self.samples)
         for sample_id in self.samples:
             sample = self.samples[sample_id]
-            u_ac,aac = sample_id
+            u_ac, aac = sample_id
+
+            if filter_synon:
+                if aac[0] == aac[-1]:
+                    del_list.append(sample_id)
+                    num_sf += 1
+                    continue
 
             for tag in sample.tags.split(','):
                 if tag in config.tag_filter:
@@ -644,7 +859,7 @@ class SampleSpace(Slotted_obj):
                 num_pf += 1
                 continue
 
-            if ((sample.targetValue == None or sample.targetValue == 'None') and not config.predict_mode) or sample.targetValue != sample.targetValue or sample.targetValue in config.targetFilter:
+            if ((sample.targetValue is None or sample.targetValue == 'None') and not config.predict_mode) or sample.targetValue != sample.targetValue or sample.targetValue in config.targetFilter:
                 if sample.targetValue in config.target_translator:
                     sample.targetValue = config.target_translator[sample.targetValue]
                 else:
@@ -653,8 +868,12 @@ class SampleSpace(Slotted_obj):
                     continue
                 
             
-        print('Filtered ',len(del_list),'of',N,' samples in the standard filtering.',num_tv_viol,
-                'due to target value violation,',num_ff,'due to feature filter',num_tf,'due to tag filter',num_pf,'due to protein filter')
+        print(f'Filtered {len(del_list)} of {N} samples in the standard filtering')
+        print(f'{num_tv_viol} due to target value violation')
+        print(f'{num_ff} due to feature filter')
+        print(f'{num_tf} due to tag filter')
+        print(f'{num_pf} due to protein filter')
+        print(f'{num_sf} due to synonoumus filter')
         self.removeSamples(del_list)
 
     def adjustParameterRanges(self,config):
@@ -668,7 +887,7 @@ class SampleSpace(Slotted_obj):
 
 cv_slots = ['slices', 'slice_ids', 'cv_counter', 'isSlice', 'slice_slices']
 
-class CrossValidation:
+class CrossValidation(Slotted_obj):
     __slots__ = cv_slots
     def __init__(self):
         self.slices = {}
@@ -754,18 +973,18 @@ class FullSlice(CrossValidation):
         self.slices[0] = full_slice_obj
 
 class X_fold_cv(CrossValidation):
-    def __init__(self, sampleSpace, config, x_fold):
+    def __init__(self, sampleSpace, config):
         super().__init__()
         prot_map = {}
         for (u_ac,aac) in sampleSpace.samples:
-            if not u_ac in prot_map:
+            if u_ac not in prot_map:
                 prot_map[u_ac] = 0
             prot_map[u_ac] += 1
 
         self.prot_map = prot_map
         self.prots = list(prot_map.keys())
 
-        self.cross_slice_size = len(sampleSpace.samples)/x_fold
+        self.cross_slice_size = len(sampleSpace.samples)/config.crossValidation_fold
 
         self.sample_ids = list(sampleSpace.samples.keys())
         self.tag_based_separation_done = False
@@ -775,7 +994,7 @@ class X_fold_cv(CrossValidation):
         n_of_assigned_prots = 0
         n_of_assigned_samples = 0
 
-        for cv_counter in range(x_fold):
+        for cv_counter in range(config.crossValidation_fold):
             self.slice_ids.append(cv_counter)
             test_prots = set()
             slice_size = 0
@@ -933,6 +1152,8 @@ class DataSAIL_cv(CrossValidation):
                 self.__setattr__(slot, as_list[slot_number])
             return
         super().__init__()
+        if sampleSpace is None:
+            return
 
         weight_map = {}
         prots = set()
@@ -945,56 +1166,73 @@ class DataSAIL_cv(CrossValidation):
         self.prots = list(prots)
 
         datasail_test_size = 100 // config.crossValidation_fold
-        datasail_train_size = 100 - datasail_test_size
+        #datasail_train_size = 100 - datasail_test_size
 
         splits = [datasail_test_size] * config.crossValidation_fold
 
         names = [f'split_{x}' for x in range(config.crossValidation_fold)]
 
         eps = 0.05
+        if config.random_split:
+            technique = ['R']
+        else:
+            technique = ['C1e']
 
         t1 = time.time()
         if config.verbosity >= 2:
             print(f'Time for init DataSAIL_cv Part 1: {t1-t0} {eps=}')
+        try:
+            if config.verbosity >= 4:
+                print(f'Call of datasail with: e_data: {config.path_to_sequence_fasta}, e_weights: {len(weight_map)=}, splits: {splits}, names: {names}')
 
-        if config.verbosity >= 3:
-            print(f'Call of datasail with: e_data: {config.path_to_sequence_fasta}, e_weights: {weight_map} ({len(weight_map)}), splits: {splits}, names: {names}')
+                write_weight_map(weight_map, 'weight_map_for_datasail.tsv')
 
-            write_weight_map(weight_map, 'weight_map_for_datasail.tsv')
+                raw_datasail_splits = datasail(
+                    e_data = config.path_to_sequence_fasta,
+                    #e_weights = weight_map,
+                    splits = splits,
+                    techniques = technique,
+                    names = names,
+                    e_type = 'P',
+                    solver = 'SCIP',
+                    epsilon = eps,
+                    overflow = 'assign',
+                    e_sim = 'mmseqs',
+                    verbose = 'I')
+
+            else:
+            
+                raw_datasail_splits = datasail(
+                    e_data = config.path_to_sequence_fasta,
+                    #e_weights = weight_map,
+                    splits = splits,
+                    techniques = technique,
+                    names = names,
+                    e_type = 'P',
+                    solver = 'SCIP',
+                    epsilon = eps,
+                    overflow = 'assign',
+                    e_sim = 'mmseqs',
+                    )
+        except ValueError:
             raw_datasail_splits = datasail(
-                e_data = config.path_to_sequence_fasta,
-                e_weights = weight_map,
-                splits = splits,
-                techniques = ['C1e'],
-                names = names,
-                e_type = 'P',
-                solver = 'SCIP',
-                epsilon = eps,
-                overflow = 'assign',
-                e_sim = 'mmseqs',
-                verbose = 'I')
-
-        else:
-
-            raw_datasail_splits = datasail(
-                e_data = config.path_to_sequence_fasta,
-                e_weights = weight_map,
-                splits = splits,
-                techniques = ['C1e'],
-                names = names,
-                e_type = 'P',
-                solver = 'SCIP',
-                epsilon = eps,
-                overflow = 'assign',
-                )
-
+                    e_data = config.path_to_sequence_fasta,
+                    #e_weights = weight_map,
+                    splits = splits,
+                    techniques = technique,
+                    names = names,
+                    e_type = 'P',
+                    solver = 'SCIP',
+                    epsilon = eps,
+                    overflow = 'assign'
+                    )
         t2 = time.time()
         if config.verbosity >= 2:
             print(f'Time for init DataSAIL_cv Part 2: {t2-t1}')
 
         #print(raw_datasail_splits)
 
-        datasail_splits = raw_datasail_splits[0]['C1e'][0]
+        datasail_splits = raw_datasail_splits[0][technique[0]][0]
         #print(datasail_splits)
 
         train_test_pairs = {}
@@ -1018,7 +1256,7 @@ class DataSAIL_cv(CrossValidation):
         if config.verbosity >= 2:
             print(f'Time for init DataSAIL_cv Part 3: {t3-t2}')
 
-        if config.verbosity >= 2:
+        if config.verbosity >= 4:
             print(f'Init datasail:\nSplits: {train_test_pairs}\n')
 
         store = ray.put((config, sampleSpace.samples, sampleSpace.feature_names, prots))

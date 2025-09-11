@@ -6,6 +6,7 @@ import numpy as np
 from psutil import virtual_memory
 from scipy import stats
 
+import pickle
 import matplotlib
 # Force matplotlib to not use any Xwindows backend.
 matplotlib.use('Agg')
@@ -13,6 +14,7 @@ import matplotlib.pyplot as plt
 
 from structguy.scripts import radarplot
 from structman.base_utils.base_utils import Errorlog, resolve_path
+from structguy.consts import feat_name_category_dict, feature_categories
 
 class OutputCapture:
     def __init__(self):
@@ -28,6 +30,10 @@ class OutputCapture:
         return self.captured_output
 
 def parse_conf(filepath):
+    if filepath is None:
+        return []
+    if not os.path.isfile(filepath):
+        return []
     f = open(filepath, 'r')
     lines = f.read().split('\n')
     f.close()
@@ -53,7 +59,7 @@ def parse_conf(filepath):
 class Config:
     def __init__(self, path_to_project_file, hyperparameters_path = None):
         util_scriptpath = os.path.abspath(resolve_path(__file__))
-        settings_path = f'{util_scriptpath.rsplit("/",1)[0]}/resources/search_db_settings.conf'
+        settings_path = f'{util_scriptpath.rsplit("/",1)[0]}/../search_db_settings.conf'
         print(f'Parsing search db settings: {settings_path=}')
         search_db_opt_args = parse_conf(settings_path)
 
@@ -65,6 +71,7 @@ class Config:
         self.gigs_of_ram = mem.total / 1024 / 1024 / 1024
         self.errorlog = Errorlog()
         self.python_env_expanded_for_ray = False
+        self.gpu_mode = False
 
         self.overwrite = False
         self.dataset_name = ''
@@ -139,6 +146,7 @@ class Config:
 
         self.tvmb_rank_threshold = 0 #2
         self.tvpmb_rank_threshold = 0
+        self.corr_thresh = 0.9
 
         #Confusion feature selection
         self.sequential_confusion_rank_threshold = 91
@@ -188,8 +196,9 @@ class Config:
         self.optimize_mean = False
         self.repeat_training = 1
 
-        self.feature_penalty = 0.00002
+        self.feature_penalty = 0.00001
 
+        self.auto_weighting = True
         self.forest_type = 'random'
 
         #Forest hyperparameters
@@ -217,28 +226,34 @@ class Config:
         self.learning_rate = 0.1
         self.min_child_weight = 1.5
         self.early_stopping = 30
+        self.xgb_gamma = 0.1
+        self.xgb_alpha = 0.
+        self.xgb_lambda = 1.
+        self.colsample_bytree = 1.
+        self.max_delta_step = 0.
 
-
-        self.fs_tree_depth = 5
-        self.fs_num_of_trees = 100
+        self.feat_impact_thresh = 0.
+        self.fs_tree_depth = 10
+        self.fs_num_of_trees = 50
         self.fs_min_impurity_decrease_exp = 15.
         self.fs_min_sample_split = 20
         self.fs_tree_min_leaf_samples = 3
         self.fs_ccp_alpha_exp = 30.
         self.fs_max_sample_parameter = 0.0583
 
-        self.maximal_exp = 19.0
+        self.maximal_exp = 30.0
+        self.sub_sample_factor = 1.0
 
         #intervals for hyperparameter Optimization
         self.class_weights = ['balanced','balanced_subsample',None]
         self.bootstrap_parameters = [True,False]
         self.max_feature_parameters = ['auto','log2','sqrt']
         self.max_feature_cont_parameter_bounds = [0.,1.]
-        self.min_sample_split_half_step = [2,200]
-        self.min_sample_leaf_half_step = [1,50]
+        self.min_sample_split_half_step = [2,2000]
+        self.min_sample_leaf_half_step = [1,500]
         self.tree_depth_half_step = [1,400]
-        self.forest_size_half_step = [10,500]
-        self.min_impurity_decrease_exp_half_step = [2.0,20.0]
+        self.forest_size_half_step = [10,5000]
+        self.min_impurity_decrease_exp_half_step = [1.0,20.0]
         self.oob_scores = [True,False]
         self.ccp_alpha_exp_half_step = [1.,30.]
         self.max_sample_half_step = [0.,1.]
@@ -249,6 +264,7 @@ class Config:
 
         self.list_ranking_thresh_bounds = [0, 'max']
         self.confusion_goodwill_bounds = [0., 1.0]
+        self.corr_thresh_bounds = [0.5, 1.0]
 
         self.tvmb_rank_half_step = [0, 'max']
         self.tvpmb_rank_half_step = [0, 'max']
@@ -617,7 +633,7 @@ class Config:
                     self.min_sample_split = int(arg)
                     continue
                 if opt == 'tree_min_leaf_samples':
-                    self.tree_min_leaf_samples = int(arg)
+                    self.tree_min_leaf_samples = float(arg)
                     continue
                 if opt == 'num_of_trees':
                     self.num_of_trees = int(arg)
@@ -699,7 +715,7 @@ class Config:
                     self.sequential_confusion_rank_threshold = int(arg)
                     continue
                 if opt == 'confusion_rank_threshold':
-                    self.confusion_rank_threshold = int(arg)
+                    self.confusion_rank_threshold = float(arg)
                     continue
                 if opt == 'err_warping_exp':
                     self.err_warping_exp = float(arg)
@@ -716,6 +732,24 @@ class Config:
                 if opt == 'early_stopping':
                     self.early_stopping = int(arg)
                     continue
+                if opt == 'xgb_gamma':
+                    self.xgb_gamma = float(arg)
+
+                if opt == 'xgb_alpha':
+                    self.xgb_alpha = float(arg)
+
+                if opt == 'xgb_lambda':
+                    self.xgb_lambda = float(arg)
+
+                if opt == 'colsample_bytree':
+                    self.colsample_bytree = float(arg)
+
+                if opt == 'max_delta_step':
+                    self.max_delta_step = float(arg)
+
+                if opt == 'feat_impact_thresh':
+                    self.feat_impact_thresh = float(arg)
+
                 if opt == 'fs_tree_depth':
                     self.fs_tree_depth = int(arg)
                     continue
@@ -736,6 +770,9 @@ class Config:
                     continue
                 if opt == 'fs_max_sample_parameter':
                     self.fs_max_sample_parameter = float(arg)
+                    continue
+                if opt == 'corr_thresh':
+                    self.corr_thresh = float(arg)
                     continue
 
         #self.blacklist = ['P28482']#set(['P28482','P42212','P38398','P06654','Q9UK59','P04386','P00552'])
@@ -784,7 +821,8 @@ class Config:
                 self.number_of_bins, self.list_ranking_thresh, self.confusion_goodwill,
                 self.p_val_thresh,self.sample_weight_parameter,self.reg_alpha_exp, self.reg_c_exp, self.reg_thresh_exp, self.geometric_exponent,
                 self.learning_rate, self.min_child_weight, self.early_stopping, self.fs_tree_depth, self.fs_num_of_trees, self.fs_min_impurity_decrease_exp, self.fs_min_sample_split,
-                self.fs_tree_min_leaf_samples, self.fs_ccp_alpha_exp, self.fs_max_sample_parameter
+                self.fs_tree_min_leaf_samples, self.fs_ccp_alpha_exp, self.fs_max_sample_parameter, self.corr_thresh, self.xgb_gamma, self.xgb_alpha,
+                self.xgb_lambda, self.colsample_bytree, self.max_delta_step, self.feat_impact_thresh
                 )
         return sct
 
@@ -804,7 +842,12 @@ class Config:
         print(f'Min Child Weight: {self.min_child_weight}')
         print(f'Early stopping: {self.early_stopping}')
         print('Max sample:',self.max_sample_parameter)
-
+        print(f'XGB gamma: {self.xgb_gamma}')
+        print(f'XGB alpha: {self.xgb_alpha}')
+        print(f'XGB lambda: {self.xgb_lambda}')
+        print(f'XGB colsample_bytree: {self.colsample_bytree}')
+        print(f'XGB max delta step: {self.max_delta_step}')
+        print(f'feat_impact_thresh: {self.feat_impact_thresh}')
         print('TVMB rank threshold:',self.tvmb_rank_threshold)
         print('TVPMB rank threshold:',self.tvpmb_rank_threshold)
         print('Confusion rank threshold:', self.confusion_rank_threshold)
@@ -828,6 +871,7 @@ class Config:
         print(f'FS min leaf samples: {self.fs_tree_min_leaf_samples}')
         print(f'FS CCP alpha exp: {self.fs_ccp_alpha_exp}')
         print(f'FS max sampes: {self.fs_max_sample_parameter}')
+        print(f'Feature correlation threshold: {self.corr_thresh}')
         return
 
     def printHyperParameter(self):
@@ -843,9 +887,15 @@ class Config:
         print("min_impurity_decrease_exp", self.min_impurity_decrease_exp)
         print("oob_score", self.oob_score)
         print("ccp_alpha_exp", self.ccp_alpha_exp)
-        print(f'learning_rate: {self.learning_rate}')
-        print(f'min_child_weight: {self.min_child_weight}')
-        print(f'early_stopping" {self.early_stopping}')
+        print(f'learning_rate {self.learning_rate}')
+        print(f'min_child_weight {self.min_child_weight}')
+        print(f'early_stopping {self.early_stopping}')
+        print(f'xgb_gamma {self.xgb_gamma}')
+        print(f'xgb_alpha {self.xgb_alpha}')
+        print(f'xgb_lambda {self.xgb_lambda}')
+        print(f'colsample_bytree {self.colsample_bytree}')
+        print(f'max_delta_step {self.max_delta_step}')
+        print(f'feat_impact_thresh {self.feat_impact_thresh}')
         print("max_sample_parameter", self.max_sample_parameter)
         print("number_of_bins", self.number_of_bins)
         print("p_val_thresh", self.p_val_thresh)
@@ -865,7 +915,8 @@ class Config:
         print(f'fs_min_sample_split {self.fs_min_sample_split}')
         print(f'fs_tree_min_leaf_samples {self.fs_tree_min_leaf_samples}')
         print(f'fs_ccp_alpha_exp {self.fs_ccp_alpha_exp}')
-        print(f'fs_max_sample_parameter {self.fs_max_sample_parameter}')        
+        print(f'fs_max_sample_parameter {self.fs_max_sample_parameter}')    
+        print(f'Feature correlation threshold {self.corr_thresh}')    
         return
 
     def saveHyperParameter(self, outputFileName = None):
@@ -978,7 +1029,8 @@ def combine_individual_effects(individual_effects, multiply = True):
 class Scores:
     __slots__ = [
                     'mse', 'wmse', 'r2', 'wr2', 'corr', 'acc', 'roc', 'precision', 'recall', 'f1',
-                    'mcc', 'pearson_r', 'n_of_features', 'mean_spearman', 'mean_pearson', 'feature_penalty'
+                    'mcc', 'pearson_r', 'n_of_features', 'mean_spearman', 'mean_pearson', 'feature_penalty',
+                    'train_scores'
                 ]
     def __init__(
                     self, mse = None, r2 = None, corr = None, acc = None, roc = None, precision = None,
@@ -988,6 +1040,7 @@ class Scores:
                 ):
         self.n_of_features = n_of_features
         self.feature_penalty = feature_penalty
+        self.train_scores = None
         if zero:
             self.mse = float('inf')
             self.wmse = float('inf')
@@ -1126,9 +1179,9 @@ def calc_protein_wise_corr(y_test, y_pred, sample_ids, corr_function, mono_retur
 
 def rho_eval_for_xgboost(predt, y):
     corr, _ = stats.spearmanr(predt, y)
-    return corr
+    return (1.0-corr)
 
-def objective_function_criterium(config, scores, best_scores, feature_penalty = None):
+def objective_function_criterium(config, scores, best_scores, feature_penalty = None, margin=1.0):
     if best_scores is None:
         if scores is None:
             return False
@@ -1139,7 +1192,23 @@ def objective_function_criterium(config, scores, best_scores, feature_penalty = 
     obj_score = get_objective_score(config, scores, feature_penalty = feature_penalty)
     obj_best_score = get_objective_score(config, best_scores, feature_penalty = feature_penalty)
 
-    better = obj_score > obj_best_score
+    train_score = get_objective_score(config, scores.train_scores, feature_penalty=feature_penalty)
+    best_train_score = get_objective_score(config, best_scores.train_scores, feature_penalty = feature_penalty)
+
+    if config.penalize_train_test_gap:
+        if config.verbosity >= 2:
+            print(f'Objective function criterium - penalize train test gap {obj_score=} {obj_best_score=} {train_score=} {best_train_score=}')
+
+        obj_score = ((1+obj_score)**2) - abs(train_score-obj_score)
+        obj_best_score = ((1+obj_best_score)**2) - abs(best_train_score-obj_best_score)
+
+        if config.verbosity >= 2:
+            print(f'After penalizing: {obj_score=} {obj_best_score=}')
+    else:
+        if config.verbosity >= 2:
+            print(f'Objective function criterium {obj_score=} {obj_best_score=} {train_score=} {best_train_score=}')
+
+    better = obj_score > (obj_best_score*margin)
 
     if config.verbosity >= 3:
         print(f'Objective function criterium: {better} {type(obj_score)} {type(obj_best_score)}')
@@ -1233,34 +1302,40 @@ def mean_scores(scores_list):
     pearson_rs = []
     mean_pearsons = []
     n_of_features_s = []
+    train_scores_list = []
+
+    scores_obj: Scores
 
     for scores_obj in scores_list:
-        if scores_obj.mse != None:
+        if scores_obj.mse is not None:
             mses.append(scores_obj.mse)
-        if scores_obj.r2 != None:
+        if scores_obj.r2 is not None:
             r2s.append(scores_obj.r2)
-        if scores_obj.corr != None:
+        if scores_obj.corr is not None:
             corrs.append(scores_obj.corr)
         if scores_obj.mean_spearman is not None:
             mean_spearmans.append(scores_obj.mean_spearman)
-        if scores_obj.pearson_r != None:
+        if scores_obj.pearson_r is not None:
             pearson_rs.append(scores_obj.pearson_r)
         if scores_obj.mean_pearson is not None:
             mean_pearsons.append(scores_obj.mean_pearson)
-        if scores_obj.acc != None:
+        if scores_obj.acc is not None:
             accs.append(scores_obj.acc)
-        if scores_obj.roc != None:
+        if scores_obj.roc is not None:
             rocs.append(scores_obj.roc)
-        if scores_obj.precision != None:
+        if scores_obj.precision is not None:
             precisions.append(scores_obj.precision)
-        if scores_obj.recall != None:
+        if scores_obj.recall is not None:
             recalls.append(scores_obj.recall)
-        if scores_obj.f1 != None:
+        if scores_obj.f1 is not None:
             f1s.append(scores_obj.f1)
-        if scores_obj.mcc != None:
+        if scores_obj.mcc is not None:
             mccs.append(scores_obj.mcc)
         if scores_obj.n_of_features is not None:
             n_of_features_s.append(scores_obj.n_of_features)
+        if scores_obj.train_scores is not None:
+            train_scores_list.append(scores_obj.train_scores)
+
 
     if len(n_of_features_s) == 0:
         n_of_features = None
@@ -1271,6 +1346,10 @@ def mean_scores(scores_list):
                         precision = mean(precisions), recall = mean(recalls), f1 = mean(f1s), mcc = mean(mccs),
                         pearson_r = mean(pearson_rs), mean_pearson = mean(mean_pearsons), mean_spearman = mean(mean_spearmans),
                         n_of_features = n_of_features)
+    if len(train_scores_list) > 0:
+        mean_train_scores = mean_scores(train_scores_list)
+        scores_obj.train_scores = mean_train_scores
+
     return scores_obj
 
 def writeOutput(outfile,feature_names,feature_matrix,id_vector,reg_vector,seq_id_vector,prediction,test_ids,sub_file_id=None):
@@ -1850,5 +1929,113 @@ if __name__ == "__main__":
         plotMPP(config,indatafile,outfile)
 
 
+def storeModel(model, feature_names, config, fn, feat_stats):
+    with open(fn, "wb") as output:
+        pickle.dump((model, feature_names, config, feat_stats), output, pickle.HIGHEST_PROTOCOL)
+    if config.verbosity >= 1:
+        print("\n============\nStored model in %s\n============\n" % fn)
 
 
+def loadModel(fn):
+    with open(fn, "rb") as inp:
+        data_tuple = pickle.load(inp)
+        if len(data_tuple) == 3:
+            model, feature_names, config = data_tuple
+            feat_stats = None
+        elif len(data_tuple) == 4:
+            model, feature_names, config, feat_stats = data_tuple
+
+    try:
+        path_to_impute_map = config.path_to_impute_map
+        with open(path_to_impute_map, "rb") as inp:
+            impute_map = pickle.load(inp)
+    except:
+        impute_map = None
+
+    if config.verbosity >= 1:
+        print("\n============\nLoaded model from %s\n============\n" % fn)
+    return model, feature_names, impute_map, config, feat_stats
+
+def catogrize_feat_by_name(featname):
+    if featname in feat_name_category_dict:
+        return feat_name_category_dict[featname]
+    if featname.count('GPW ref') > 0:
+        return 0
+    if featname[1:3] == 'c ':
+        if featname[3:7] == 'long' or featname[3:8] == 'neigh' or featname[3:8] == 'short':
+            return 1
+        if featname[3:10] == 'Protein':
+            return 5
+        if featname[3:10] == 'Peptide':
+            return 8
+        if featname[3:9] == 'ligand':
+            return 8
+        if featname[3:6] == 'ion':
+            return 8
+        
+    if featname[:4] == 'lig_' or featname[:4] == 'rna_':
+        return 8
+
+    if featname[:3] == 'oh_':
+        if featname[3:28] == 'structural_classification':
+            return 2
+        if featname[3:7] == 'ssa_':
+            return 7
+        if featname[3:15] == 'simple_class':
+            if featname.count('Peptide') > 0 or featname.count('ligand') > 0:
+                return 8
+
+    if featname[-4:] == '_rsa' or featname[:4] == 'rsa_' or featname[-13:] == 'surface_value' or featname[1:7] == 'c_rsa_' or featname.count('location') > 0:
+        return 2
+
+    if featname.count('Centrality') > 0:
+        return 3
+    
+    if featname [-7:] == ' change':
+        return 4
+    
+    if featname.count(' AA_') > 0 or featname[:6] == 'oh_AA ':
+        return 4
+    
+    if featname[:5] == 'Site_' or featname[:9] == 'Backbone_' or featname[:9] == 'nof_site_' or featname[:8] == 'All_atom':
+        return 6
+    
+    if featname[:12] == 'inter_chain_':
+        return 5
+    
+    if featname[:12] == 'intra_chain_':
+        return 1
+    
+    if featname[:16] == 'oh_Function Type':
+        return 10
+    
+    if featname[:4] == 'cis_' or featname[:7] == 'ssbond_' or featname[-6:] == 'ssbond':
+        return 7
+    
+    print(f'Unknown feature for categorization: {featname}')
+    return None
+
+def categorize_shap(shap_obj, feat_names):
+    summed_shaps = [0.] * len(feature_categories)
+  
+    for pos, shap_val in enumerate(shap_obj.values):
+        feat_cat = catogrize_feat_by_name(feat_names[pos])
+        summed_shaps[feat_cat] += shap_val
+
+    shap_obj.values = np.array(summed_shaps)
+    return shap_obj
+
+def categorize_shap_from_xgb(shap_values, feat_names):
+    summed_shaps = [0.] * len(feature_categories)
+    max_feats = [(0., None, None)] * len(feature_categories)
+
+    for pos, shap_val in enumerate(shap_values):
+        feat_cat = catogrize_feat_by_name(feat_names[pos])
+        summed_shaps[feat_cat] += shap_val
+        if abs(shap_val) > abs(max_feats[feat_cat][0]):
+            max_feats[feat_cat] = (shap_val, feat_names[pos], pos)
+
+    cat_wise_data = [(pos, summed_shaps[pos], max_feats[pos]) for pos in range(len(feature_categories))] 
+
+    cat_wise_data = sorted(cat_wise_data, key=lambda x:abs(x[1]), reverse=True)
+    return cat_wise_data, np.array(summed_shaps)

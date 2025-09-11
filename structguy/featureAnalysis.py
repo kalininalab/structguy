@@ -4,9 +4,18 @@ import ray
 import statistics
 import time
 import random
+import math
+
+import xgboost as xgb
 
 from structguy import learn
 from structman.base_utils.base_utils import calculate_chunksizes, pack, unpack
+from structguy.support_classes import CrossValidationSlice
+from structguy.util import Config, loadModel
+
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.tree import DecisionTreeRegressor
+
 
 def findAndAnalyseInterestingSample(forest, cv_slice, config):
     worst_sample, best_effect_sample = findInterestingSamples(forest, cv_slice, config)
@@ -15,11 +24,12 @@ def findAndAnalyseInterestingSample(forest, cv_slice, config):
 
     tracebackTree(repr_tree, cv_slice.test_feature_matrix[best_effect_sample], cv_slice.feature_names, cv_slice.test_targets[best_effect_sample])
 
+
 def findInterestingSamples(forest, cv_slice, config):
     y_pred = forest.predict(cv_slice.test_feature_matrix)
 
     effect_thresh = 0.2
-    max_error = 0.
+    max_error = 0.0
     min_error = 5.0
     for n, pred in enumerate(y_pred):
         err = abs(pred - cv_slice.test_targets[n])
@@ -30,24 +40,25 @@ def findInterestingSamples(forest, cv_slice, config):
             if err < min_error:
                 min_error = err
                 best_effect_sample = n
-    print('worst sample:', worst_sample, max_error)
-    print('best sample with effect:', best_effect_sample, min_error, cv_slice.train_sample_ids[best_effect_sample])
+    print("worst sample:", worst_sample, max_error)
+    print("best sample with effect:", best_effect_sample, min_error, cv_slice.train_sample_ids[best_effect_sample])
     return worst_sample, best_effect_sample
+
 
 def analysisSample(forest, sample_id, cv_slice, config):
     low_tree, high_tree = findMostImportantTrees(forest, cv_slice.test_feature_matrix[sample_id], cv_slice.test_targets[sample_id])
 
-    print('=== Low tree traceback ===')
+    print("=== Low tree traceback ===")
     tracebackTree(low_tree, cv_slice.test_feature_matrix[sample_id], cv_slice.feature_names, cv_slice.test_targets[sample_id])
-    print('==========================\n')
+    print("==========================\n")
 
-    print('=== High tree traceback ==')
+    print("=== High tree traceback ==")
     tracebackTree(high_tree, cv_slice.test_feature_matrix[sample_id], cv_slice.feature_names, cv_slice.test_targets[sample_id])
-    print('==========================')
+    print("==========================")
+
 
 def findMostImportantTrees(forest, feat_vec, true_value):
-
-    print('Looking for the most important trees, true value:',true_value)
+    print("Looking for the most important trees, true value:", true_value)
 
     minimum = 5.0
     maximum = -5.0
@@ -63,11 +74,11 @@ def findMostImportantTrees(forest, feat_vec, true_value):
 
     return forest.estimators_[low_tree], forest.estimators_[high_tree]
 
-def findRepresentativeTree(forest, feat_vec):
 
+def findRepresentativeTree(forest, feat_vec):
     forest_pred = forest.predict([feat_vec])[0]
 
-    d = 5.
+    d = 5.0
 
     for tree_id, tree in enumerate(forest.estimators_):
         pred = tree.predict([feat_vec])
@@ -79,17 +90,26 @@ def findRepresentativeTree(forest, feat_vec):
 
 
 def get_base_stats(forest):
-    n_of_trees = len(forest.estimators_)
-    total_nodes = 0
-    for tree in forest.estimators_:
-        n_nodes = tree.tree_.node_count
-        total_nodes += n_nodes
+    if isinstance(forest, RandomForestRegressor):
+        n_of_trees = len(forest.estimators_)
+        total_nodes = 0
+        for tree in forest.estimators_:
+            n_nodes = tree.tree_.node_count
+            total_nodes += n_nodes
+    else:
+        n_of_trees = forest.n_estimators
+        total_nodes = None
     return n_of_trees, total_nodes
 
 
-@ray.remote(max_calls = 1)
-def calculate_tree_weights(store, chunk):
-    forest = store
+@ray.remote(max_calls=1)
+def calculate_tree_weights(model, chunk):
+    if isinstance(model, RandomForestRegressor):
+        estimators = model.estimators_
+        model_type_rf = True
+    else:
+        estimators = model
+        model_type_rf = False
 
     output = []
 
@@ -97,13 +117,22 @@ def calculate_tree_weights(store, chunk):
         weight_vector = []
         tree_preds = []
         errs = []
-        for tree in forest.estimators_:
-            tree_pred = tree.predict([feat_vec])[0]
-            tree_preds.append(tree_pred)
-            errs.append(abs(pred_x - tree_pred))
+        if model_type_rf:
+            for tree in estimators:
+                tree_pred = tree.predict([feat_vec])[0]
+                tree_preds.append(tree_pred)
+                errs.append(abs(pred_x - tree_pred))
+        else:
+            #print(f'{estimators.n_estimators=} {estimators.get_num_boosting_rounds()=} {estimators.get_params(deep=True)=}')
+            for tree_id, booster in enumerate(estimators.get_booster()):
+            #for tree_id in range(estimators.n_estimators):
+                tree_pred = estimators.predict([feat_vec], iteration_range=(tree_id,tree_id+1))[0]
+
+                tree_preds.append(tree_pred)
+                errs.append(abs(pred_x - tree_pred))
 
         if len(errs) > 0:
-            mean_err = sum(errs)/len(errs)
+            mean_err = sum(errs) / len(errs)
         else:
             mean_err = 0
 
@@ -115,21 +144,30 @@ def calculate_tree_weights(store, chunk):
         output.append((sample_id, weight_vector, pred_std))
     return output
 
-def explain_decisions(config, forest, prediction_vector, feat_vecs, feature_names):
+
+def explain_decisions(config: Config, forest, prediction_vector, feat_vecs, feature_names, feat_stats):
     t0 = time.time()
 
-    weight_vectors = [0]*len(feat_vecs)
+    weight_vectors = [0] * len(feat_vecs)
     weighted_feat_threshs = []
-    pred_std_vector = [0]*len(feat_vecs)
+    pred_std_vector = [0] * len(feat_vecs)
     store = ray.put(forest)
 
-    small_chunksize, big_chunksize, n_of_small_chunks, n_of_big_chunks = calculate_chunksizes(config.proc_n, len(feat_vecs))
+    mem_based_limit = max([config.gigs_of_ram // 50, 1])
 
+    n_of_tree_calc_procs = min([config.proc_n, mem_based_limit])
+
+    small_chunksize, big_chunksize, n_of_small_chunks, n_of_big_chunks = calculate_chunksizes(n_of_tree_calc_procs, len(feat_vecs))
+
+    t01 = time.time()
+    print(f"Explain decisions part 0.1: {t01 - t0} {n_of_tree_calc_procs=} {len(feat_vecs)=} {n_of_small_chunks=} {n_of_big_chunks=}")
+
+    
     chunk_process_ids = []
     chunk = []
 
     for sample_id, feat_vec in enumerate(feat_vecs):
-        weighted_feat_threshs.append({}) #just for initialization
+        weighted_feat_threshs.append({})  # just for initialization
         chunk.append((sample_id, prediction_vector[sample_id], feat_vec))
         if n_of_small_chunks > 0 and len(chunk_process_ids) < n_of_small_chunks:
             if len(chunk) == small_chunksize:
@@ -145,24 +183,39 @@ def explain_decisions(config, forest, prediction_vector, feat_vecs, feature_name
     if len(chunk) > 0:
         chunk_process_ids.append(calculate_tree_weights.remote(store, chunk))
 
+    t02 = time.time()
+    print(f"Explain decisions part 0.2: {t02 - t01} {len(chunk_process_ids)=}")
+
     para_results = ray.get(chunk_process_ids)
 
+    t03 = time.time()
+    print(f"Explain decisions part 0.3: {t03 - t02}")
+
     for chunk_result in para_results:
-        for (sample_id, weight_vector, pred_std) in chunk_result:
+        for sample_id, weight_vector, pred_std in chunk_result:
             weight_vectors[sample_id] = weight_vector
             pred_std_vector[sample_id] = pred_std
 
-
     t1 = time.time()
-    print(f'Explain decisions part 1: {t1-t0}')
+    print(f"Explain decisions part 0.4: {t1 - t03}")
 
-    small_chunksize, big_chunksize, n_of_small_chunks, n_of_big_chunks = calculate_chunksizes(config.proc_n, len(forest.estimators_))
+    if isinstance(forest, RandomForestRegressor):
+        n_of_trees = len(forest.estimators_)
+        tree_iterator = forest.estimators_
+    else:
+        n_of_trees = forest.n_estimators
+        tree_iterator = forest.get_booster()
+
+    small_chunksize, big_chunksize, n_of_small_chunks, n_of_big_chunks = calculate_chunksizes(config.proc_n, n_of_trees)
 
     chunk_process_ids = []
     chunk = []
     store = ray.put((feat_vecs, feature_names))
 
-    for tree_id, tree in enumerate(forest.estimators_):
+    t11 = time.time()
+    print(f"Explain decisions part 1.1: {t11 - t1}")
+
+    for tree_id, tree in enumerate(tree_iterator):
         chunk.append((tree_id, tree))
         if n_of_small_chunks > 0 and len(chunk_process_ids) < n_of_small_chunks:
             if len(chunk) == small_chunksize:
@@ -176,12 +229,12 @@ def explain_decisions(config, forest, prediction_vector, feat_vecs, feature_name
                 continue
 
     t2 = time.time()
-    print(f'Explain decisions part 2: {t2-t1}')
+    print(f"Explain decisions part 2: {t2 - t1}")
 
     para_results = ray.get(chunk_process_ids)
 
     t3 = time.time()
-    print(f'Explain decisions part 3: {t3-t2}, {len(para_results)}')
+    print(f"Explain decisions part 3: {t3 - t2}, {len(para_results)}")
 
     for packed_chunk_result in para_results:
         chunk_result = unpack(packed_chunk_result)
@@ -200,13 +253,14 @@ def explain_decisions(config, forest, prediction_vector, feat_vecs, feature_name
         feat_name_backmap[feat_name] = feat_number
 
     t4 = time.time()
-    print(f'Explain decisions part 4: {t4-t3}')
+    print(f"Explain decisions part 4: {t4 - t3}")
 
     decisions = []
     for sample_id, weighted_feat_thresh_map in enumerate(weighted_feat_threshs):
         processed_feat_thresh_vector = []
         for feat_name in weighted_feat_thresh_map:
-            feat_value = feat_vecs[sample_id][feat_name_backmap[feat_name]]
+            feat_vec = feat_vecs[sample_id]
+            feat_value = feat_vec[feat_name_backmap[feat_name]]
             total_weight, all_threshs = weighted_feat_thresh_map[feat_name]
             l = None
             r = None
@@ -223,19 +277,28 @@ def explain_decisions(config, forest, prediction_vector, feat_vecs, feature_name
                         elif thresh < r:
                             r = thresh
             processed_feat_thresh_vector.append((feat_name, total_weight, l, r))
-        processed_feat_thresh_vector.sort(key=lambda x:x[1],reverse=True)
+
+            (min_val, max_val, mean_val, median_val) = feat_stats[feat_name]
+            for val in (min_val, max_val, mean_val, median_val):
+                perturbed_vec = feat_vec[:]
+                perturbed_vec[feat_name_backmap[feat_name]] = val
+                perturbed_pred = forest.predict([perturbed_vec])
+
+                print(f'{sample_id=} {feat_name=} {val=} {perturbed_pred=}')
+
+        processed_feat_thresh_vector.sort(key=lambda x: x[1], reverse=True)
         decisions.append(processed_feat_thresh_vector)
 
     t5 = time.time()
-    print(f'Explain decisions part 5: {t5-t4}')
+    print(f"Explain decisions part 5: {t5 - t4}")
     return decisions, pred_std_vector
 
 
 def tracebackTree(t, feat_vec, feature_names, true_value):
-    #indicator, n_nodes_ptr = forest.decision_path([feat_vec])
+    # indicator, n_nodes_ptr = forest.decision_path([feat_vec])
 
-    #print(feature_names)
-    #print(feat_vec)
+    # print(feature_names)
+    # print(feat_vec)
 
     X_test = np.array([feat_vec])
     y_test = [true_value]
@@ -246,14 +309,14 @@ def tracebackTree(t, feat_vec, feature_names, true_value):
     feature_ = t.tree_.feature
     threshold_ = t.tree_.threshold
 
-    explore_tree(t, n_nodes_, children_left_, children_right_, feature_, threshold_, X_test, y_test,
-                print_tree = False, sample_id=0, feature_names = feature_names)
+    explore_tree(t, n_nodes_, children_left_, children_right_, feature_, threshold_, X_test, y_test, print_tree=False, sample_id=0, feature_names=feature_names)
+
 
 def tracebackDecision(estimator, feat_vec, feature_names, true_value):
-    #indicator, n_nodes_ptr = forest.decision_path([feat_vec])
+    # indicator, n_nodes_ptr = forest.decision_path([feat_vec])
 
-    #print(feature_names)
-    #print(feat_vec)
+    # print(feature_names)
+    # print(feat_vec)
 
     X_test = np.array([feat_vec])
     y_test = [true_value]
@@ -264,28 +327,41 @@ def tracebackDecision(estimator, feat_vec, feature_names, true_value):
     feature_ = [t.tree_.feature for t in estimator.estimators_]
     threshold_ = [t.tree_.threshold for t in estimator.estimators_]
 
-    explore_tree(estimator.estimators_[0], n_nodes_[0], children_left_[0], children_right_[0], feature_[0], threshold_[0], X_test, y_test,
-                print_tree = False, sample_id=0, feature_names = feature_names)
+    explore_tree(estimator.estimators_[0], n_nodes_[0], children_left_[0], children_right_[0], feature_[0], threshold_[0], X_test, y_test, print_tree=False, sample_id=0, feature_names=feature_names)
+
 
 def add_tree_CM(tree_confusion_map, pre_confusion_map):
     for feat in tree_confusion_map:
-        if not feat in pre_confusion_map:
+        if feat not in pre_confusion_map:
             pre_confusion_map[feat] = list(tree_confusion_map[feat])
         else:
             pre_confusion_map[feat][0] += tree_confusion_map[feat][0]
             pre_confusion_map[feat][1] += tree_confusion_map[feat][1]
     return pre_confusion_map
 
+
 def add_tree_RCM(tree_raw_confusion_map, pre_raw_confusion_map):
     for feat in tree_raw_confusion_map:
-        if not feat in pre_raw_confusion_map:
+        if feat not in pre_raw_confusion_map:
             pre_raw_confusion_map[feat] = tree_raw_confusion_map[feat]
         else:
             pre_raw_confusion_map[feat] += tree_raw_confusion_map[feat]
     return pre_raw_confusion_map
 
 
-def calcSliceConfusion(forest, cv_slice, samples = None, samples_store_id = None, remote = True, para_number = None, err_warping_exp = 1, goodwill_interval = 0.25, norm_exp = 1.2, max_samples = 10000):
+def calcSliceConfusion(
+    forest: RandomForestRegressor,
+    cv_slice: CrossValidationSlice,
+    samples=None,
+    samples_store_id=None,
+    remote=True,
+    para_number=None,
+    err_warping_exp=1,
+    goodwill_interval=0.25,
+    norm_exp=1.2,
+    max_samples=10000,
+    get_loss_map=False,
+):
     pre_confusion_map = {}
     pre_raw_confusion_map = {}
 
@@ -298,7 +374,7 @@ def calcSliceConfusion(forest, cv_slice, samples = None, samples_store_id = None
     X_test = cv_slice.get_test_feature_matrix(samples)
     y_test = cv_slice.test_targets
 
-    if len(X_test) > max_samples:
+    if len(X_test) > max_samples and not get_loss_map:
         subselection = random.sample(range(len(X_test)), max_samples)
         X_test = [X_test[n] for n in subselection]
         y_test = [y_test[n] for n in subselection]
@@ -312,15 +388,18 @@ def calcSliceConfusion(forest, cv_slice, samples = None, samples_store_id = None
     if para_number is None:
         para_number = n_trees
 
-    print(f'Call of calcSliceConfusion with number of trees: {n_trees}, para_number: {para_number}')
+    print(f"Call of calcSliceConfusion with number of trees: {n_trees}, para_number: {para_number}")
 
-    for i,tree in enumerate(forest.estimators_):
+    for i, tree in enumerate(forest.estimators_):
         if remote:
             if i == para_number:
                 break
-            result_ids.append(calcConfusionMapWrapper.remote(tree, store, err_warping_exp = err_warping_exp, goodwill_interval = goodwill_interval))
+            result_ids.append(calcConfusionMapWrapper.remote(tree, store, err_warping_exp=err_warping_exp, goodwill_interval=goodwill_interval))
         else:
-            result_ids.append(calcConfusionMap(tree, X_test, y_test, cv_slice.feature_names, err_warping_exp = err_warping_exp, goodwill_interval=goodwill_interval))
+            result_ids.append(calcConfusionMap(tree, X_test, y_test, cv_slice.feature_names, err_warping_exp=err_warping_exp, goodwill_interval=goodwill_interval))
+
+    if get_loss_map:
+        total_loss_list = np.zeros(len(y_test))
 
     if remote:
         while True:
@@ -328,12 +407,14 @@ def calcSliceConfusion(forest, cv_slice, samples = None, samples_store_id = None
             new_result_ids = []
             if len(ready) > 0:
                 for package in ray.get(ready):
-                    tree_confusion_map, raw_tree_confusion_map = unpack(package)
+                    tree_confusion_map, raw_tree_confusion_map, loss_list = package
+                    if get_loss_map:
+                        total_loss_list = np.add(total_loss_list, loss_list)
                     pre_confusion_map = add_tree_CM(tree_confusion_map, pre_confusion_map)
                     pre_raw_confusion_map = add_tree_RCM(raw_tree_confusion_map, pre_raw_confusion_map)
                     if i < n_trees:
                         tree = forest.estimators_[i]
-                        new_result_ids.append(calcConfusionMapWrapper.remote(tree, store, goodwill_interval = goodwill_interval, err_warping_exp = err_warping_exp))
+                        new_result_ids.append(calcConfusionMapWrapper.remote(tree, store, goodwill_interval=goodwill_interval, err_warping_exp=err_warping_exp))
                         i += 1
             result_ids = new_result_ids + not_ready
             if len(result_ids) == 0:
@@ -341,44 +422,53 @@ def calcSliceConfusion(forest, cv_slice, samples = None, samples_store_id = None
         del result_ids
         del store
     else:
-        for tree_confusion_map, raw_tree_confusion_map in result_ids:
+        for tree_confusion_map, raw_tree_confusion_map, loss_list in result_ids:
+            if get_loss_map:
+                total_loss_list = np.add(total_loss_list, loss_list)
             pre_confusion_map = add_tree_CM(tree_confusion_map, pre_confusion_map)
             pre_raw_confusion_map = add_tree_RCM(raw_tree_confusion_map, pre_raw_confusion_map)
-
 
     confusion_map = []
     for feat in cv_slice.feature_names:
         if feat in pre_confusion_map:
-            confusion_map.append([feat, round(pre_confusion_map[feat][0]/(pre_confusion_map[feat][1]**norm_exp), 5)])
-            #confusion_map.append([feat,pre_confusion_map[feat][0]])
+            confusion_map.append([feat, round(pre_confusion_map[feat][0] / (pre_confusion_map[feat][1] ** norm_exp), 5)])
+            # confusion_map.append([feat,pre_confusion_map[feat][0]])
         else:
-            confusion_map.append([feat, 1.-goodwill_interval])
+            confusion_map.append([feat, 1.0 - goodwill_interval])
 
     confusion_map = sorted(confusion_map, key=lambda x: x[1], reverse=True)
 
-    return confusion_map, pre_raw_confusion_map
+    loss_map: dict[str, float] = {}
+    if get_loss_map:
+        for index, sample_id in enumerate(cv_slice.test_sample_ids):
+            loss_map[sample_id] = total_loss_list[index]
+
+    return confusion_map, pre_raw_confusion_map, loss_map
+
 
 def confusion_map_from_raw_confusion_map(cv_slice, raw_confusion_map, goodwill_interval, err_warping_exp, norm_exp):
     confusion_map = []
     for feat in raw_confusion_map:
-        warped_err_sum = 0.
+        warped_err_sum = 0.0
         for raw_err in raw_confusion_map[feat]:
             warped_err = calc_confusion(raw_err, goodwill_interval, err_warping_exp)
             warped_err_sum += warped_err
-        confusion_map.append([feat, round(warped_err_sum/(len(raw_confusion_map[feat])**norm_exp), 5)])
+        confusion_map.append([feat, round(warped_err_sum / (len(raw_confusion_map[feat]) ** norm_exp), 5)])
     for feat in cv_slice.feature_names:
         if feat not in raw_confusion_map:
-            confusion_map.append([feat, 1.-goodwill_interval])
+            confusion_map.append([feat, 1.0 - goodwill_interval])
     confusion_map = sorted(confusion_map, key=lambda x: x[1], reverse=True)
     return confusion_map
 
-@ray.remote(max_calls = 1)
-def calcConfusionMapWrapper(estimator, store, err_warping_exp = 1, goodwill_interval = 0.25):
-    X_test, y_test, feature_names = unpack(store)
-    
-    return pack(calcConfusionMap(estimator, X_test, y_test, feature_names, err_warping_exp = err_warping_exp, goodwill_interval=goodwill_interval))
 
-def calcConfusionMap(estimator, X_test, y_test, feature_names, err_warping_exp = 1, goodwill_interval = 0.25):
+@ray.remote(max_calls=1)
+def calcConfusionMapWrapper(estimator, store, err_warping_exp=1, goodwill_interval=0.25):
+    X_test, y_test, feature_names = unpack(store)
+
+    return calcConfusionMap(estimator, X_test, y_test, feature_names, err_warping_exp=err_warping_exp, goodwill_interval=goodwill_interval)
+
+
+def calcConfusionMap(estimator: DecisionTreeRegressor, X_test, y_test, feature_names, err_warping_exp=1, goodwill_interval=0.25):
     # First let's retrieve the decision path of each sample. The decision_path
     # method allows to retrieve the node indicator functions. A non zero element of
     # indicator matrix at the position (i, j) indicates that the sample i goes
@@ -394,44 +484,49 @@ def calcConfusionMap(estimator, X_test, y_test, feature_names, err_warping_exp =
 
     leave_id = estimator.apply(X_test)
 
-    #print(f'LLI: {len(leave_id)}')
+    # print(f'LLI: {len(leave_id)}')
 
     # Now, it's possible to get the tests that were used to predict a sample or
     # a group of samples. First, let's make it for the sample.
 
     confusion_map = {}
     raw_confusion_map = {}
+    loss_list: np.ndarray = np.zeros(len(y_test))
 
     for sample_id, true_value in enumerate(y_test):
-
-        node_index = node_indicator.indices[node_indicator.indptr[sample_id]:
-                                            node_indicator.indptr[sample_id + 1]]
+        node_index = node_indicator.indices[node_indicator.indptr[sample_id] : node_indicator.indptr[sample_id + 1]]
 
         raw_err = abs(true_value - y_pred[sample_id])
+        loss_list[sample_id] = raw_err
         warped_err = calc_confusion(raw_err, goodwill_interval, err_warping_exp)
 
-        #print(f'LNI: {len(node_index)}')
+        # print(f'LNI: {len(node_index)}')
 
+        depth = 0
         for node_id in node_index:
-
+            depth += 1
             if leave_id[sample_id] == node_id:
                 continue
 
             feat = feature_names[feature[node_id]]
 
-            #print(feat)
+            # print(feat)
+            depth_factor = math.log2((depth + 1))
+            raw_err = raw_err * depth_factor
+            warped_err = warped_err * depth_factor
 
-            if not feat in confusion_map:
-                confusion_map[feat] = [warped_err,1]
+            if feat not in confusion_map:
+                confusion_map[feat] = [warped_err, 1]
                 raw_confusion_map[feat] = [raw_err]
             else:
                 confusion_map[feat][0] += warped_err
-                #confusion_map[feat][0] += err
+                # confusion_map[feat][0] += err
                 confusion_map[feat][1] += 1
                 raw_confusion_map[feat].append(raw_err)
 
-    #print(f'Add the end of calcConfusionMap: {len(confusion_map)} {len(raw_confusion_map)}')
-    return confusion_map, raw_confusion_map
+    # print(f'Add the end of calcConfusionMap: {len(confusion_map)} {len(raw_confusion_map)}')
+    return confusion_map, raw_confusion_map, loss_list
+
 
 def calc_confusion(raw_err, goodwill_interval, err_warping_exp):
     err = raw_err - goodwill_interval
@@ -442,14 +537,14 @@ def calc_confusion(raw_err, goodwill_interval, err_warping_exp):
     warped_err = sign * (abs(err) ** err_warping_exp)
     return warped_err
 
+
 def calc_tree_threshold_maps(tree, feat_vecs, feature_names):
     node_indicator = tree.decision_path(feat_vecs)
     leave_id_vector = tree.apply(feat_vecs)
 
     threshold_maps = []
     for sample_id, feat_vec in enumerate(feat_vecs):
-        node_index = node_indicator.indices[node_indicator.indptr[sample_id]:
-                                            node_indicator.indptr[sample_id + 1]]
+        node_index = node_indicator.indices[node_indicator.indptr[sample_id] : node_indicator.indptr[sample_id + 1]]
         threshold_map = {}
         for node_id in node_index:
             if leave_id_vector[sample_id] == node_id:
@@ -462,7 +557,8 @@ def calc_tree_threshold_maps(tree, feat_vecs, feature_names):
         threshold_maps.append(threshold_map)
     return threshold_maps
 
-@ray.remote(max_calls = 1)
+
+@ray.remote(max_calls=1)
 def calc_thresh_maps(trees, store):
     feat_vecs, feature_names = store
     output = []
@@ -471,12 +567,10 @@ def calc_thresh_maps(trees, store):
         output.append((tree_id, threshold_maps))
     return pack(output)
 
-def explore_tree(estimator, n_nodes, children_left,children_right, feature, threshold, X_test, y_test,
-                print_tree = False, sample_id=0, feature_names=None):
 
+def explore_tree(estimator, n_nodes, children_left, children_right, feature, threshold, X_test, y_test, print_tree=False, sample_id=0, feature_names=None):
     if not feature_names:
         feature_names = feature
-
 
     assert len(feature_names) == X_test.shape[1], "The feature names do not match the number of features."
     # The tree structure can be traversed to compute various properties such
@@ -490,29 +584,31 @@ def explore_tree(estimator, n_nodes, children_left,children_right, feature, thre
         node_depth[node_id] = parent_depth + 1
 
         # If we have a test node
-        if (children_left[node_id] != children_right[node_id]):
+        if children_left[node_id] != children_right[node_id]:
             stack.append((children_left[node_id], parent_depth + 1))
             stack.append((children_right[node_id], parent_depth + 1))
         else:
             is_leaves[node_id] = True
 
-    print("The binary tree structure has %s nodes"
-          % n_nodes)
+    print("The binary tree structure has %s nodes" % n_nodes)
     if print_tree:
         print("Tree structure: \n")
         for i in range(n_nodes):
             if is_leaves[i]:
                 print("%snode=%s leaf node." % (node_depth[i] * "\t", i))
             else:
-                print("%snode=%s test node: go to node %s if X[:, %s] <= %s else to "
-                      "node %s."
-                      % (node_depth[i] * "\t",
-                         i,
-                         children_left[i],
-                         feature[i],
-                         threshold[i],
-                         children_right[i],
-                         ))
+                print(
+                    "%snode=%s test node: go to node %s if X[:, %s] <= %s else to "
+                    "node %s."
+                    % (
+                        node_depth[i] * "\t",
+                        i,
+                        children_left[i],
+                        feature[i],
+                        threshold[i],
+                        children_right[i],
+                    )
+                )
             print("\n")
         print()
 
@@ -530,77 +626,65 @@ def explore_tree(estimator, n_nodes, children_left,children_right, feature, thre
     # Now, it's possible to get the tests that were used to predict a sample or
     # a group of samples. First, let's make it for the sample.
 
-    #sample_id = 0
-    node_index = node_indicator.indices[node_indicator.indptr[sample_id]:
-                                        node_indicator.indptr[sample_id + 1]]
+    # sample_id = 0
+    node_index = node_indicator.indices[node_indicator.indptr[sample_id] : node_indicator.indptr[sample_id + 1]]
 
-    #print(X_test[sample_id,:])
+    # print(X_test[sample_id,:])
 
-    print('Rules used to predict sample %s: ' % sample_id)
+    print("Rules used to predict sample %s: " % sample_id)
     for node_id in node_index:
         # tabulation = " "*node_depth[node_id] #-> makes tabulation of each level of the tree
         tabulation = ""
         if leave_id[sample_id] == node_id:
-            print("%s==> Predicted leaf index \n"%(tabulation))
-            #continue
+            print("%s==> Predicted leaf index \n" % (tabulation))
+            # continue
 
-        if (X_test[sample_id, feature[node_id]] <= threshold[node_id]):
+        if X_test[sample_id, feature[node_id]] <= threshold[node_id]:
             threshold_sign = "<="
         else:
             threshold_sign = ">"
 
-        print("%sdecision id node %s : (X_test[%s, '%s'] (= %s) %s %s)"
-              % (tabulation,
-                 node_id,
-                 sample_id,
-                 feature_names[feature[node_id]],
-                 X_test[sample_id, feature[node_id]],
-                 threshold_sign,
-                 threshold[node_id]))
-    print("%sPrediction for sample %d: %s (true value: %s)"%(tabulation,
-                                          sample_id,
-                                          estimator.predict(X_test)[sample_id],
-                                          y_test[sample_id]))
+        print(
+            "%sdecision id node %s : (X_test[%s, '%s'] (= %s) %s %s)"
+            % (tabulation, node_id, sample_id, feature_names[feature[node_id]], X_test[sample_id, feature[node_id]], threshold_sign, threshold[node_id])
+        )
+    print("%sPrediction for sample %d: %s (true value: %s)" % (tabulation, sample_id, estimator.predict(X_test)[sample_id], y_test[sample_id]))
 
     if sample_id > 0:
         # For a group of samples, we have the following common node.
         sample_ids = [sample_id, 1]
-        common_nodes = (node_indicator.toarray()[sample_ids].sum(axis=0) ==
-                        len(sample_ids))
+        common_nodes = node_indicator.toarray()[sample_ids].sum(axis=0) == len(sample_ids)
 
         common_node_id = np.arange(n_nodes)[common_nodes]
 
-        print("\nThe following samples %s share the node %s in the tree"
-              % (sample_ids, common_node_id))
+        print("\nThe following samples %s share the node %s in the tree" % (sample_ids, common_node_id))
         print("It is %s %% of all nodes." % (100 * len(common_node_id) / n_nodes,))
 
         for sample_id_ in sample_ids:
-            print("Prediction for sample %d: %s"%(sample_id_,
-                                              estimator.predict(X_test)[sample_id_]))
+            print("Prediction for sample %d: %s" % (sample_id_, estimator.predict(X_test)[sample_id_]))
+
 
 if __name__ == "__main__":
     fn = sys.argv[1]
-    #forest, feature_names, config = learn.loadModel(fn)
+    # forest, feature_names, config = learn.loadModel(fn)
 
-    #samples = learn.createTrainingSet(config,config.session,infile=sys.argv[2])
+    # samples = learn.createTrainingSet(config,config.session,infile=sys.argv[2])
 
-    #samples.oneHotifyAll()
+    # samples.oneHotifyAll()
 
-    #full_slice = sampleSpace.FullSlice(samples, config)
+    # full_slice = sampleSpace.FullSlice(samples, config)
 
+    # feat_vec = full_slice.slices[0].train_feature_matrix[14]
+    # true_value = full_slice.slices[0].train_targets[14]
 
-    #feat_vec = full_slice.slices[0].train_feature_matrix[14]
-    #true_value = full_slice.slices[0].train_targets[14]
+    # findMostImportantTrees(forest, feat_vec, true_value)
 
-    #findMostImportantTrees(forest, feat_vec, true_value)
-
-    #tracebackDecision(forest, feat_vec, feature_names, true_value)
-
+    # tracebackDecision(forest, feat_vec, feature_names, true_value)
 
     forests, cross_val_object, config = learn.loadCV(fn)
 
     for cv_counter in cross_val_object.slices:
-        print('Feature Analysis for slice:', cv_counter)
+        print("Feature Analysis for slice:", cv_counter)
         cv_slice = cross_val_object.slices[cv_counter]
 
         forest = forests[cv_counter]
@@ -619,5 +703,3 @@ if __name__ == "__main__":
         analysisSample(forest, best_effect_sample, cv_slice, config)
         print('=====================================================================\n\n\n')
         """
-
-

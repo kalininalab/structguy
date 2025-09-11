@@ -3,9 +3,11 @@ from structguy.util import get_msa_path
 def parseFromFasta(seqs_from_fasta, config = None, dbs = []):
 
     if config is not None:
+        
         fasta_file_name_base = seqs_from_fasta.split('/')[-1].rsplit('.',1)[0]
-        config.custom_msa_db = f'{config.msa_db}/{fasta_file_name_base}'
-
+        config.custom_msa_db = f'{config.msa_db}'
+        if config.verbosity >= 2:
+            print(f'Call if parseFromFasta {seqs_from_fasta=} {config.msa_db} {fasta_file_name_base=}')
         config.fasta_mode = True
 
         if not os.path.exists(config.custom_msa_db):
@@ -31,6 +33,8 @@ def parseFromFasta(seqs_from_fasta, config = None, dbs = []):
             inside_all = True
             for ref_db_id in dbs:
                 msa_db_filename = get_msa_path(config.custom_msa_db, entry_id, ref_db_id, gpw = True)
+                if config.verbosity >=4:
+                    print(f'{entry_id=} {ref_db_id=} {msa_db_filename=}')
                 if not os.path.isfile(msa_db_filename):
                     inside_all = False
             if inside_all:
