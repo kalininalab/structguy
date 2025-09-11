@@ -51,8 +51,8 @@ def parse_arguments(argument_start = 2, manual_args = None):
             ]
             opts, args = getopt.getopt(argv, "i:n:m:d", long_paras)
 
-        except getopt.GetoptError:
-            print("Illegal Input\n\n", disclaimer)
+        except getopt.GetoptError as e:
+            print(f"Illegal Input\n{e}\n\n{disclaimer}")
             return
     else:
         opts = manual_args
