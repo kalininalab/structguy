@@ -228,7 +228,7 @@ def parse_arguments(argument_start = 2, manual_args = None):
     if forest_type is not None:
         config.forest_type = forest_type
         if forest_type == 'gradient_boost' or forest_type == 'xgboost':
-            config.impute_missing_values = True
+            #config.impute_missing_values = True
             try:
                 import torch
                 config.gpu_mode = torch.cuda.is_available()

@@ -4,6 +4,7 @@ import os
 import time
 import ray
 import random
+import math
 import shap
 import numpy
 from scipy import stats
@@ -31,6 +32,7 @@ from structguy.consts import feature_categories
 from xgboost import plot_tree, DMatrix
 import matplotlib.pyplot as plt
 
+
 def calcFeatureImportances(forest, samples, cv_slice, config, print_them=False):
     feature_scores = forest.feature_importances_
 
@@ -53,7 +55,7 @@ def calcFeatureImportances(forest, samples, cv_slice, config, print_them=False):
             )
             return feature_importance_map
         except IndexError:
-            feature_importance_map[feature_name] = 0.
+            feature_importance_map[feature_name] = 0.0
 
         if print_them:
             feat_score_tuples.append((feature_name, feature_scores[pos]))
@@ -111,7 +113,7 @@ def learn(config, effectRegressor=None, test_config=None):
             config.filter_single_variant_prots,
             ")",
         )
-        print(f'{config.random_split=}')
+        print(f"{config.random_split=}")
         print("===========================================================================================")
         if config.path_structural_feature_table is not None:
             print(f"Using feature file: {config.path_structural_feature_table}")
@@ -132,8 +134,8 @@ def learn(config, effectRegressor=None, test_config=None):
         samples.fuse_samples(support_samples)
 
     t_0 = time.time()
-    print(f'Time for loading dataset: {t_0 - t0} {config.n_of_features=}')
-    
+    print(f"Time for loading dataset: {t_0 - t0} {config.n_of_features=}")
+
     if config.weighting == "geometric" and config.regression:
         samples.setGeometricDistanceMap(config)
         distance_map = ray.put(samples.geometric_distance_map)
@@ -217,7 +219,7 @@ def learn(config, effectRegressor=None, test_config=None):
                 print_out=True,
                 debug=debug,
                 remote=False,
-                get_first_scores=True
+                get_first_scores=True,
             )
             hpo.threeDimHyperOptimization(
                 config,
@@ -280,15 +282,7 @@ def learn(config, effectRegressor=None, test_config=None):
 
             print_out = config.verbosity >= 2
             forest, scores, cv_slice, slice_slices = trainForest.trainForest(
-                config,
-                cv_slice,
-                samples=samples,
-                samples_store_id=samples_store_id,
-                slice_slices=cv_slice.slice_slices,
-                distance_map=distance_map,
-                print_out=print_out,
-                debug=debug,
-                remote=False
+                config, cv_slice, samples=samples, samples_store_id=samples_store_id, slice_slices=cv_slice.slice_slices, distance_map=distance_map, print_out=print_out, debug=debug, remote=False
             )
 
             if forest is None:
@@ -432,9 +426,9 @@ def learn(config, effectRegressor=None, test_config=None):
 
     if config.outfolder is not None and not config.skip_final_model:
         base_name = f"{config.outfolder}/{config.dataset_name}"
-        name_add = ''
+        name_add = ""
         if config.random_split:
-            name_add = '_random_split'
+            name_add = "_random_split"
 
         modelfile = f"{config.outfolder}/StructGuy_trained_on_{config.dataset_name}{name_add}.dump"
 
@@ -465,12 +459,12 @@ def load_data_for_pred(
     config: Config,
     impute_map,
     feature_names: list[str],
-    ):
+):
     t0 = time.time()
     samples = featureGenerator.createTrainingSet(config, external_impute=impute_map, for_prediction=True, filter_synon=config.trace_decisions)
     t1 = time.time()
 
-    print(f'Time for loading dataset: {t1-t0}')
+    print(f"Time for loading dataset: {t1 - t0}")
 
     for sample_id in samples.samples:
         samples.samples[sample_id].testtrain = "test"
@@ -479,19 +473,20 @@ def load_data_for_pred(
 
     return samples, test_feature_matrix, test_targets, sample_id_list
 
+
 def evaluate_dataset(config: Config):
     t0 = time.time()
     forest, extern_feature_names_list, impute_map, model_config, feat_stats = loadModel(config.path_to_model)
     t1 = time.time()
 
-    print(f'Time for loading model: {t1-t0}')
+    print(f"Time for loading model: {t1 - t0}")
 
     if config.verbosity >= 4:
-        print(f'{feat_stats=}')
+        print(f"{feat_stats=}")
 
-    model_filename = os.path.basename(config.path_to_model).split('.')[0]
-    if model_filename.count('trained_on_') > 0:
-        model_name = model_filename.split('trained_on_')[1]
+    model_filename = os.path.basename(config.path_to_model).split(".")[0]
+    if model_filename.count("trained_on_") > 0:
+        model_name = model_filename.split("trained_on_")[1]
     else:
         model_name = model_filename
 
@@ -499,7 +494,7 @@ def evaluate_dataset(config: Config):
         print(f"{extern_feature_names_list[:5]}\n...\n{extern_feature_names_list[-5:]}")
 
     samples, test_feature_matrix, test_targets, sample_id_list = load_data_for_pred(config, impute_map, extern_feature_names_list)
-    
+
     if len(test_feature_matrix) == 0:
         return None, None, None
 
@@ -682,61 +677,54 @@ def evaluate_dataset(config: Config):
             if isinstance(forest, RandomForestRegressor):
                 decisions, pred_std_vector = featureAnalysis.explain_decisions(config, forest, y_pred, test_feature_matrix, extern_feature_names_list, feat_stats)
             else:
-                #sample_wise_feature_influence, _ = trainForest.perturb_xgb(config, config.path_to_model, test_feature_matrix, extern_feature_names_list, y_pred, test_targets, get_sample_wise_data=True, get_feat_impacts=False)
+                # sample_wise_feature_influence, _ = trainForest.perturb_xgb(config, config.path_to_model, test_feature_matrix, extern_feature_names_list, y_pred, test_targets, get_sample_wise_data=True, get_feat_impacts=False)
                 forest.get_booster().feature_names = extern_feature_names_list
 
-                #explainer = shap.TreeExplainer(forest)
-                #explanation = explainer(test_feature_matrix)
-                dtest_feature_matrix = DMatrix(test_feature_matrix, feature_names = extern_feature_names_list)
+                # explainer = shap.TreeExplainer(forest)
+                # explanation = explainer(test_feature_matrix)
+                dtest_feature_matrix = DMatrix(test_feature_matrix, feature_names=extern_feature_names_list)
                 explanation = forest.get_booster().predict(dtest_feature_matrix, pred_contribs=True)
-                #print(explanation[0])
+                # print(explanation[0])
 
-                #for pos, shap_val in enumerate(explanation[0][:-1]):
+                # for pos, shap_val in enumerate(explanation[0][:-1]):
                 #    print(f'{shap_val=} {extern_feature_names_list[pos]}')
 
-                #cat_exp, cat_shaps = util.categorize_shap_from_xgb(explanation[0][:-1], extern_feature_names_list)
+                # cat_exp, cat_shaps = util.categorize_shap_from_xgb(explanation[0][:-1], extern_feature_names_list)
 
-                #shap.plots.force(explanation[0][-1], cat_shaps, matplotlib=True, show=False, feature_names=feature_categories)
-                #shap.plots.force(explanation[0], matplotlib=True, show=False, feature_names=extern_feature_names_list)
-                #plt.savefig(f"{config.outfolder}/force_plot.png")
-
+                # shap.plots.force(explanation[0][-1], cat_shaps, matplotlib=True, show=False, feature_names=feature_categories)
+                # shap.plots.force(explanation[0], matplotlib=True, show=False, feature_names=extern_feature_names_list)
+                # plt.savefig(f"{config.outfolder}/force_plot.png")
 
                 joined_sample_ids = [x[0] + x[1] for x in sample_id_list]
-                print(f'{len(joined_sample_ids)=} {len(y_pred)=} {len(test_feature_matrix[0])=} {len(extern_feature_names_list)=}')
+                print(f"{len(joined_sample_ids)=} {len(y_pred)=} {len(test_feature_matrix[0])=} {len(extern_feature_names_list)=}")
 
-                
+                # plt.figure(figsize=(120, 80))
+                # plot_tree(forest, num_trees = 2)
+                # plt.savefig('xgb_viz.png')
 
-                #plt.figure(figsize=(120, 80))
-                #plot_tree(forest, num_trees = 2)
-                #plt.savefig('xgb_viz.png')
-
-                #"""
-                st = SuperTree(
-                    forest,
-                    test_feature_matrix,
-                    y_pred,
-                    extern_feature_names_list,
-                    joined_sample_ids
-                )
-                #st.show_tree(2)
-
-                super_tree_folder = f"{config.outfolder}/supertrees"
-                if not os.path.isdir(super_tree_folder):
-                    os.makedirs(super_tree_folder)
-                tree_id = 0
+                # """
                 booster_obj = forest.get_booster()
-                for tree in booster_obj:
-                    outfile = f'{super_tree_folder}/super_tree_{tree_id}.html'
-                    st.save_html(which_tree = tree_id, filename=outfile)
-                    tree_id += 1
+                if config.plot_trees:
+                    st = SuperTree(forest, test_feature_matrix, y_pred, extern_feature_names_list, joined_sample_ids)
+                    # st.show_tree(2)
+
+                    super_tree_folder = f"{config.outfolder}/supertrees"
+                    if not os.path.isdir(super_tree_folder):
+                        os.makedirs(super_tree_folder)
+                    tree_id = 0
+                    
+                    for tree in booster_obj:
+                        outfile = f"{super_tree_folder}/super_tree_{tree_id}.html"
+                        st.save_html(which_tree=tree_id, filename=outfile)
+                        tree_id += 1
 
                 tree_df = booster_obj.trees_to_dataframe()
-                #print(tree_df)
+                # print(tree_df)
 
                 feat_tree_map = {}
 
-                tree_id_vec = tree_df['Tree']
-                feat_name_vec = tree_df['Feature']
+                tree_id_vec = tree_df["Tree"]
+                feat_name_vec = tree_df["Feature"]
 
                 for pos, tree_id in enumerate(tree_id_vec):
                     feat_name = feat_name_vec[pos]
@@ -744,15 +732,14 @@ def evaluate_dataset(config: Config):
                         feat_tree_map[feat_name] = set()
                     feat_tree_map[feat_name].add(tree_id)
 
-
                 for feat_name in feat_tree_map:
-                    print(f'{feat_name} {feat_tree_map[feat_name]}')
-                #st.save_html()
-                #"""
+                    print(f"{feat_name} {feat_tree_map[feat_name]}")
+                # st.save_html()
+                # """
         else:
             sample_wise_feature_influence = []
             explanation = None
-            
+
         if mm_y_pred is None or config.trace_decisions:
             combined_sample_id_list = sample_id_list
             combined_y_pred = y_pred
@@ -761,7 +748,7 @@ def evaluate_dataset(config: Config):
         if isinstance(forest, RandomForestRegressor):
             header = "Protein ID\tSAV\tPredicted effect value\tTree-wise standard deviation\tFeature 1\tFeature 2\t Feature 3\t Feature 4\t Feature 5\n"
             lines = [header]
-            
+
             for pos, sample_id in enumerate(combined_sample_id_list):
                 pred_value = combined_y_pred[pos]
                 prot_id, aac = sample_id
@@ -785,64 +772,78 @@ def evaluate_dataset(config: Config):
                 line = "\t".join(words) + "\n"
                 lines.append(line)
         else:
-            #number_of_displayed_features = 20
+            # number_of_displayed_features = 20
             header = "Protein ID\tSAV\tPredicted effect value"
 
-            if explanation is not None:
-                #for i in range(number_of_displayed_features):
-                #    header += f"\tFeature {i+1}"
-                for i in range(len(feature_categories)):
-                    #header += f"\tFeature category {i+1}\tImpact sum\tMean impact\tMax impact feature"
-                    header += f"\tFeature category {i+1}\tShap value\tTop feature of category {i+1}"
-                header += '\n'
-                lines = [header]
+            
+            # for i in range(number_of_displayed_features):
+            #    header += f"\tFeature {i+1}"
+            for i in range(len(feature_categories)):
+                # header += f"\tFeature category {i+1}\tImpact sum\tMean impact\tMax impact feature"
+                header += f"\tFeature category {i + 1}\tShap value\tTop feature of category {i + 1}"
+            header += "\n"
+            lines = [header]
 
-                if config.plot_sample_forces:
-                    force_plot_folder = f"{config.outfolder}/force_plots"
-                    if not os.path.isdir(force_plot_folder):
-                        os.makedirs(force_plot_folder)
+            if config.plot_sample_forces:
+                force_plot_folder = f"{config.outfolder}/force_plots"
+                if not os.path.isdir(force_plot_folder):
+                    os.makedirs(force_plot_folder)
 
-                for pos, sample_id in enumerate(combined_sample_id_list):
-                    pred_value = combined_y_pred[pos]
-                    prot_id, aac = sample_id
-                        
-                    words = [prot_id, aac, str(pred_value)]
+            for pos, sample_id in enumerate(combined_sample_id_list):
+                pred_value = combined_y_pred[pos]
+                prot_id, aac = sample_id
 
+                words = [prot_id, aac, str(pred_value)]
+
+                if explanation is not None:
                     cat_exp, cat_shaps = util.categorize_shap_from_xgb(explanation[pos][:-1], extern_feature_names_list)
-
                     if config.plot_sample_forces:
                         modified_feat_labels = []
                         cat_shaps = []
                         for pos, shap_val, (max_feat_shap, max_feat, feat_pos) in cat_exp:
-                            feat_cat = feature_categories[pos]
-                            if feat_pos is not None:
-                                val = test_feature_matrix[pos][feat_pos]
+                            if max_feat is not None:
+                                feat_cat = feature_categories[pos]
+                                if feat_pos is not None:
+                                    val = test_feature_matrix[pos][feat_pos]
+                                    if val is None:
+                                        val_str = "None"
+                                    else:
+                                        ival = int(val)
+                                        if ival > 0:
+                                            prec = 10 - int(math.log10(ival))
+                                        else:
+                                            prec = 9
+                                        val_str = f"{val:.{prec}f}"
+                                else:
+                                    val_str = "None"
+                                perc_shap = (100*max_feat_shap)/shap_val
+
+                                feat_st = feat_stats[max_feat]
+
+                                modified_feat_labels.append(f"{feat_cat}\n{max_feat}\nshap={max_feat_shap:.5f} ({perc_shap:.2f}%)\nval={val_str}\n{feat_st}")
                             else:
-                                val = None
-                            modified_feat_labels.append(f'{feat_cat}\n{max_feat} (shap={max_feat_shap}, val={val})')
+                                modified_feat_labels.append('None')
                             cat_shaps.append(shap_val)
 
-                        shap.plots.force(explanation[pos][-1], cat_shaps, matplotlib=True, show=False, feature_names=modified_feat_labels)
+                        shap.plots.force(explanation[pos][-1], numpy.array(cat_shaps), matplotlib=True, show=False, feature_names=modified_feat_labels, figsize=(30,5))
                         plt.savefig(f"{force_plot_folder}/{prot_id}_{aac}_cat_force_plot.png")
                         shap.plots.force(explanation[pos][-1], explanation[pos][:-1], matplotlib=True, show=False, feature_names=extern_feature_names_list)
                         plt.savefig(f"{force_plot_folder}/{prot_id}_{aac}_force_plot.png")
                         plt.clf()
 
-
                     for pos, shap_val, (max_feat_shap, max_feat, feat_pos) in cat_exp:
                         feat_cat = feature_categories[pos]
                         if shap_val < 0:
-                            words.append(f'{feat_cat} features skews prediction towards functional consequence')
+                            words.append(f"{feat_cat} features skews prediction towards functional consequence")
                         else:
-                            words.append(f'{feat_cat} features skews prediction towards wiltype-like effect')
+                            words.append(f"{feat_cat} features skews prediction towards wiltype-like effect")
                         words.append(str(shap_val))
 
-                        
                         if feat_pos is not None:
                             val = test_feature_matrix[pos][feat_pos]
                         else:
                             val = None
-                        words.append(f'{max_feat} (shap={max_feat_shap}, {val=})')
+                        words.append(f"{max_feat} (shap={max_feat_shap}, {val=})")
                     """
                     #count = 0
                     if pos < len(sample_wise_feature_influence):
@@ -883,10 +884,9 @@ def evaluate_dataset(config: Config):
                             words.append(str(mean_impact))
                             words.append(f'{max_feat} (val={max_feat_val}) has impact {max_impact}')
                     """
-                            
-                                
-                    line = "\t".join(words) + "\n"
-                    lines.append(line)
+
+                line = "\t".join(words) + "\n"
+                lines.append(line)
 
         predictions_file = f"{config.outfolder}/predictions_by_{model_name}.tsv"
         f = open(predictions_file, "w")
@@ -1044,7 +1044,6 @@ def loadCV(fn):
     if config.verbosity >= 1:
         print("\n============\nLoaded full CV from %s\n============\n" % fn)
     return forests, cross_val_object, config
-
 
 
 def buildFinalModel(samples, samples_store_id, config, internal_cv=None, outfile=None, filtered_features_file=None):

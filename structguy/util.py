@@ -73,6 +73,8 @@ class Config:
         self.python_env_expanded_for_ray = False
         self.gpu_mode = False
 
+        self.plot_trees = False
+
         self.overwrite = False
         self.dataset_name = ''
         self.path_to_sequence_fasta = None
@@ -1982,7 +1984,7 @@ def catogrize_feat_by_name(featname):
         if featname[3:7] == 'ssa_':
             return 7
         if featname[3:15] == 'simple_class':
-            if featname.count('Peptide') > 0 or featname.count('ligand') > 0:
+            if featname.count('Peptide') > 0 or featname.count('ligand') > 0 or featname.count('DNA') or featname.count('ion'):
                 return 8
 
     if featname[-4:] == '_rsa' or featname[:4] == 'rsa_' or featname[-13:] == 'surface_value' or featname[1:7] == 'c_rsa_' or featname.count('location') > 0:
