@@ -7,6 +7,8 @@ import ray
 import time
 import pickle
 import copy
+import contextlib
+
 
 from scipy import stats
 
@@ -66,6 +68,8 @@ def para_calc_feat_corr(data_store, left, right):
 
 
             for ind, value in enumerate(value_vec):
+                if tv_vector[ind] is None:
+                    continue
                 value_b = value_vec_b[ind]
                 if value is not None and value_b is not None:
                     cleaned_value_vec.append(value)
@@ -1201,19 +1205,19 @@ class DataSAIL_cv(CrossValidation):
                     verbose = 'I')
 
             else:
-            
-                raw_datasail_splits = datasail(
-                    e_data = config.path_to_sequence_fasta,
-                    #e_weights = weight_map,
-                    splits = splits,
-                    techniques = technique,
-                    names = names,
-                    e_type = 'P',
-                    solver = 'SCIP',
-                    epsilon = eps,
-                    overflow = 'assign',
-                    e_sim = 'mmseqs',
-                    )
+                with contextlib.redirect_stdout(None):
+                    raw_datasail_splits = datasail(
+                        e_data = config.path_to_sequence_fasta,
+                        #e_weights = weight_map,
+                        splits = splits,
+                        techniques = technique,
+                        names = names,
+                        e_type = 'P',
+                        solver = 'SCIP',
+                        epsilon = eps,
+                        overflow = 'assign',
+                        e_sim = 'mmseqs',
+                        )
         except ValueError:
             raw_datasail_splits = datasail(
                     e_data = config.path_to_sequence_fasta,

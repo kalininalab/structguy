@@ -1974,7 +1974,13 @@ def catogrize_feat_by_name(featname):
             return 8
         if featname[3:6] == 'ion':
             return 8
-        
+        if featname[3:6] == 'DNA':
+            return 8
+        if featname[3:6] == 'RNA':
+            return 8
+        if featname[3:8] == 'metal':
+            return 8
+
     if featname[:4] == 'lig_' or featname[:4] == 'rna_':
         return 8
 

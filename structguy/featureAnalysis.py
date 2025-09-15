@@ -1,4 +1,5 @@
 import sys
+import os
 import numpy as np
 import ray
 import statistics
@@ -7,11 +8,13 @@ import random
 import math
 
 import xgboost as xgb
-
+import matplotlib.pyplot as plt
 from structguy import learn
 from structman.base_utils.base_utils import calculate_chunksizes, pack, unpack
 from structguy.support_classes import CrossValidationSlice
 from structguy.util import Config, loadModel
+from structguy.sampleSpace import SampleSpace, FullSlice
+from structguy.featureGenerator import createTrainingSet
 
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.tree import DecisionTreeRegressor
@@ -662,6 +665,47 @@ def explore_tree(estimator, n_nodes, children_left, children_right, feature, thr
 
         for sample_id_ in sample_ids:
             print("Prediction for sample %d: %s" % (sample_id_, estimator.predict(X_test)[sample_id_]))
+
+
+def plot_violins(config):
+    samples: SampleSpace = createTrainingSet(config)
+
+    cross_val_obj: FullSlice = FullSlice(samples, config)
+    full_slice: CrossValidationSlice = cross_val_obj.slices[0]
+
+    feat_matrix = np.array(full_slice.get_train_feature_matrix(samples)).transpose()
+
+    plot_folder = f"{config.outfolder}/violin_plots"
+    if not os.path.isdir(plot_folder):
+        os.makedirs(plot_folder)
+    for feat_nr, feat_name in enumerate(full_slice.feature_names):
+
+        print(feat_name)
+        feat_vec = feat_matrix[feat_nr]
+
+        if feat_name[0:3] == 'oh_':
+            print(f'Cat feat: {feat_name}: {np.mean(feat_vec)=}')
+            continue
+        
+        no_nones_feat_vec = []
+        for feat_val in feat_vec:
+            if feat_val is not None:
+                no_nones_feat_vec.append(feat_val)
+
+        if len(no_nones_feat_vec) < 2:
+            continue
+
+        try:
+            plt.violinplot(no_nones_feat_vec, orientation='horizontal')
+        except TypeError or AttributeError as e:
+            print(f'Failed for {feat_name} due to\n{e}')
+            plt.clf()
+            continue
+
+        plt.title(f'{feat_name} violin plot')
+
+        plt.savefig(f'{plot_folder}/{feat_name}.png')
+        plt.clf()
 
 
 if __name__ == "__main__":

@@ -243,6 +243,10 @@ def parse_arguments(argument_start = 2, manual_args = None):
 
     return config, test_config
 
+def generate_violins():
+    config, _ = parse_arguments()
+    featureAnalysis.plot_violins(config)
+
 def feature_generator_main():
     config, test_config = parse_arguments()
 
@@ -331,7 +335,7 @@ def generate_info():
 def main():
 
     start_time = time.time()
-    possible_key_words = set(['generate_features', 'build_model', 'predict', 'info'])
+    possible_key_words = set(['generate_features', 'build_model', 'predict', 'info', 'violins'])
 
     if len(sys.argv) < 2:
         print(disclaimer)
@@ -354,6 +358,9 @@ def main():
 
     if key_word == 'info':
         generate_info()
+
+    if key_word == 'violins':
+        generate_violins()
 
     print("--- %s seconds ---" % (time.time() - start_time))
 

@@ -824,13 +824,16 @@ def trainRegressionForest(
                 sample_weight=train_weights,
             )
         else:
-            with contextlib.redirect_stdout(None):
-                forest.fit(
-                    train_feature_matrix,
-                    train_targets,
-                    eval_set=data_tuple_list,
-                    sample_weight=train_weights,
-                )
+            try:
+                with contextlib.redirect_stdout(None):
+                    forest.fit(
+                        train_feature_matrix,
+                        train_targets,
+                        eval_set=data_tuple_list,
+                        sample_weight=train_weights,
+                    )
+            except xgb.core.XGBoostError:
+                return_zero(zero_return, remote, cv_slice)
             
     else:
         if config.weighting == "geometric":

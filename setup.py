@@ -43,7 +43,8 @@ setup(
         "torch==2.8.0",
         "fgclustering==2.0.2",
         "shap==0.48.0",
-        "supertree==0.5.5"
+        "supertree==0.5.5",
+        "matplotlib==3.10.6"
     ],
 
     package_data = {

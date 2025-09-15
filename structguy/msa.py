@@ -833,7 +833,9 @@ def getMSA(
     update_mode=False,
     sub_threads=1,
 ):
-    if prot_id[4] == ":" and len(prot_id) == 6:
+    if len(prot_id) < 5:
+        pdb_tuple = None
+    elif prot_id[4] == ":" and len(prot_id) == 6:
         pdb_tuple = prot_id
     else:
         pdb_tuple = None

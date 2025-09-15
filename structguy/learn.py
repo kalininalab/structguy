@@ -672,6 +672,8 @@ def evaluate_dataset(config: Config):
             prot_wise_spearmans,
             protein_info,
         )
+        booster_obj = forest.get_booster()
+        tree_df = booster_obj.trees_to_dataframe()
 
         if config.trace_decisions:
             if isinstance(forest, RandomForestRegressor):
@@ -703,7 +705,9 @@ def evaluate_dataset(config: Config):
                 # plt.savefig('xgb_viz.png')
 
                 # """
-                booster_obj = forest.get_booster()
+                
+
+
                 if config.plot_trees:
                     st = SuperTree(forest, test_feature_matrix, y_pred, extern_feature_names_list, joined_sample_ids)
                     # st.show_tree(2)
@@ -718,22 +722,24 @@ def evaluate_dataset(config: Config):
                         st.save_html(which_tree=tree_id, filename=outfile)
                         tree_id += 1
 
-                tree_df = booster_obj.trees_to_dataframe()
-                # print(tree_df)
+                    
+                    # print(tree_df)
 
-                feat_tree_map = {}
+                    feat_tree_map = {}
 
-                tree_id_vec = tree_df["Tree"]
-                feat_name_vec = tree_df["Feature"]
+                    tree_id_vec = tree_df["Tree"]
+                    feat_name_vec = tree_df["Feature"]
 
-                for pos, tree_id in enumerate(tree_id_vec):
-                    feat_name = feat_name_vec[pos]
-                    if feat_name not in feat_tree_map:
-                        feat_tree_map[feat_name] = set()
-                    feat_tree_map[feat_name].add(tree_id)
+                    for pos, tree_id in enumerate(tree_id_vec):
+                        feat_name = feat_name_vec[pos]
+                        if feat_name not in feat_tree_map:
+                            feat_tree_map[feat_name] = set()
+                        feat_tree_map[feat_name].add(tree_id)
 
-                for feat_name in feat_tree_map:
-                    print(f"{feat_name} {feat_tree_map[feat_name]}")
+                    for feat_name in feat_tree_map:
+                        print(f"{feat_name} {feat_tree_map[feat_name]}")
+
+
                 # st.save_html()
                 # """
         else:
@@ -773,7 +779,7 @@ def evaluate_dataset(config: Config):
                 lines.append(line)
         else:
             # number_of_displayed_features = 20
-            header = "Protein ID\tSAV\tPredicted effect value"
+            header = "Protein ID\tSAV\tPredicted effect value\tTree STD"
 
             
             # for i in range(number_of_displayed_features):
@@ -789,11 +795,22 @@ def evaluate_dataset(config: Config):
                 if not os.path.isdir(force_plot_folder):
                     os.makedirs(force_plot_folder)
 
+            ind_preds = []
+            for tree_id, tree in enumerate(booster_obj):
+                ind_pred = tree.predict(DMatrix(test_feature_matrix))
+                ind_preds.append(ind_pred)
+
+            ind_preds = numpy.array(ind_preds).transpose()
+
             for pos, sample_id in enumerate(combined_sample_id_list):
                 pred_value = combined_y_pred[pos]
                 prot_id, aac = sample_id
 
                 words = [prot_id, aac, str(pred_value)]
+
+                pred_std = numpy.std(ind_preds[pos])
+
+                words.append(str(pred_std))
 
                 if explanation is not None:
                     cat_exp, cat_shaps = util.categorize_shap_from_xgb(explanation[pos][:-1], extern_feature_names_list)
