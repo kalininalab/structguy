@@ -39,7 +39,8 @@ setup(
     include_package_data=True,
     install_requires=[
         "scikit-learn==1.5.0",
-        #"xgboost==2.0.3",
+        "numpy==1.26.4",
+        "xgboost==3.0.5",
         "torch==2.8.0",
         "fgclustering==2.0.2",
         "shap==0.48.0",
