@@ -1186,7 +1186,7 @@ class DataSAIL_cv(CrossValidation):
         if config.verbosity >= 2:
             print(f'Time for init DataSAIL_cv Part 1: {t1-t0} {eps=}')
         try:
-            if config.verbosity >= 4:
+            if config.verbosity >= 4 or config.multi_gpu is not None:
                 print(f'Call of datasail with: e_data: {config.path_to_sequence_fasta}, e_weights: {len(weight_map)=}, splits: {splits}, names: {names}')
 
                 write_weight_map(weight_map, 'weight_map_for_datasail.tsv')
