@@ -47,7 +47,8 @@ def parse_arguments(argument_start = 2, manual_args = None):
                 'filter_syn',
                 'penalize_ttg',
                 'nofshpo',
-                'forces'
+                'forces',
+                'gpu='
             ]
             opts, args = getopt.getopt(argv, "i:n:m:d", long_paras)
 
@@ -87,6 +88,8 @@ def parse_arguments(argument_start = 2, manual_args = None):
     bayesianComplete = False
     penalize_train_test_gap = False
     skip_fshpo = False
+
+    multi_gpu = None
 
     for opt, arg in opts:
         if opt == '-i':
@@ -164,6 +167,9 @@ def parse_arguments(argument_start = 2, manual_args = None):
         if opt == '--forces':
             plot_sample_forces = True
 
+        if opt == 'gpu':
+            multi_gpu = int(arg)
+
     if path_to_model is not None:
         if path_to_model.count('/') > 0:
             model_name = path_to_model.rsplit("/",1)[1].rsplit('.',1)[0]
@@ -187,6 +193,8 @@ def parse_arguments(argument_start = 2, manual_args = None):
     config.debug_mode = debug
     config.filter_synonymous = filter_syn
     config.penalize_train_test_gap = penalize_train_test_gap
+
+    config.multi_gpu = multi_gpu
 
     if skip_fshpo:
         config.hpo_do_feat_selection = False

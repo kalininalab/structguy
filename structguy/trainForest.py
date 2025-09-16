@@ -17,6 +17,16 @@ import ray
 import contextlib
 from scipy import stats
 import xgboost as xgb
+import dask
+import dask_cudf
+from dask import array as da
+from dask import dataframe as dd
+from dask.distributed import Client
+from dask_cuda import LocalCUDACluster
+
+from xgboost import dask as dxgb
+from xgboost.dask import DaskDMatrix
+
 from filelock import FileLock
 from structguy import featureSelection, util
 from structman.base_utils.base_utils import pack, unpack, add_to_times, print_times, aggregate_times
@@ -498,6 +508,92 @@ def return_zero(zero_return, remote, cv_slice):
     return zero_return
 
 
+
+def using_dask_matrix(client: Client, X: da.Array, y: da.Array, config: util.Config, es_list, train_weights, data_tuple_list) -> da.Array:
+    # DaskDMatrix acts like normal DMatrix, works as a proxy for local DMatrix scatter
+    # around workers.
+    dtrain = DaskDMatrix(client, X, y)
+
+    # Use train method from xgboost.dask instead of xgboost.  This distributed version
+    # of train returns a dictionary containing the resulting booster and evaluation
+    # history obtained from evaluation metrics.
+
+    xgb_params = {
+        "tree_method": "hist",
+        "device": "cuda",
+        "sample_weight": "train_weights",
+        "n_estimators": "int(config.num_of_trees)",
+        "max_depth": "config.tree_depth",
+        "reg_alpha ": " config.xgb_alpha",
+        "reg_lambda ": " config.xgb_lambda",
+        "colsample_bytree ": " config.colsample_bytree",
+        "max_delta_step ": " config.max_delta_step",
+        "gamma": "config.xgb_gamma",
+        "learning_rate": "config.learning_rate",
+        "min_child_weight": "config.min_child_weight",
+        "early_stopping_rounds": "config.early_stopping",
+        "subsample": "config.max_sample_parameter",
+        "callbacks": "es_list",
+        "eval_metric": "util.rho_eval_for_xgboost",
+        }
+            
+    output = dxgb.train(
+        client,
+        # Make sure the device is set to CUDA.
+        xgb_params,
+        dtrain,
+        
+        evals=data_tuple_list,
+    )
+    bst = output["booster"]
+    #history = output["history"]
+
+    # you can pass output directly into `predict` too.
+    #prediction = dxgb.predict(client, bst, dtrain)
+    #print("Evaluation history:", history)
+    return bst
+
+def xgb_train_wrapper(config: util.Config, forest, train_feature_matrix, train_targets, data_tuple_list, train_weights, es_list):
+    if config.multi_gpu is None:
+        if config.verbosity >= 3:
+            forest.fit(
+                train_feature_matrix,
+                train_targets,
+                eval_set=data_tuple_list,
+                sample_weight=train_weights,
+            )
+        else:
+            try:
+                with contextlib.redirect_stdout(None):
+                    forest.fit(
+                        train_feature_matrix,
+                        train_targets,
+                        eval_set=data_tuple_list,
+                        sample_weight=train_weights,
+                    )
+            except xgb.core.XGBoostError:
+                return None
+    else:
+        # `LocalCUDACluster` is used for assigning GPU to XGBoost processes.  Here
+        # `n_workers` represents the number of GPUs since we use one GPU per worker process.
+        with LocalCUDACluster(n_workers=config.multi_gpu, threads_per_worker=config.proc_n) as cluster:
+            # Create client from cluster, set the backend to GPU array (cupy).
+            with Client(cluster) as client, dask.config.set({"array.backend": "cupy"}):
+                # Generate some random data for demonstration
+                
+
+                X = dd.from_dask_array(train_feature_matrix)
+                y = dd.from_dask_array(train_targets)
+                # XGBoost can take arrays. This is to show that DataFrame uses the GPU
+                # backend as well.
+                assert isinstance(X, dask_cudf.DataFrame)
+                assert isinstance(y, dask_cudf.Series)
+
+                #print("Using DMatrix")
+                forest = using_dask_matrix(client, X, y, config, es_list, train_weights, data_tuple_list).compute()
+
+    return forest
+
 def trainRegressionForest(
     config: util.Config,
     cv_slice: CrossValidationSlice,
@@ -719,34 +815,38 @@ def trainRegressionForest(
             es_list.append(es)
             data_tuple_list.append(protwise_test_data_tuples[prot_id])
 
-        if config.gpu_mode:
-            n_jobs=config.proc_n
-            device = 'cuda'
-            tree_method = 'hist'
-        else:
-            n_jobs=config.proc_n
-            device = 'cpu'
-            tree_method = 'hist'
+        if config.multi_gpu is None:
+            if config.gpu_mode:
+                n_jobs=config.proc_n
+                device = 'cuda'
+                tree_method = 'hist'
+            else:
+                n_jobs=config.proc_n
+                device = 'cpu'
+                tree_method = 'hist'
 
-        forest: xgb.XGBRegressor = xgb.XGBRegressor(
-            n_jobs=n_jobs,
-            device=device,
-            n_estimators=n_of_trees,
-            max_depth=depth,
-            reg_alpha = config.xgb_alpha,
-            reg_lambda = config.xgb_lambda,
-            colsample_bytree = config.colsample_bytree,
-            max_delta_step = config.max_delta_step,
-            gamma=config.xgb_gamma,
-            learning_rate=config.learning_rate,
-            min_child_weight=config.min_child_weight,
-            early_stopping_rounds=config.early_stopping,
-            subsample=max_sample_parameter,
-            verbosity=0,
-            callbacks=es_list,
-            eval_metric=util.rho_eval_for_xgboost,
-            tree_method=tree_method,
-        )
+            forest: xgb.XGBRegressor = xgb.XGBRegressor(
+                n_jobs=n_jobs,
+                device=device,
+                n_estimators=n_of_trees,
+                max_depth=depth,
+                reg_alpha = config.xgb_alpha,
+                reg_lambda = config.xgb_lambda,
+                colsample_bytree = config.colsample_bytree,
+                max_delta_step = config.max_delta_step,
+                gamma=config.xgb_gamma,
+                learning_rate=config.learning_rate,
+                min_child_weight=config.min_child_weight,
+                early_stopping_rounds=config.early_stopping,
+                subsample=max_sample_parameter,
+                verbosity=0,
+                callbacks=es_list,
+                eval_metric=util.rho_eval_for_xgboost,
+                tree_method=tree_method,
+            )
+        else:
+            forest = None
+
     elif skip_feature_selection:
         forest = RandomForestRegressor(
             n_estimators=config.fs_num_of_trees,
@@ -815,6 +915,11 @@ def trainRegressionForest(
 
         ta = add_to_times(times, ta) #6
 
+        forest = xgb_train_wrapper(config, forest, train_feature_matrix, train_targets, data_tuple_list, train_weights, es_list)
+        if forest is None:
+            return return_zero(zero_return, remote, cv_slice)
+
+        """
         #with FileLock("rf_regressor.lock"):
         if config.verbosity >= 3:
             forest.fit(
@@ -833,8 +938,8 @@ def trainRegressionForest(
                         sample_weight=train_weights,
                     )
             except xgb.core.XGBoostError:
-                return_zero(zero_return, remote, cv_slice)
-            
+                return return_zero(zero_return, remote, cv_slice)
+        """
     else:
         if config.weighting == "geometric":
             cv_slice.calcSampleWeights(config, distance_map)
@@ -916,25 +1021,32 @@ def trainRegressionForest(
                 es_list.append(es)
                 data_tuple_list.append(protwise_test_data_tuples[prot_id])
 
-            forest: xgb.XGBRegressor = xgb.XGBRegressor(
-                n_jobs=n_jobs,
-                device=device,
-                n_estimators=n_of_trees,
-                max_depth=depth,
-                reg_alpha = config.xgb_alpha,
-                reg_lambda = config.xgb_lambda,
-                colsample_bytree = config.colsample_bytree,
-                max_delta_step = config.max_delta_step,
-                gamma=config.xgb_gamma,
-                learning_rate=config.learning_rate,
-                min_child_weight=config.min_child_weight,
-                early_stopping_rounds=config.early_stopping,
-                subsample=max_sample_parameter,
-                verbosity=0,
-                callbacks=es_list,
-                eval_metric=util.rho_eval_for_xgboost,
-                tree_method=tree_method,
-            )
+            if config.multi_gpu is None:
+                forest: xgb.XGBRegressor = xgb.XGBRegressor(
+                    n_jobs=n_jobs,
+                    device=device,
+                    n_estimators=n_of_trees,
+                    max_depth=depth,
+                    reg_alpha = config.xgb_alpha,
+                    reg_lambda = config.xgb_lambda,
+                    colsample_bytree = config.colsample_bytree,
+                    max_delta_step = config.max_delta_step,
+                    gamma=config.xgb_gamma,
+                    learning_rate=config.learning_rate,
+                    min_child_weight=config.min_child_weight,
+                    early_stopping_rounds=config.early_stopping,
+                    subsample=max_sample_parameter,
+                    verbosity=0,
+                    callbacks=es_list,
+                    eval_metric=util.rho_eval_for_xgboost,
+                    tree_method=tree_method,
+                )
+            else:
+                forest = None
+            forest = xgb_train_wrapper(config, forest, train_feature_matrix, train_targets, data_tuple_list, train_weights, es_list)
+            if forest is None:
+                return return_zero(zero_return, remote, cv_slice)
+            """
             with contextlib.redirect_stdout(None):
                 forest.fit(
                     train_feature_matrix,
@@ -942,6 +1054,7 @@ def trainRegressionForest(
                     eval_set=data_tuple_list,
                     sample_weight=train_weights,
                 )
+            """
 
             slice_slice.filterFeatures([])
 

@@ -39,12 +39,14 @@ setup(
     include_package_data=True,
     install_requires=[
         "scikit-learn==1.5.0",
-        "xgboost==2.0.3",
+        #"xgboost==2.0.3",
         "torch==2.8.0",
         "fgclustering==2.0.2",
         "shap==0.48.0",
         "supertree==0.5.5",
-        "matplotlib==3.10.6"
+        "matplotlib==3.10.6",
+        "dask==2025.5.0",
+        "dask-cudf-cu11==25.6.0",
     ],
 
     package_data = {

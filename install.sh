@@ -101,6 +101,7 @@ fi
     echo "Installing package DataSAIL ..."
     mamba install -y -c conda-forge -c kalininalab -c bioconda -c mosek datasail==1.2.1
     pip install grakel
+    mamba install -y -c rapidsai -c conda-forge rapids
 } >&$verbose_stdout
 
 #install the main package
