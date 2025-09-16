@@ -15,6 +15,18 @@ from structguy.sampleSpace import DataSAIL_cv, CrossValidationSlice
 from structman.base_utils.base_utils import pack, unpack
 
 
+class Logger:
+    def __init__(self, filename):
+        self.filename = filename
+        f = open(filename, 'w')
+        f.close()
+
+    def log(self, message):
+        f = open(self.filename, 'a')
+        f.write(f'{message}\n')
+        f.close()
+
+
 # Taken from https://github.com/thuijskens/bayesian-optimization
 def expected_improvement(x, gaussian_process, evaluated_loss, greater_is_better=False, n_params=1):
     """expected_improvement
@@ -124,6 +136,7 @@ def bayes_random_init(
     n_pre_samples,
     distance_map,
     slice_slices: dict[int, list[CrossValidationSlice]],
+    logger,
     samples=None,
     samples_store_id=None,
     fix_cat=True,
@@ -172,10 +185,10 @@ def bayes_random_init(
 
     para_random_init = False
 
-    print("bayesian optimization:", param_names, n_pre_samples, para_random_init)
-    print("Current best scores:")
-    best_scores.printOut()
-    print(f"Objective score: {best_scores.objective_value(config)}")
+    logger.log("bayesian optimization:", param_names, n_pre_samples, para_random_init)
+    logger.log("Current best scores:")
+    best_scores.printOut(logger=logger)
+    logger.log(f"Objective score: {best_scores.objective_value(config)}")
 
     t0 = time.time()
 
@@ -209,7 +222,7 @@ def bayes_random_init(
         results = [(scores, first_scores, init_params, cv_obj)]
 
         if config.verbosity >= 1:
-            print(f"Objective score: {util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)}, unpenalized: {scores.objective_value(config)}")
+            logger.log(f"Objective score: {util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)}, unpenalized: {scores.objective_value(config)}")
 
         store = ray.put((config, pack(cv_obj), parameters, samples_store_id, pack(slice_slices), force_confusion, best_first_scores))
 
@@ -281,7 +294,7 @@ def bayes_random_init(
     for scores, first_scores, params, cv_obj in results:
         obj_sc = util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)
         if obj_sc is None or obj_sc != obj_sc:
-            print("========= Warning: None or NaN objective score for:", param_names, params)
+            logger.log("========= Warning: None or NaN objective score for:", param_names, params)
             scores = util.Scores(zero=True)
             obj_sc = scores.objective_value(config)
 
@@ -309,14 +322,14 @@ def bayes_random_init(
                     # The first obj is not packed
                     pass
             return_cv_obj = cv_obj
-            print("===========Found new optimum:=======================\n")
-            print(params)
-            scores.printOut()
-            print("====================================================")
+            logger.log("===========Found new optimum:=======================\n")
+            logger.log(params)
+            scores.printOut(logger=logger)
+            logger.log("====================================================")
             if store_params:
                 config.saveHyperParameter("hyperparameters_endless_HPO.conf")
         elif config.verbosity >= 2:
-            print(
+            logger.log(
                 f"No new optimun ({util.get_objective_score(config, best_scores, feature_penalty=config.feature_penalty)}): {util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)}"
             )
 
@@ -331,7 +344,7 @@ def bayes_random_init(
                     cat_param_map[parameter.name][val] = []
                 cat_param_map[parameter.name][val].append(obj_sc)
 
-    print("Random init finished")
+    logger.log("Random init finished")
     fix_parameters_pos = []
     if fix_cat:
         for p_pos, parameter in enumerate(parameters):
@@ -376,6 +389,7 @@ def bayesian_optimisation(
     best_first_scores,
     distance_map,
     slice_slices: dict[int, list[CrossValidationSlice]],
+    logger,
     samples=None,
     samples_store_id=None,
     n_pre_samples=5,
@@ -428,6 +442,7 @@ def bayesian_optimisation(
         n_pre_samples,
         distance_map,
         slice_slices,
+        logger,
         samples=samples,
         samples_store_id=samples_store_id,
         fix_cat=False,
@@ -444,7 +459,7 @@ def bayesian_optimisation(
     scaled_bounds = np.array([[0.0, 1.0]] * len(bounds))
 
     if config.verbosity >= 2:
-        print(f"In bayesian_optimization, bounds: {bounds}")
+        logger.log(f"In bayesian_optimization, bounds: {bounds}")
 
     scaler = MinMaxScaler()
     scaler.fit(min_max_samples)
@@ -472,7 +487,7 @@ def bayesian_optimisation(
     count_dups = 0
 
     if config.verbosity >= 1:
-        print(f"Number of bayesian optimization iterations: {n_iters}")
+        logger.log(f"Number of bayesian optimization iterations: {n_iters}")
 
     for n in range(n_iters):
         if config.verbosity >= 2:
@@ -503,17 +518,17 @@ def bayesian_optimisation(
         # Duplicates will break the GP. In case of a duplicate, we will randomly sample a next query point.
         if np.any(np.sum(np.abs(next_sample - scaled_xp), axis = 1) <= epsilon):
             if config.verbosity >= 2:
-                print(f"Sampled a duplicate: {next_sample} {bounds}")
+                logger.log(f"Sampled a duplicate: {next_sample} {bounds}")
             next_sample = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
             count_dups += 1
         else:
             next_sample = scaler.inverse_transform([next_sample])[0]
 
         if config.verbosity >= 1:
-            print(f"Try out next sampled HP: {next_sample}")
+            logger.log(f"Try out next sampled HP: {next_sample}")
 
         if count_dups == 4:
-            print("Break bayesian optimization, due to double dups")
+            logger.log("Break bayesian optimization, due to double dups")
             break
 
         if config.verbosity >= 2:
@@ -552,28 +567,18 @@ def bayesian_optimisation(
             print(f"Bayesian optimisation loop part 6: {tl6 - tl5}")
 
         if config.verbosity >= 1:
-            print("Bayesian optimization, iteration:", n)
-            print(f"Objective score: {cv_score}, unpenalized: {scores.objective_value(config)}")
-        # print('===========================\nBayesian optimization, iteration:',n,'\n===\n')
-        # config.printParameter()
-        # scores.printOut()
-        # print('===========================')
-
-        # print('==DEBUG OUT==')
-        # config.printParameter()
-        # print('Best score:',best_scores.objective_value(config))
-        # print('Score:',cv_score)
-        # print('=============')
+            logger.log("Bayesian optimization, iteration:", n)
+            logger.log(f"Objective score: {cv_score}, unpenalized: {scores.objective_value(config)}")
 
         if util.objective_function_criterium(config, scores, best_scores, feature_penalty=config.feature_penalty):
             best_scores = scores
             best_first_scores = first_scores
             best_params = next_sample
             new_optimimum = True
-            print("===========================\nFound new optimum\n===\n")
-            config.printParameter()
-            scores.printOut()
-            print("===========================")
+            logger.log("===========================\nFound new optimum\n===\n")
+            config.logParameter(logger)
+            scores.printOut(logger=logger)
+            logger.log("===========================")
             return_cv_obj = cv_obj
             return_slice_slices = slice_slices
             if store_params:
@@ -613,7 +618,7 @@ def bayesian_optimisation(
     if new_optimimum:
         for pos, para_value in enumerate(best_params):
             parameters[pos].setValue(config, para_value)
-            print("===========Found new optimum by setting", param_names[pos], "to", para_value, "==============")
+            logger.log("===========Found new optimum by setting", param_names[pos], "to", para_value, "==============")
     else:
         for pos, para_value in enumerate(initial_values):
             parameters[pos].setValue(config, para_value)
@@ -678,7 +683,20 @@ def addToScoreMatrix(scores_obj, config, score_matrix):
     return
 
 
-def twoDim(parameter_1, parameter_2, best_scores, first_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples=None, samples_store_id=None, debug=False):
+def twoDim(
+        parameter_1,
+        parameter_2,
+        best_scores,
+        first_scores,
+        config,
+        score_matrix,
+        cv_obj,
+        distance_map,
+        slice_slices, 
+        logger,
+        samples=None,
+        samples_store_id=None,
+        debug=False):
     cat_count = 0
     for p_type in [parameter_1.param_type, parameter_2.param_type]:
         if p_type == "categorical":
@@ -689,16 +707,70 @@ def twoDim(parameter_1, parameter_2, best_scores, first_scores, config, score_ma
 
     if cat_count == 1:
         if parameter_1.param_type == "categorical":
-            return bayesianAndCat(parameter_1, [parameter_2], best_scores, first_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples=samples, samples_store_id=samples_store_id, debug=debug)
+            return bayesianAndCat(
+                parameter_1,
+                [parameter_2],
+                best_scores,
+                first_scores,
+                config,
+                score_matrix,
+                cv_obj,
+                distance_map,
+                slice_slices,
+                logger,
+                samples=samples,
+                samples_store_id=samples_store_id,
+                debug=debug)
         elif parameter_2.param_type == "categorical":
-            return bayesianAndCat(parameter_2, [parameter_1], best_scores, first_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples=samples, samples_store_id=samples_store_id, debug=debug)
+            return bayesianAndCat(
+                parameter_2,
+                [parameter_1],
+                best_scores,
+                first_scores,
+                config,
+                score_matrix,
+                cv_obj,
+                distance_map,
+                slice_slices,
+                logger,
+                samples=samples,
+                samples_store_id=samples_store_id,
+                debug=debug)
 
     return bayesian_optimisation(
-        None, config, [parameter_1, parameter_2], score_matrix, cv_obj, best_scores, first_scores, distance_map, slice_slices, n_pre_samples=None, samples=samples, samples_store_id=samples_store_id, debug=debug
+        None,
+        config,
+        [parameter_1, parameter_2],
+        score_matrix, cv_obj,
+        best_scores,
+        first_scores,
+        distance_map,
+        slice_slices,
+        logger,
+        n_pre_samples=None,
+        samples=samples,
+        samples_store_id=samples_store_id,
+        debug=debug
     )
 
 
-def threeDim(parameter_1, parameter_2, parameter_3, best_scores, first_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples=None, samples_store_id=None, force_confusion=False, debug=False):
+def threeDim(
+        parameter_1,
+        parameter_2,
+        parameter_3,
+        best_scores,
+        first_scores,
+        config,
+        score_matrix,
+        cv_obj,
+        distance_map,
+        slice_slices,
+        logger,
+        samples=None,
+        samples_store_id=None,
+        force_confusion=False,
+        debug=False
+        ):
     cat_count = 0
     for p_type in [parameter_1.param_type, parameter_2.param_type, parameter_3.param_type]:
         if p_type == "categorical":
@@ -736,6 +808,7 @@ def threeDim(parameter_1, parameter_2, parameter_3, best_scores, first_scores, c
                 cv_obj,
                 distance_map,
                 slice_slices,
+                logger,
                 samples=samples,
                 samples_store_id=samples_store_id,
                 force_confusion=force_confusion,
@@ -752,6 +825,7 @@ def threeDim(parameter_1, parameter_2, parameter_3, best_scores, first_scores, c
                 cv_obj,
                 distance_map,
                 slice_slices,
+                logger,
                 samples=samples,
                 samples_store_id=samples_store_id,
                 force_confusion=force_confusion,
@@ -768,6 +842,7 @@ def threeDim(parameter_1, parameter_2, parameter_3, best_scores, first_scores, c
                 cv_obj,
                 distance_map,
                 slice_slices,
+                logger,
                 samples=samples,
                 samples_store_id=samples_store_id,
                 force_confusion=force_confusion,
@@ -784,6 +859,7 @@ def threeDim(parameter_1, parameter_2, parameter_3, best_scores, first_scores, c
         first_scores,
         distance_map,
         slice_slices,
+        logger,
         n_pre_samples=None,
         samples=samples,
         samples_store_id=samples_store_id,
@@ -792,7 +868,21 @@ def threeDim(parameter_1, parameter_2, parameter_3, best_scores, first_scores, c
     )
 
 
-def bayesianAndCat(parameter_1, parameters, best_scores, first_scores, config, score_matrix, cv_obj, distance_map, slice_slices, samples=None, debug=False, samples_store_id=None, force_confusion=False):
+def bayesianAndCat(
+        parameter_1,
+        parameters,
+        best_scores,
+        first_scores,
+        config,
+        score_matrix,
+        cv_obj,
+        distance_map,
+        slice_slices,
+        logger,
+        samples=None,
+        debug=False,
+        samples_store_id=None,
+        force_confusion=False):
     print("bayesian optimization and Cat", parameter_1.name)
 
     new_optimimum = False
@@ -815,6 +905,7 @@ def bayesianAndCat(parameter_1, parameters, best_scores, first_scores, config, s
             first_scores,
             distance_map,
             slice_slices,
+            logger,
             n_pre_samples=None,
             samples=samples,
             samples_store_id=samples_store_id,
@@ -1065,7 +1156,7 @@ def initParameters(
 
 
 def threeDimHyperOptimization(
-    config,
+    config: util.Config,
     cv_obj: DataSAIL_cv,
     best_scores: util.Scores,
     first_scores: util.Scores,
@@ -1075,6 +1166,13 @@ def threeDimHyperOptimization(
     distance_map=None,
     debug=False
 ):
+    
+    if config.penalize_train_test_gap:
+        process_log = f"{config.outfolder}/hp_process_log_ptt.txt"
+    else:
+        process_log = f"{config.outfolder}/hp_process_log_ot.txt"
+
+    logger = Logger(process_log)
     fss_parameters, fs_parameters, parameters = initParameters(config, split_fs_parameters=True)
     converged = False
     n = 1
@@ -1103,6 +1201,7 @@ def threeDimHyperOptimization(
                         cv_obj,
                         distance_map,
                         slice_slices,
+                        logger,
                         samples=samples,
                         samples_store_id=samples_store_id,
                         force_confusion=True,
@@ -1124,6 +1223,7 @@ def threeDimHyperOptimization(
                     first_scores,
                     distance_map,
                     slice_slices,
+                    logger,
                     samples=samples,
                     samples_store_id=samples_store_id,
                     n_pre_samples=None,
@@ -1154,6 +1254,7 @@ def threeDimHyperOptimization(
                         first_scores,
                         distance_map,
                         slice_slices,
+                        logger,
                         samples=samples,
                         samples_store_id=samples_store_id,
                         n_pre_samples=None,
@@ -1175,6 +1276,7 @@ def threeDimHyperOptimization(
                         cv_obj,
                         distance_map,
                         slice_slices,
+                        logger,
                         samples=samples,
                         samples_store_id=samples_store_id,
                         debug=debug,
@@ -1193,6 +1295,7 @@ def threeDimHyperOptimization(
                         cv_obj,
                         distance_map,
                         slice_slices,
+                        logger,
                         samples=samples,
                         samples_store_id=samples_store_id,
                         debug=debug,
@@ -1213,6 +1316,7 @@ def threeDimHyperOptimization(
                         cv_obj,
                         distance_map,
                         slice_slices,
+                        logger,
                         samples=samples,
                         samples_store_id=samples_store_id,
                         debug=debug,
@@ -1231,6 +1335,7 @@ def threeDimHyperOptimization(
                         cv_obj,
                         distance_map,
                         slice_slices,
+                        logger,
                         samples=samples,
                         samples_store_id=samples_store_id,
                         debug=debug,
@@ -1238,11 +1343,11 @@ def threeDimHyperOptimization(
                     if new_opti:
                         converged = False
 
-        print("Iteration: ", n)
-        config.printParameter()
+        logger.log("Iteration: ", n)
+        config.logParameter(logger)
         config.saveHyperParameter(f"hyperparameters_ThreeDim_epoch_{n}.conf")
         if best_scores is not None:
-            best_scores.printOut()
+            best_scores.printOut(logger=logger)
         n += 1
         # slice_slices = None
 
@@ -1260,6 +1365,8 @@ def bayesianComplete(
     distance_map=None,
     debug=False
     ):
+
+    logger = None
     parameters = initParameters(config, do_feat_selection=False)
 
     score_matrix = {}
@@ -1273,6 +1380,7 @@ def bayesianComplete(
         best_scores,
         distance_map,
         slice_slices,
+        logger,
         samples=samples,
         samples_store_id=samples_store_id,
         n_pre_samples=100,
@@ -1281,7 +1389,7 @@ def bayesianComplete(
         )
 
     print("Bayesian optimization finished")
-    config.printParameter()
+    config.logParameter(logger)
     best_scores.printOut()
 
     return
