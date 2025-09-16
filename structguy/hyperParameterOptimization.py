@@ -185,7 +185,7 @@ def bayes_random_init(
 
     para_random_init = False
 
-    logger.log("bayesian optimization:", param_names, n_pre_samples, para_random_init)
+    logger.log(f"bayesian optimization: {param_names}, {n_pre_samples=}, {para_random_init=}")
     logger.log("Current best scores:")
     best_scores.printOut(logger=logger)
     logger.log(f"Objective score: {best_scores.objective_value(config)}")
@@ -294,7 +294,7 @@ def bayes_random_init(
     for scores, first_scores, params, cv_obj in results:
         obj_sc = util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)
         if obj_sc is None or obj_sc != obj_sc:
-            logger.log("========= Warning: None or NaN objective score for:", param_names, params)
+            logger.log(f"========= Warning: None or NaN objective score for: {param_names}, {params}")
             scores = util.Scores(zero=True)
             obj_sc = scores.objective_value(config)
 
@@ -310,7 +310,7 @@ def bayes_random_init(
         # print('Score:',obj_sc)
         # print('=============')
 
-        if util.objective_function_criterium(config, scores, best_scores, feature_penalty=config.feature_penalty):
+        if util.objective_function_criterium(config, scores, best_scores, logger=logger, feature_penalty=config.feature_penalty):
             best_scores = scores
             best_first_scores = first_scores
             best_params = params
@@ -323,7 +323,7 @@ def bayes_random_init(
                     pass
             return_cv_obj = cv_obj
             logger.log("===========Found new optimum:=======================\n")
-            logger.log(params)
+            logger.log(f'{params}')
             scores.printOut(logger=logger)
             logger.log("====================================================")
             if store_params:
@@ -567,10 +567,10 @@ def bayesian_optimisation(
             print(f"Bayesian optimisation loop part 6: {tl6 - tl5}")
 
         if config.verbosity >= 1:
-            logger.log("Bayesian optimization, iteration:", n)
+            logger.log(f"Bayesian optimization, iteration: {n}")
             logger.log(f"Objective score: {cv_score}, unpenalized: {scores.objective_value(config)}")
 
-        if util.objective_function_criterium(config, scores, best_scores, feature_penalty=config.feature_penalty):
+        if util.objective_function_criterium(config, scores, best_scores, logger=logger, feature_penalty=config.feature_penalty):
             best_scores = scores
             best_first_scores = first_scores
             best_params = next_sample
@@ -618,7 +618,7 @@ def bayesian_optimisation(
     if new_optimimum:
         for pos, para_value in enumerate(best_params):
             parameters[pos].setValue(config, para_value)
-            logger.log("===========Found new optimum by setting", param_names[pos], "to", para_value, "==============")
+            logger.log(f"===========Found new optimum by setting {param_names[pos]}, to {para_value} ==============")
     else:
         for pos, para_value in enumerate(initial_values):
             parameters[pos].setValue(config, para_value)
@@ -913,7 +913,7 @@ def bayesianAndCat(
             debug=debug,
         )
 
-        if util.objective_function_criterium(config, scores, best_scores):
+        if util.objective_function_criterium(config, scores, best_scores, logger=logger):
             best_scores = scores
             first_scores = fscores
             best_parameter_value_1 = parameter_1.getValue(config)
@@ -1343,7 +1343,7 @@ def threeDimHyperOptimization(
                     if new_opti:
                         converged = False
 
-        logger.log("Iteration: ", n)
+        logger.log(f"Iteration: {n}")
         config.logParameter(logger)
         config.saveHyperParameter(f"hyperparameters_ThreeDim_epoch_{n}.conf")
         if best_scores is not None:

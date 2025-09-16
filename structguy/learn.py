@@ -34,8 +34,12 @@ import matplotlib.pyplot as plt
 
 
 def calcFeatureImportances(forest, samples, cv_slice, config, print_them=False):
-    feature_scores = forest.feature_importances_
-
+    try:
+        feature_scores = forest.feature_importances_
+    except AttributeError:
+        print('ERROR: forest was {forest} in calcFeatureImportances')
+        return {}
+    
     feat_score_tuples = []
     feature_importance_map = {}
     # print feature_names

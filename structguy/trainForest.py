@@ -18,7 +18,7 @@ import contextlib
 from scipy import stats
 import xgboost as xgb
 import dask
-import dask_cudf
+
 from dask import array as da
 from dask import dataframe as dd
 from dask.distributed import Client
@@ -554,16 +554,17 @@ def using_dask_matrix(client: Client, X: da.Array, y: da.Array, config: util.Con
     return bst
 
 def xgb_train_wrapper(config: util.Config, forest, train_feature_matrix, train_targets, data_tuple_list, train_weights, es_list):
-    if config.multi_gpu is None:
-        if config.verbosity >= 3:
-            forest.fit(
-                train_feature_matrix,
-                train_targets,
-                eval_set=data_tuple_list,
-                sample_weight=train_weights,
-            )
-        else:
-            try:
+    if config.multi_gpu is None or config.multi_gpu < 2:
+        try:
+            if config.verbosity >= 3:
+                forest.fit(
+                    train_feature_matrix,
+                    train_targets,
+                    eval_set=data_tuple_list,
+                    sample_weight=train_weights,
+                )
+            else:
+            
                 with contextlib.redirect_stdout(None):
                     forest.fit(
                         train_feature_matrix,
@@ -571,9 +572,10 @@ def xgb_train_wrapper(config: util.Config, forest, train_feature_matrix, train_t
                         eval_set=data_tuple_list,
                         sample_weight=train_weights,
                     )
-            except xgb.core.XGBoostError:
-                return None
+        except xgb.core.XGBoostError:
+            return None
     else:
+        import dask_cudf
         # `LocalCUDACluster` is used for assigning GPU to XGBoost processes.  Here
         # `n_workers` represents the number of GPUs since we use one GPU per worker process.
         with LocalCUDACluster(n_workers=config.multi_gpu, threads_per_worker=config.proc_n) as cluster:
@@ -815,7 +817,7 @@ def trainRegressionForest(
             es_list.append(es)
             data_tuple_list.append(protwise_test_data_tuples[prot_id])
 
-        if config.multi_gpu is None:
+        if config.multi_gpu is None or config.multi_gpu < 2:
             if config.gpu_mode:
                 n_jobs=config.proc_n
                 device = 'cuda'
@@ -1021,7 +1023,7 @@ def trainRegressionForest(
                 es_list.append(es)
                 data_tuple_list.append(protwise_test_data_tuples[prot_id])
 
-            if config.multi_gpu is None:
+            if config.multi_gpu is None or config.multi_gpu < 2:
                 forest: xgb.XGBRegressor = xgb.XGBRegressor(
                     n_jobs=n_jobs,
                     device=device,

@@ -1270,7 +1270,7 @@ def rho_eval_for_xgboost(predt, y):
     corr, _ = stats.spearmanr(predt, y)
     return (1.0-corr)
 
-def objective_function_criterium(config, scores, best_scores, feature_penalty = None, margin=1.0):
+def objective_function_criterium(config, scores, best_scores, feature_penalty = None, margin=1.0, logger=None):
     if best_scores is None:
         if scores is None:
             return False
@@ -1286,16 +1286,29 @@ def objective_function_criterium(config, scores, best_scores, feature_penalty = 
 
     if config.penalize_train_test_gap:
         if config.verbosity >= 2:
-            print(f'Objective function criterium - penalize train test gap {obj_score=} {obj_best_score=} {train_score=} {best_train_score=}')
+            message = f'Objective function criterium - penalize train test gap {obj_score=} {obj_best_score=} {train_score=} {best_train_score=}'
+
+            if logger is None:
+                print(message)
+            else:
+                logger.log(message)
 
         obj_score = ((1+obj_score)**2) - abs(train_score-obj_score)
         obj_best_score = ((1+obj_best_score)**2) - abs(best_train_score-obj_best_score)
 
         if config.verbosity >= 2:
-            print(f'After penalizing: {obj_score=} {obj_best_score=}')
+            message = f'After penalizing: {obj_score=} {obj_best_score=}'
+            if logger is None:
+                print(message)
+            else:
+                logger.log(message)
     else:
         if config.verbosity >= 2:
-            print(f'Objective function criterium {obj_score=} {obj_best_score=} {train_score=} {best_train_score=}')
+            message = f'Objective function criterium {obj_score=} {obj_best_score=} {train_score=} {best_train_score=}'
+            if logger is None:
+                print(message)
+            else:
+                logger.log(message)
 
     better = obj_score > (obj_best_score*margin)
 
