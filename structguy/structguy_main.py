@@ -3,6 +3,8 @@ import sys
 import getopt
 import os
 import time
+import logging
+from datetime import datetime
 
 from structguy import featureGenerator, util, learn, featureAnalysis
 
@@ -248,6 +250,15 @@ def parse_arguments(argument_start = 2, manual_args = None):
         test_config = util.Config(test_config_path)
     else:
         test_config = None
+
+    main_logger = logging.getLogger(__name__)
+
+    time_stamp = str(datetime.now()).replace(' ','_')
+
+    log_file = f'{config.outfolder}/main_log_{time_stamp}.log'
+    logging.basicConfig(filename=log_file, encoding='utf-8', level=logging.DEBUG)
+
+    config.logger = main_logger
 
     return config, test_config
 

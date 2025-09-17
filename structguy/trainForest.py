@@ -588,7 +588,7 @@ def xgb_train_wrapper(config: util.Config, forest, train_feature_matrix, train_t
                 assert isinstance(X, dask_cudf.DataFrame)
                 assert isinstance(y, dask_cudf.Series)
 
-                #config.logger.info("Using DMatrix")
+                config.logger.info(f"Using dask to train multi gpu xgboost training: {config.multi_gpu=}")
                 forest = using_dask_matrix(client, X, y, config, es_list, train_weights, data_tuple_list).compute()
 
     return forest
@@ -713,7 +713,7 @@ def trainRegressionForest(
 
     ta = add_to_times(times, ta) #0
     if config.verbosity >= 2:
-        config.logger.info(f"Train regression forest part 1, Threads: {proc}, Feature selection: {not skip_feature_selection} {samples is None=} {config.forest_type=} {config.gpu_mode=}")
+        config.logger.info(f"Train regression forest part 1, Threads: {proc}, Feature selection: {not skip_feature_selection} {samples is None=} {config.forest_type=} {config.gpu_mode=} {config.multi_gpu=}")
 
     if not skip_feature_selection and not config.random_split:
         get_loss_map = False

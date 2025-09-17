@@ -7,8 +7,7 @@ import random
 import math
 import shap
 import numpy
-import logging
-from datetime import datetime
+
 from scipy import stats
 from sklearn.metrics import (
     accuracy_score,
@@ -39,7 +38,7 @@ def calcFeatureImportances(forest, samples, cv_slice, config, print_them=False):
     try:
         feature_scores = forest.feature_importances_
     except AttributeError:
-        config.logger.info('ERROR: forest was {forest} in calcFeatureImportances')
+        config.logger.error(f'ERROR: forest was {forest} in calcFeatureImportances')
         return {}
     
     feat_score_tuples = []
@@ -100,15 +99,6 @@ def save_feature_importances(outfile, feature_importance_map):
 
 def learn(config, effectRegressor=None, test_config=None):
     crossValidation = config.crossValidation
-
-    main_logger = logging.getLogger(__name__)
-
-    time_stamp = datetime.today().strftime('%Y-%m-%d')
-
-    log_file = f'{config.outfolder}/main_log_{time_stamp}.log'
-    logging.basicConfig(filename=log_file, encoding='utf-8', level=logging.DEBUG)
-
-    config.logger = main_logger
 
     if config.verbosity >= 1:
         config.logger.info("================================ Start Learn ==============================================")
@@ -505,11 +495,8 @@ def evaluate_dataset(config: Config):
         return None, None, None
 
     if config.verbosity >= 1:
-        config.logger.info(
-            "Shape of the feature matrix:",
-            len(test_feature_matrix),
-            len(test_feature_matrix[0]),
-        )
+        config.logger.info(f"Shape of the feature matrix: {len(test_feature_matrix)} {len(test_feature_matrix[0])}")
+
     """
     max_test_feat_len = 100_000
 
