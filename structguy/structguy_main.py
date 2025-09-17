@@ -248,6 +248,9 @@ def parse_arguments(argument_start = 2, manual_args = None):
     if config.multi_gpu is not None:
         if config.multi_gpu > 1:
             import dask
+            from dask_cuda import LocalCUDACluster
+            with LocalCUDACluster(n_workers=config.multi_gpu, threads_per_worker=config.proc_n) as cluster:
+                pass
             config.gpu_mode = True
 
 

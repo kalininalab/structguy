@@ -680,7 +680,10 @@ class SampleSpace(Slotted_obj):
             try:
                 feat_id_vec.append(self.feat_pos_dict[feat_name])
             except KeyError:
-                feat_id_vec.append(None)
+                if feat_name[0:3] == 'oh_':
+                    feat_id_vec.append(0)
+                else:
+                    feat_id_vec.append(None)
             except TypeError:
                 config.logger.warning(f'{self.feat_pos_dict[:100]=}')
 

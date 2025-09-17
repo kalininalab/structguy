@@ -471,6 +471,20 @@ def load_data_for_pred(
     return samples, test_feature_matrix, test_targets, sample_id_list
 
 
+def val_to_str(val):
+    if val is None:
+        val_str = "None"
+    else:
+        ival = int(val)
+        if ival > 0:
+            prec = 6 - int(math.log10(ival))
+        else:
+            prec = 5
+        if prec < 1:
+            prec = 1
+        val_str = f"{val:.{prec}f}"
+    return val_str
+
 def evaluate_dataset(config: Config):
     t0 = time.time()
     forest, extern_feature_names_list, impute_map, model_config, feat_stats = loadModel(config.path_to_model)
@@ -613,9 +627,9 @@ def evaluate_dataset(config: Config):
             p_value = None
 
         if config.verbosity >= 1:
-            config.logger.info("R2-Score: ", r2)
-            config.logger.info("MSE: ", mse)
-            config.logger.info("Spearman correlation and p-value: ", corr, p_value)
+            config.logger.info(f"R2-Score: {r2}")
+            config.logger.info(f"MSE: {mse}")
+            config.logger.info(f"Spearman correlation and p-value: {corr} {p_value}")
 
         if config.target_values is not None:
             prot_wise_spearmans, mean_spearman, _ = util.calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.spearmanr)
@@ -791,7 +805,7 @@ def evaluate_dataset(config: Config):
 
             ind_preds = []
             for tree_id, tree in enumerate(booster_obj):
-                ind_pred = tree.predict(DMatrix(test_feature_matrix))
+                ind_pred = tree.predict(DMatrix(test_feature_matrix, feature_names = extern_feature_names_list))
                 ind_preds.append(ind_pred)
 
             ind_preds = numpy.array(ind_preds).transpose()
@@ -816,22 +830,17 @@ def evaluate_dataset(config: Config):
                                 feat_cat = feature_categories[pos]
                                 if feat_pos is not None:
                                     val = test_feature_matrix[pos][feat_pos]
-                                    if val is None:
-                                        val_str = "None"
-                                    else:
-                                        ival = int(val)
-                                        if ival > 0:
-                                            prec = 10 - int(math.log10(ival))
-                                        else:
-                                            prec = 9
-                                        val_str = f"{val:.{prec}f}"
+                                    val_str = val_to_str(val)
+                                    
                                 else:
                                     val_str = "None"
                                 perc_shap = (100*max_feat_shap)/shap_val
 
                                 feat_st = feat_stats[max_feat]
+                                mean_val = feat_st[2]
+                                mean_val_str = val_to_str(mean_val)
 
-                                modified_feat_labels.append(f"{feat_cat}\n{max_feat}\nshap={max_feat_shap:.5f} ({perc_shap:.2f}%)\nval={val_str}\n{feat_st}")
+                                modified_feat_labels.append(f"{feat_cat}\n{max_feat}\nshap={max_feat_shap:.4f} ({perc_shap:.2f}%)\nval={val_str} (mean={mean_val_str})")
                             else:
                                 modified_feat_labels.append('None')
                             cat_shaps.append(shap_val)
