@@ -247,6 +247,7 @@ def parse_arguments(argument_start = 2, manual_args = None):
 
     if config.multi_gpu is not None:
         if config.multi_gpu > 1:
+            import dask
             config.gpu_mode = True
 
 

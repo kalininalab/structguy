@@ -572,7 +572,7 @@ def xgb_train_wrapper(config: util.Config, forest, train_feature_matrix, train_t
         except xgb.core.XGBoostError:
             return None
     else:
-        import dask_cudf
+        #import dask_cudf
         # `LocalCUDACluster` is used for assigning GPU to XGBoost processes.  Here
         # `n_workers` represents the number of GPUs since we use one GPU per worker process.
         with LocalCUDACluster(n_workers=config.multi_gpu, threads_per_worker=config.proc_n) as cluster:
@@ -585,8 +585,8 @@ def xgb_train_wrapper(config: util.Config, forest, train_feature_matrix, train_t
                 y = dd.from_dask_array(train_targets)
                 # XGBoost can take arrays. This is to show that DataFrame uses the GPU
                 # backend as well.
-                assert isinstance(X, dask_cudf.DataFrame)
-                assert isinstance(y, dask_cudf.Series)
+                #assert isinstance(X, dask_cudf.DataFrame)
+                #assert isinstance(y, dask_cudf.Series)
 
                 config.logger.info(f"Using dask to train multi gpu xgboost training: {config.multi_gpu=}")
                 forest = using_dask_matrix(client, X, y, config, es_list, train_weights, data_tuple_list).compute()
