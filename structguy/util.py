@@ -1139,7 +1139,7 @@ class Scores:
         self.mean_pearson = mean_pearson
         return
 
-    def looger_print(self, logger):
+    def logger_print(self, logger):
         logger.log('------------Scores------------')
         logger.log(f'Generated for {self.n_of_features} number of features')
         if self.mse is not None:
