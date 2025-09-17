@@ -1191,33 +1191,33 @@ class Scores:
         logger.log('------------Scores------------')
         logger.log(f'Generated for {self.n_of_features} number of features')
         if self.mse is not None:
-            logger.log('-MSE:',self.mse)
+            logger.log(f'-MSE: {self.mse}')
         if self.wmse is not None:
-            logger.log('-weighted MSE:',self.wmse)
+            logger.log(f'-weighted MSE: {self.wmse}')
         if self.r2 is not None:
-            logger.log('-R2:',self.r2)
+            logger.log(f'-R2: {self.r2}')
         if self.wr2 is not None:
-            logger.log('-weighted R2:',self.wr2)
+            logger.log(f'-weighted R2: {self.wr2}')
         if self.corr is not None:
-            logger.log('-Spearmans Correlation:',self.corr)
+            logger.log(f'-Spearmans Correlation: {self.corr}')
         if self.mean_spearman is not None:
             logger.log(f'-Mean Protein-Wise Spearmans Corr: {self.mean_spearman}')
         if self.pearson_r is not None:
-            logger.log('-Pearsons Correlation:',self.pearson_r)
+            logger.log(f'-Pearsons Correlation: {self.pearson_r}')
         if self.mean_pearson is not None:
             logger.log(f"-Mean Protein-Wise Pearsons Corr: {self.mean_pearson}")
         if self.acc is not None:
-            logger.log('-Accuracy:',self.acc)
+            logger.log(f'-Accuracy: {self.acc}')
         if self.roc is not None:
-            logger.log('-auROC:',self.roc)
+            logger.log(f'-auROC: {self.roc}')
         if self.precision is not None:
-            logger.log('-Precision:',self.precision)
+            logger.log(f'-Precision: {self.precision}')
         if self.recall is not None:
-            logger.log('-Recall:',self.recall)
+            logger.log(f'-Recall: {self.recall}')
         if self.f1 is not None:
-            logger.log('-F1:',self.f1)
+            logger.log(f'-F1: {self.f1}')
         if self.mcc is not None:
-            logger.log('-MCC:',self.mcc)
+            logger.log(f'-MCC: {self.mcc}')
         if self.feature_penalty is not None:
             logger.log(f'Feature penalty term: {self.feature_penalty}')
 
