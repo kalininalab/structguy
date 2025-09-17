@@ -245,9 +245,9 @@ def parse_arguments(argument_start = 2, manual_args = None):
             except ModuleNotFoundError:
                 config.gpu_mode = False
 
-        if config.multi_gpu is not None:
-            if config.multi_gpu > 1:
-                config.gpu_mode = True
+    if config.multi_gpu is not None:
+        if config.multi_gpu > 1:
+            config.gpu_mode = True
 
 
     if test_config_path is not None:

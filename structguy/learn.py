@@ -102,6 +102,7 @@ def learn(config, effectRegressor=None, test_config=None):
 
     if config.verbosity >= 1:
         config.logger.info("================================ Start Learn ==============================================")
+        config.logger.info(f'{sys.argv}')
         config.logger.info(f"Protein-based randomization: {config.prot_based_separation}")
         config.logger.info(f"add Protein mean values: {config.addBias}")
         config.logger.info(f"Cross Validation: {crossValidation}")
