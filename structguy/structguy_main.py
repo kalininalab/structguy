@@ -169,7 +169,7 @@ def parse_arguments(argument_start = 2, manual_args = None):
         if opt == '--forces':
             plot_sample_forces = True
 
-        if opt == 'gpu':
+        if opt == '--gpu':
             multi_gpu = int(arg)
 
     if path_to_model is not None:
