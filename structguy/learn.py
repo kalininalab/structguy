@@ -7,6 +7,8 @@ import random
 import math
 import shap
 import numpy
+import logging
+from datetime import datetime
 from scipy import stats
 from sklearn.metrics import (
     accuracy_score,
@@ -37,7 +39,7 @@ def calcFeatureImportances(forest, samples, cv_slice, config, print_them=False):
     try:
         feature_scores = forest.feature_importances_
     except AttributeError:
-        print('ERROR: forest was {forest} in calcFeatureImportances')
+        config.logger.info('ERROR: forest was {forest} in calcFeatureImportances')
         return {}
     
     feat_score_tuples = []
@@ -51,7 +53,7 @@ def calcFeatureImportances(forest, samples, cv_slice, config, print_them=False):
         try:
             feature_importance_map[feature_name] = feature_scores[pos]
         except KeyError:
-            print(
+            config.logger.info(
                 "Some Error:",
                 len(feature_scores),
                 len(cv_slice.feature_names),
@@ -79,9 +81,9 @@ def calcFeatureImportances(forest, samples, cv_slice, config, print_them=False):
                 continue
             if score < config.print_scores_greater_than:
                 continue
-            print(f"{feature_name}: {score}")
+            config.logger.info(f"{feature_name}: {score}")
 
-        print("Total feature importance by feature type:", feature_type_importance)
+        config.logger.info("Total feature importance by feature type:", feature_type_importance)
 
     return feature_importance_map
 
@@ -99,32 +101,32 @@ def save_feature_importances(outfile, feature_importance_map):
 def learn(config, effectRegressor=None, test_config=None):
     crossValidation = config.crossValidation
 
+    main_logger = logging.getLogger(__name__)
+
+    time_stamp = datetime.today().strftime('%Y-%m-%d')
+
+    log_file = f'{config.outfolder}/main_log_{time_stamp}.log'
+    logging.basicConfig(filename=log_file, encoding='utf-8', level=logging.DEBUG)
+
+    config.logger = main_logger
+
     if config.verbosity >= 1:
-        print("================================ Start Learn ==============================================")
-        print("Protein-based randomization: ", config.prot_based_separation)
-        print("add Protein mean values: ", config.addBias)
-        if isinstance(crossValidation, int):
-            print("Cross Validation: %s-fold" % str(crossValidation))
-        else:
-            print("Cross Validation:", crossValidation)
-        print("filter structural features: ", config.filterStructuralFeatures)
-        print("filter samples with no mapped structures: ", config.structure_threshold)
-        print("Clean type-2 circularity from training set: ", config.remove_t2)
-        print(
-            "Trainset subsampling: ",
-            config.balanceSubsampling,
-            " (filter single variant proteins: ",
-            config.filter_single_variant_prots,
-            ")",
-        )
-        print(f"{config.random_split=}")
-        print("===========================================================================================")
+        config.logger.info("================================ Start Learn ==============================================")
+        config.logger.info(f"Protein-based randomization: {config.prot_based_separation}")
+        config.logger.info(f"add Protein mean values: {config.addBias}")
+        config.logger.info(f"Cross Validation: {crossValidation}")
+        config.logger.info(f"filter structural features: {config.filterStructuralFeatures}")
+        config.logger.info(f"filter samples with no mapped structures: {config.structure_threshold}")
+        config.logger.info(f"Clean type-2 circularity from training set: {config.remove_t2}")
+
+        config.logger.info(f"{config.random_split=}")
+        config.logger.info("===========================================================================================")
         if config.path_structural_feature_table is not None:
-            print(f"Using feature file: {config.path_structural_feature_table}")
-            print(f"Writing processed features to processed feature file: {config.path_structural_feature_table.rsplit('.', 1)[0]}_processed.tsv")
+            config.logger.info(f"Using feature file: {config.path_structural_feature_table}")
+            config.logger.info(f"Writing processed features to processed feature file: {config.path_structural_feature_table.rsplit('.', 1)[0]}_processed.tsv")
         elif config.path_to_processed_features_file is not None:
-            print(f"Using feature file: {config.path_to_processed_features_file}")
-        print(f"Writing output to: {config.outfolder}")
+            config.logger.info(f"Using feature file: {config.path_to_processed_features_file}")
+        config.logger.info(f"Writing output to: {config.outfolder}")
 
     t0 = time.time()
     samples: sampleSpace.SampleSpace = featureGenerator.createTrainingSet(config, stop_matrix_transformation=(config.path_to_support_features is not None))
@@ -138,7 +140,7 @@ def learn(config, effectRegressor=None, test_config=None):
         samples.fuse_samples(support_samples)
 
     t_0 = time.time()
-    print(f"Time for loading dataset: {t_0 - t0} {config.n_of_features=}")
+    config.logger.info(f"Time for loading dataset: {t_0 - t0} {config.n_of_features=}")
 
     if config.weighting == "geometric" and config.regression:
         samples.setGeometricDistanceMap(config)
@@ -162,8 +164,8 @@ def learn(config, effectRegressor=None, test_config=None):
         cv_slice = cross_val_obj.getCurrentSlice()
 
         if config.verbosity >= 1:
-            print(f"{len(cv_slice.train_targets)=}")
-            print("Testset length: ", len(cv_slice.test_targets))
+            config.logger.info(f"{len(cv_slice.train_targets)=}")
+            config.logger.info("Testset length: ", len(cv_slice.test_targets))
 
         debug = config.debug_mode
         if (
@@ -184,7 +186,7 @@ def learn(config, effectRegressor=None, test_config=None):
             initial_training_input = cv_slice
 
         if config.verbosity >= 3:
-            print(f"Before initial model training: {config.cv_hpo=} {initial_training_input.slice_slices=}")
+            config.logger.info(f"Before initial model training: {config.cv_hpo=} {initial_training_input.slice_slices=}")
 
         if config.hyperOptimization == "bayesianComplete":
             forest, scores, initial_training_input, slice_slices = trainForest.trainForest(
@@ -252,7 +254,7 @@ def learn(config, effectRegressor=None, test_config=None):
                 )
                 scores.printOut()
             if config.verbosity >= 1:
-                print("Hyperparamter optimization skipped")
+                config.logger.info("Hyperparamter optimization skipped")
 
         lopo_scores = {}
 
@@ -279,8 +281,8 @@ def learn(config, effectRegressor=None, test_config=None):
             cv_slice: CrossValidationSlice = cross_val_obj.slices[cv_counter]
 
             if config.verbosity >= 1:
-                print(cv_counter, len(cv_slice.train_targets))
-                print("Testset length: ", len(cv_slice.test_targets))
+                config.logger.info(cv_counter, len(cv_slice.train_targets))
+                config.logger.info("Testset length: ", len(cv_slice.test_targets))
 
                 cv_slice.printBalance(config)
 
@@ -313,11 +315,11 @@ def learn(config, effectRegressor=None, test_config=None):
                 )
 
                 if config.verbosity >= 1:
-                    print(f"Prot-wise RHO: {mean_spearman}")
-                    print(prot_wise_spearmans)
+                    config.logger.info(f"Prot-wise RHO: {mean_spearman}")
+                    config.logger.info(prot_wise_spearmans)
                     for prot_id, spear_ in raw_corrs:
                         if spear_ < 0.3:
-                            print(f"Low prot-wise rho: {prot_id} - {spear_}")
+                            config.logger.info(f"Low prot-wise rho: {prot_id} - {spear_}")
 
             else:
                 rocs.append((scores.roc, len(cv_slice.test_targets)))
@@ -331,9 +333,9 @@ def learn(config, effectRegressor=None, test_config=None):
 
             # if config.regression:
             #    confusion_map, raw_conf_map = featureAnalysis.calcSliceConfusion(forest, cv_slice, remote = True, err_warping_exp = config.err_warping_exp, goodwill_interval = config.confusion_goodwill)
-            #    print('Top 10 confusing features:')
+            #    config.logger.info('Top 10 confusing features:')
             #    for i in range(10):
-            #        print(confusion_map[i])
+            #        config.logger.info(confusion_map[i])
 
             if config.outfolder is not None:
                 if config.produce_scatterplot and config.regression and config.crossValidation == "LOPO":
@@ -468,12 +470,12 @@ def load_data_for_pred(
     samples = featureGenerator.createTrainingSet(config, external_impute=impute_map, for_prediction=True, filter_synon=config.trace_decisions)
     t1 = time.time()
 
-    print(f"Time for loading dataset: {t1 - t0}")
+    config.logger.info(f"Time for loading dataset: {t1 - t0}")
 
     for sample_id in samples.samples:
         samples.samples[sample_id].testtrain = "test"
 
-    test_feature_matrix, test_targets, sample_id_list = samples.get_test_data_for_feature_list(feature_names)
+    test_feature_matrix, test_targets, sample_id_list = samples.get_test_data_for_feature_list(feature_names, config)
 
     return samples, test_feature_matrix, test_targets, sample_id_list
 
@@ -483,10 +485,10 @@ def evaluate_dataset(config: Config):
     forest, extern_feature_names_list, impute_map, model_config, feat_stats = loadModel(config.path_to_model)
     t1 = time.time()
 
-    print(f"Time for loading model: {t1 - t0}")
+    config.logger.info(f"Time for loading model: {t1 - t0}")
 
     if config.verbosity >= 4:
-        print(f"{feat_stats=}")
+        config.logger.info(f"{feat_stats=}")
 
     model_filename = os.path.basename(config.path_to_model).split(".")[0]
     if model_filename.count("trained_on_") > 0:
@@ -495,7 +497,7 @@ def evaluate_dataset(config: Config):
         model_name = model_filename
 
     if config.verbosity >= 2:
-        print(f"{extern_feature_names_list[:5]}\n...\n{extern_feature_names_list[-5:]}")
+        config.logger.info(f"{extern_feature_names_list[:5]}\n...\n{extern_feature_names_list[-5:]}")
 
     samples, test_feature_matrix, test_targets, sample_id_list = load_data_for_pred(config, impute_map, extern_feature_names_list)
 
@@ -503,7 +505,7 @@ def evaluate_dataset(config: Config):
         return None, None, None
 
     if config.verbosity >= 1:
-        print(
+        config.logger.info(
             "Shape of the feature matrix:",
             len(test_feature_matrix),
             len(test_feature_matrix[0]),
@@ -519,7 +521,7 @@ def evaluate_dataset(config: Config):
         total_y_pred = []
         for i in range(nr_splits):
             if config.verbosity >= 1:
-                print(f"Shape of the feature matrix split: {split_size=}")
+                config.logger.info(f"Shape of the feature matrix split: {split_size=}")
             left = i * split_size
             right = (i+1) * split_size
             y_pred = forest.predict(test_feature_matrix[left:right])
@@ -588,7 +590,7 @@ def evaluate_dataset(config: Config):
             true_value = test_targets[pos]
 
             if true_value is None:
-                print(f"Ground truth is None for: {sample_id}")
+                config.logger.info(f"Ground truth is None for: {sample_id}")
                 sys.exit()
         else:
             true_value = None
@@ -596,7 +598,7 @@ def evaluate_dataset(config: Config):
         pred_value = y_pred[pos]
 
         if pred_value is None:
-            print(f"Predicted value is None for: {sample_id}")
+            config.logger.info(f"Predicted value is None for: {sample_id}")
 
         prot_id, aac = sample_id
 
@@ -623,9 +625,9 @@ def evaluate_dataset(config: Config):
             p_value = None
 
         if config.verbosity >= 1:
-            print("R2-Score: ", r2)
-            print("MSE: ", mse)
-            print("Spearman correlation and p-value: ", corr, p_value)
+            config.logger.info("R2-Score: ", r2)
+            config.logger.info("MSE: ", mse)
+            config.logger.info("Spearman correlation and p-value: ", corr, p_value)
 
         if config.target_values is not None:
             prot_wise_spearmans, mean_spearman, _ = util.calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.spearmanr)
@@ -637,20 +639,20 @@ def evaluate_dataset(config: Config):
             mean_pearson = None
 
         if config.verbosity >= 1:
-            print(f"Number of samples: {len(sample_id_list)} {len(test_targets)} {len(y_pred)}")
+            config.logger.info(f"Number of samples: {len(sample_id_list)} {len(test_targets)} {len(y_pred)}")
 
-            print(f"Prot-wise mean pearson: {mean_pearson}")
-            print(f"Prot-wise mean spearman: {mean_spearman}")
+            config.logger.info(f"Prot-wise mean pearson: {mean_pearson}")
+            config.logger.info(f"Prot-wise mean spearman: {mean_spearman}")
 
         if mm_y_pred is not None:
             prot_wise_spearmans, mean_mm_spearman, _ = util.calc_protein_wise_corr(mm_test_targets, mm_y_pred, mm_sample_id_list, stats.spearmanr)
             prot_wise_pearsons, mean_pearson, _ = util.calc_protein_wise_corr(mm_test_targets, mm_y_pred, mm_sample_id_list, stats.pearsonr)
 
             if config.verbosity >= 1:
-                print(f"Number of samples: {len(mm_sample_id_list)} {len(mm_test_targets)} {len(mm_y_pred)}")
+                config.logger.info(f"Number of samples: {len(mm_sample_id_list)} {len(mm_test_targets)} {len(mm_y_pred)}")
 
-                print(f"Prot-wise mean pearson for multi savs: {mean_pearson}")
-                print(f"Prot-wise mean spearman for multi savs: {mean_mm_spearman}")
+                config.logger.info(f"Prot-wise mean pearson for multi savs: {mean_pearson}")
+                config.logger.info(f"Prot-wise mean spearman for multi savs: {mean_mm_spearman}")
 
             prot_wise_spearmans, mean_comb_spearman, _ = util.calc_protein_wise_corr(
                 combined_test_targets,
@@ -666,10 +668,10 @@ def evaluate_dataset(config: Config):
             )
 
             if config.verbosity >= 1:
-                print(f"Number of samples: {len(combined_sample_id_list)} {len(combined_test_targets)} {len(combined_y_pred)}")
+                config.logger.info(f"Number of samples: {len(combined_sample_id_list)} {len(combined_test_targets)} {len(combined_y_pred)}")
 
-                print(f"Prot-wise mean pearson for all variants: {mean_pearson}")
-                print(f"Prot-wise mean spearman for all variants: {mean_comb_spearman}")
+                config.logger.info(f"Prot-wise mean pearson for all variants: {mean_pearson}")
+                config.logger.info(f"Prot-wise mean spearman for all variants: {mean_comb_spearman}")
 
         write_protein_wise_performances(
             f"{config.outfolder}/protein_wise_results.tsv",
@@ -690,10 +692,10 @@ def evaluate_dataset(config: Config):
                 # explanation = explainer(test_feature_matrix)
                 dtest_feature_matrix = DMatrix(test_feature_matrix, feature_names=extern_feature_names_list)
                 explanation = forest.get_booster().predict(dtest_feature_matrix, pred_contribs=True)
-                # print(explanation[0])
+                # config.logger.info(explanation[0])
 
                 # for pos, shap_val in enumerate(explanation[0][:-1]):
-                #    print(f'{shap_val=} {extern_feature_names_list[pos]}')
+                #    config.logger.info(f'{shap_val=} {extern_feature_names_list[pos]}')
 
                 # cat_exp, cat_shaps = util.categorize_shap_from_xgb(explanation[0][:-1], extern_feature_names_list)
 
@@ -702,7 +704,7 @@ def evaluate_dataset(config: Config):
                 # plt.savefig(f"{config.outfolder}/force_plot.png")
 
                 joined_sample_ids = [x[0] + x[1] for x in sample_id_list]
-                print(f"{len(joined_sample_ids)=} {len(y_pred)=} {len(test_feature_matrix[0])=} {len(extern_feature_names_list)=}")
+                config.logger.info(f"{len(joined_sample_ids)=} {len(y_pred)=} {len(test_feature_matrix[0])=} {len(extern_feature_names_list)=}")
 
                 # plt.figure(figsize=(120, 80))
                 # plot_tree(forest, num_trees = 2)
@@ -727,7 +729,7 @@ def evaluate_dataset(config: Config):
                         tree_id += 1
 
                     
-                    # print(tree_df)
+                    # config.logger.info(tree_df)
 
                     feat_tree_map = {}
 
@@ -741,7 +743,7 @@ def evaluate_dataset(config: Config):
                         feat_tree_map[feat_name].add(tree_id)
 
                     for feat_name in feat_tree_map:
-                        print(f"{feat_name} {feat_tree_map[feat_name]}")
+                        config.logger.info(f"{feat_name} {feat_tree_map[feat_name]}")
 
 
                 # st.save_html()
@@ -876,7 +878,7 @@ def evaluate_dataset(config: Config):
                             try:
                                 feat_cat = feature_categories[util.catogrize_feat_by_name(feat_name)]
                             except TypeError:
-                                print(f'{feat_name} could not be categorized')
+                                config.logger.info(f'{feat_name} could not be categorized')
                                 continue
                             if feat_cat not in categorized_impacts:
                                 categorized_impacts[feat_cat] = [[], 0., None, None]
@@ -949,8 +951,8 @@ def evaluate_dataset(config: Config):
             mono_return_score_function=True,
         )
         if config.verbosity >= 1:
-            print(f"Total roc_auc: {total_roc_auc}")
-            print(f"Prot-wise mean roc_auc: {mean_roc_auc}")
+            config.logger.info(f"Total roc_auc: {total_roc_auc}")
+            config.logger.info(f"Prot-wise mean roc_auc: {mean_roc_auc}")
 
         header = "Protein ID\tSAV\tPredicted effect value\n"
         lines = [header]
@@ -989,11 +991,11 @@ def evaluate_dataset(config: Config):
         mcc = matthews_corrcoef(int_targets, int_preds)
 
         if config.verbosity >= 1:
-            print("F-Score: ", f1)
-            print("Accuracy: ", acc)
-            print("Precision:", precision)
-            print("Recall:", recall)
-            print("MCC:", mcc)
+            config.logger.info("F-Score: ", f1)
+            config.logger.info("Accuracy: ", acc)
+            config.logger.info("Precision:", precision)
+            config.logger.info("Recall:", recall)
+            config.logger.info("MCC:", mcc)
     return
 
 
@@ -1056,14 +1058,14 @@ def storeCV(forests, config, cross_val_obj, cv_file):
     with open(cv_file, "wb") as output:
         pickle.dump((forests, cross_val_obj, config), output, pickle.HIGHEST_PROTOCOL)
     if config.verbosity >= 1:
-        print("\n============\nStored full CV results in %s\n============\n" % cv_file)
+        config.logger.info("\n============\nStored full CV results in %s\n============\n" % cv_file)
 
 
 def loadCV(fn):
     with open(fn, "rb") as inp:
         forests, cross_val_object, config = pickle.load(inp)
     if config.verbosity >= 1:
-        print("\n============\nLoaded full CV from %s\n============\n" % fn)
+        config.logger.info("\n============\nLoaded full CV from %s\n============\n" % fn)
     return forests, cross_val_object, config
 
 
@@ -1095,7 +1097,7 @@ def buildFinalModel(samples, samples_store_id, config, internal_cv=None, outfile
     )
 
     if config.verbosity >= 1:
-        print("Full Slice Info after training:")
+        config.logger.info("Full Slice Info after training:")
         full_slice.printBalance(config)
 
     feat_importance_map = calcFeatureImportances(forest, samples, full_slice, config, print_them=print_out)

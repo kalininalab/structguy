@@ -714,7 +714,7 @@ if __name__ == "__main__":
 
     # samples = learn.createTrainingSet(config,config.session,infile=sys.argv[2])
 
-    # samples.oneHotifyAll()
+    # samples.oneHotifyAll(config)
 
     # full_slice = sampleSpace.FullSlice(samples, config)
 

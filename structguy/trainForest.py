@@ -123,11 +123,8 @@ def trainClassificationForest(
     )
 
     if print_out:
-        print(
-            "Fit classification forest, size of feat_matrix:",
-            len(samples.raw_feature_matrix),
-            "size of first feature vector:",
-            len(samples.raw_feature_matrix[0]),
+        config.logger.info(
+            f"Fit classification forest, {len(samples.raw_feature_matrix)=} {len(samples.raw_feature_matrix[0])=}"
         )
 
     forest.fit(cv_slice.train_feature_matrix, cv_slice.train_targets)
@@ -240,14 +237,14 @@ def para_perturb(com_queue, store):
         matrix_id = 0
         for sub_sample_id, feat_vec in enumerate(feat_vecs):
             for feat_name in feat_names:
-                #print(f'{feat_name=} {feat_name not in feat_name_backmap=}')
+                #config.logger.info(f'{feat_name=} {feat_name not in feat_name_backmap=}')
                 if feat_name not in feat_name_backmap:
                     continue
                     
                 #pred = xgb_forest.predict([feat_vec])[0]
                 feat_pos = feat_name_backmap[feat_name]
                 val = feat_vec[feat_pos]
-                #print(f'{sample_id=} {feat_name=} {val=} {pred=}')
+                #config.logger.info(f'{sample_id=} {feat_name=} {val=} {pred=}')
 
                 if feat_name[:3] == 'oh_':
                     if val is not None:
@@ -289,7 +286,7 @@ def para_perturb(com_queue, store):
 
             d = pred - pert_pred
 
-            #print(f'{sample_id=} {feat_name=} {d=} {alt_val_type=} {curr_sample_id}')
+            #config.logger.info(f'{sample_id=} {feat_name=} {d=} {alt_val_type=} {curr_sample_id}')
 
             if sub_sample_id != curr_sample_id:
                 curr_sample_id = sub_sample_id
@@ -345,7 +342,7 @@ def perturb_xgb(config, forest_dump_file, feat_vecs, feature_names, prediction_v
 
     #max_proc_n_by_mem = int(half_ram // safe_memory_estimate_per_model)
     max_proc_n_by_mem = config.proc_n
-    print(f'{max_proc_n_by_mem=} {model_filesize=}')
+    config.logger.info(f'{max_proc_n_by_mem=} {model_filesize=}')
     n_jobs = max([2, min([config.proc_n, max_proc_n_by_mem])])
 
     max_number_of_samples = len(feat_vecs) // n_jobs
@@ -358,7 +355,7 @@ def perturb_xgb(config, forest_dump_file, feat_vecs, feature_names, prediction_v
     for feat_number, feat_name in enumerate(feature_names):
         feat_name_backmap[feat_name] = feat_number
 
-    print(f'{len(feature_names)=} {len(feat_vecs)=} {get_sample_wise_data=} {get_feat_impacts=}')
+    config.logger.info(f'{len(feature_names)=} {len(feat_vecs)=} {get_sample_wise_data=} {get_feat_impacts=}')
 
     acc_feat_impacts = {}
     if get_sample_wise_data:
@@ -380,7 +377,7 @@ def perturb_xgb(config, forest_dump_file, feat_vecs, feature_names, prediction_v
 
         submatrix = feat_vecs[left:right]
         com_queue.put((submatrix, left, prediction_vector[left:right], target_vector[left:right]))
-        #print(f'{left=} {right=} {len(submatrix)=} {len(prediction_vector[left:right])=} {len(target_vector[left:right])=}')
+        #config.logger.info(f'{left=} {right=} {len(submatrix)=} {len(prediction_vector[left:right])=} {len(target_vector[left:right])=}')
         iter_number += 1
 
     n_jobs = min([n_jobs, iter_number])
@@ -389,13 +386,13 @@ def perturb_xgb(config, forest_dump_file, feat_vecs, feature_names, prediction_v
         para_perturb_process_ids.append(para_perturb.remote(com_queue, store))
 
 
-    print(f'{len(para_perturb_process_ids)=}')
+    config.logger.info(f'{len(para_perturb_process_ids)=}')
 
     t0 = time.time()
     results = ray.get(para_perturb_process_ids)
     t1 = time.time()
 
-    print(f'Time for the para processes: {t1-t0} {n_jobs=}')
+    config.logger.info(f'Time for the para processes: {t1-t0} {n_jobs=}')
 
     for sub_sample_wise_feature_influence, sub_acc_feat_impacts in results:
         if get_feat_impacts:
@@ -413,7 +410,7 @@ def perturb_xgb(config, forest_dump_file, feat_vecs, feature_names, prediction_v
     if get_feat_impacts:
         acc_feat_impacts = [(k, acc_feat_impacts[k]/len(feat_vecs)) for k in acc_feat_impacts]
         acc_feat_impacts = sorted(acc_feat_impacts, key=lambda x:x[1], reverse=True)
-        #print(acc_feat_impacts)
+        #config.logger.info(acc_feat_impacts)
     return sample_wise_feature_influence, acc_feat_impacts
 
 @njit
@@ -438,7 +435,7 @@ def shap_internal_loop(
 
 def shap_analysis(config, forest, feat_vecs, feature_names, prediction_vector, target_vector):
     if config.verbosity >= 2:
-        print(f'Call of shap_analysis: {config.gpu_mode=} {len(feat_vecs)=}')
+        config.logger.info(f'Call of shap_analysis: {config.gpu_mode=} {len(feat_vecs)=}')
     
     times = []
     ta = time.time()
@@ -467,7 +464,7 @@ def shap_analysis(config, forest, feat_vecs, feature_names, prediction_vector, t
                 n+=1
                 if n == 4:
                     return None, times
-                print(f'Catched XGBoost Error, try again {n}')
+                config.logger.info(f'Catched XGBoost Error, try again {n}')
                 time.sleep(n**2)
 
     else:
@@ -550,7 +547,7 @@ def using_dask_matrix(client: Client, X: da.Array, y: da.Array, config: util.Con
 
     # you can pass output directly into `predict` too.
     #prediction = dxgb.predict(client, bst, dtrain)
-    #print("Evaluation history:", history)
+    #config.logger.info("Evaluation history:", history)
     return bst
 
 def xgb_train_wrapper(config: util.Config, forest, train_feature_matrix, train_targets, data_tuple_list, train_weights, es_list):
@@ -591,7 +588,7 @@ def xgb_train_wrapper(config: util.Config, forest, train_feature_matrix, train_t
                 assert isinstance(X, dask_cudf.DataFrame)
                 assert isinstance(y, dask_cudf.Series)
 
-                #print("Using DMatrix")
+                #config.logger.info("Using DMatrix")
                 forest = using_dask_matrix(client, X, y, config, es_list, train_weights, data_tuple_list).compute()
 
     return forest
@@ -671,52 +668,52 @@ def trainRegressionForest(
 
     if depth < 1:
         if config.verbosity >= 3:
-            print(f"Return Zero: {depth=}")
+            config.logger.info(f"Return Zero: {depth=}")
         return return_zero(zero_return, remote, cv_slice)
     if leaf_samples < 1:
         if config.verbosity >= 3:
-            print(f"Return Zero: {leaf_samples=}")
+            config.logger.info(f"Return Zero: {leaf_samples=}")
         return return_zero(zero_return, remote, cv_slice)
     if min_sample_split < 2:
         if config.verbosity >= 3:
-            print(f"Return Zero: {min_sample_split=}")
+            config.logger.info(f"Return Zero: {min_sample_split=}")
         return return_zero(zero_return, remote, cv_slice)
     if n_of_trees < 1:
         if config.verbosity >= 3:
-            print(f"Return Zero: {n_of_trees=}")
+            config.logger.info(f"Return Zero: {n_of_trees=}")
         return return_zero(zero_return, remote, cv_slice)
     if min_impurity_decrease < 0.0 or min_impurity_decrease > 1.0:
         if config.verbosity >= 3:
-            print(f"Return Zero: {min_impurity_decrease=}")
+            config.logger.info(f"Return Zero: {min_impurity_decrease=}")
         return return_zero(zero_return, remote, cv_slice)
     if ccp_alpha < 0.0:
         if config.verbosity >= 3:
-            print(f"Return Zero: {ccp_alpha=}")
+            config.logger.info(f"Return Zero: {ccp_alpha=}")
         return return_zero(zero_return, remote, cv_slice)
 
     if max_sample_parameter <= 0.0 or max_sample_parameter > 1.0:
         if config.verbosity >= 3:
-            print(f"Return Zero: {max_sample_parameter=}")
+            config.logger.info(f"Return Zero: {max_sample_parameter=}")
         return return_zero(zero_return, remote, cv_slice)
 
     if skip_feature_selection and (config.fs_max_sample_parameter <= 0.0 or config.fs_max_sample_parameter > 1.0):
         if config.verbosity >= 3:
-            print(f"Return Zero: {config.fs_max_sample_parameter=}")
+            config.logger.info(f"Return Zero: {config.fs_max_sample_parameter=}")
         return return_zero(zero_return, remote, cv_slice)
 
     if isinstance(max_feature_parameter, float):
         if max_feature_parameter <= 0.0 or max_feature_parameter > 1.0:
             if config.verbosity >= 3:
-                print(f"Return Zero: {max_feature_parameter=}")
+                config.logger.info(f"Return Zero: {max_feature_parameter=}")
             return return_zero(zero_return, remote, cv_slice)
     if number_of_bins < 1:
         if config.verbosity >= 3:
-            print(f"Return Zero: {number_of_bins=}")
+            config.logger.info(f"Return Zero: {number_of_bins=}")
         return return_zero(zero_return, remote, cv_slice)
 
     ta = add_to_times(times, ta) #0
     if config.verbosity >= 2:
-        print(f"Train regression forest part 1, Threads: {proc}, Feature selection: {not skip_feature_selection} {samples is None=} {config.forest_type=} {config.gpu_mode=}")
+        config.logger.info(f"Train regression forest part 1, Threads: {proc}, Feature selection: {not skip_feature_selection} {samples is None=} {config.forest_type=} {config.gpu_mode=}")
 
     if not skip_feature_selection and not config.random_split:
         get_loss_map = False
@@ -748,33 +745,26 @@ def trainRegressionForest(
     times.append(feat_select_times) #1
 
     if slice_updated is None:
-        print("ERROR =============== Feature selection failed:", cv_counter)
+        config.logger.error(f"ERROR =============== Feature selection failed: {cv_counter}")
         config.printParameter()
-        print("==============================================")
+        config.logger.error("==============================================")
         return return_zero(zero_return, remote, cv_slice)
 
     if len(cv_slice.feature_names) == 0:
-        print("Warning =============== Feature vector has len 0", cv_counter)
+        config.logger.warning(f"Warning =============== Feature vector has len 0 {cv_counter}")
         # config.printParameter()
-        # print('==============================================')
+        # config.logger.info('==============================================')
         return return_zero(zero_return, remote, cv_slice)
-
-    # print('=============== Feature vector has len ',len(cv_slice.train_feature_matrix[0]),cv_counter)
-    # config.printParameter()
-    # print('==============================================')
 
     if max_sample_parameter == 1.0:
         max_sample_parameter = None
-
-    if rel_max_leaf_node_pruning is not None:
-        max_leaf_nodes = int((2 ** (depth)) / rel_max_leaf_node_pruning)
 
     if print_out:
         config.printParameter()
 
     ta = add_to_times(times, ta) #2
     if config.verbosity >= 2:
-        print(f"Train regression forest part 2, {proc=} {samples is None=} {score_train=} {len(filtered_features)=}")
+        config.logger.info(f"Train regression forest part 2, {proc=} {samples is None=} {score_train=} {len(filtered_features)=}")
     
     if config.forest_type == "gradient_boost" and not skip_feature_selection:
         forest = GradientBoostingRegressor(
@@ -887,10 +877,10 @@ def trainRegressionForest(
 
     ta = add_to_times(times, ta) #4
     if config.verbosity >= 3:
-        print(f"Train regression forest part 3, {len(cv_slice.feature_names)=} {samples is None=}")
+        config.logger.info(f"Train regression forest part 3, {len(cv_slice.feature_names)=} {samples is None=}")
 
     if print_out or config.verbosity >= 3:
-        print(
+        config.logger.info(
             f"Train regression {config.forest_type} forest, call of fit with # of features: {len(cv_slice.feature_names)}, skip feature selection {skip_feature_selection}, slice update {slice_updated}, skip scoring {skip_scoring}"
         )
 
@@ -984,13 +974,13 @@ def trainRegressionForest(
         if acc_feat_impacts is None:
             return return_zero(zero_return, remote, cv_slice)
 
-        print(f'{acc_feat_impacts[:5]=}\n{acc_feat_impacts[-5:]=}')
+        config.logger.info(f'{acc_feat_impacts[:5]=}\n{acc_feat_impacts[-5:]=}')
         feats_to_remove = filtered_features[:]
         for feat_name, feat_impact in acc_feat_impacts:
             if feat_impact >= config.feat_impact_thresh:
                 feats_to_remove.append(feat_name)
 
-        print(f'{len(feats_to_remove)=} {len(filtered_features)=} {len(cv_slice.feature_names) + len(filtered_features)=}')
+        config.logger.info(f'{len(feats_to_remove)=} {len(filtered_features)=} {len(cv_slice.feature_names) + len(filtered_features)=}')
 
         if len(feats_to_remove) >= (len(cv_slice.feature_names)+ len(filtered_features)):
             return return_zero(zero_return, remote, cv_slice)
@@ -1074,7 +1064,7 @@ def trainRegressionForest(
     except ValueError:
         [e, f, g] = sys.exc_info()
         g = traceback.format_exc()
-        print(f'Catched error {config.forest_type=} {skip_feature_selection=}: {e}\n{f}\n{g}\n')
+        config.logger.info(f'Catched error {config.forest_type=} {skip_feature_selection=}: {e}\n{f}\n{g}\n')
         return return_zero(zero_return, remote, cv_slice)
     if score_train:
         if config.forest_type == "xgboost" and not skip_feature_selection:
@@ -1104,7 +1094,7 @@ def trainRegressionForest(
                 else:
                     [e, f, g] = sys.exc_info()
                     g = traceback.format_exc()
-                    print(f'Catched error {config.forest_type=} {skip_feature_selection=}: {e}\n{f}\n{g}\n')
+                    config.logger.info(f'Catched error {config.forest_type=} {skip_feature_selection=}: {e}\n{f}\n{g}\n')
                     return return_zero(zero_return, remote, cv_slice)
 
     ta = add_to_times(times, ta) #8/13
@@ -1113,7 +1103,7 @@ def trainRegressionForest(
         if print_out:
             zero_scores.printOut()
         if config.verbosity >= 3:
-            print("Return Zero: test_for_constant_array was True")
+            config.logger.info("Return Zero: test_for_constant_array was True")
         return return_zero(zero_return, remote, cv_slice)
 
     if config.verbosity >= 5:
@@ -1138,7 +1128,7 @@ def trainRegressionForest(
         train_scores_obj = calc_scores_obj(train_targets, x_pred, train_sample_ids, train_weights, cv_slice.feature_names)
         scores_obj.train_scores = train_scores_obj
         if print_out:
-            print('Train scores:')
+            config.logger.info('Train scores:')
             train_scores_obj.printOut()
     
     if print_out or debug:
@@ -1223,11 +1213,11 @@ def trainForest(
 
     if not cv_repeat:
         if len(cross_val_object.feature_names) < 1:
-            print(f"Call of trainForest without features: {cross_val_object.name}")
+            config.logger.info(f"Call of trainForest without features: {cross_val_object.name}")
             return None, zero_scores_obj, cross_val_object, slice_slices
 
     if config.verbosity >= 2 or debug:
-        print(f"Call of trainForest: {repeat=}, {cv_repeat=}, {remote=}, {para_number=}, {skip_feature_selection=}, {debug=}")
+        config.logger.info(f"Call of trainForest: {repeat=}, {cv_repeat=}, {remote=}, {para_number=}, {skip_feature_selection=}, {debug=}")
 
     t0 = time.time()
 
@@ -1239,12 +1229,7 @@ def trainForest(
     if not cv_repeat:
         for i in range(0, repeat):  # This can be used to ensure the robustness of the current parameter configuration
             if print_out:
-                print(
-                    "Training with #of features:",
-                    len(cross_val_object.feature_names),
-                    "and #of samples:",
-                    len(cross_val_object.sub_sampled_train_targets),
-                )
+                config.logger.info(f"Training with #of features: {len(cross_val_object.feature_names)} and #of samples: {len(cross_val_object.sub_sampled_train_targets)}")
 
             if config.regression:
                 (
@@ -1312,7 +1297,7 @@ def trainForest(
                 cv_counters = list(cross_val_object.slices.keys())[0 : config.cv_hpo_limiter]
                 config.cv_counters = cv_counters
                 if config.verbosity >= 1:
-                    print(f"\nCross validation in HPO limited to: {cv_counters}\n")
+                    config.logger.info(f"\nCross validation in HPO limited to: {cv_counters}\n")
         else:
             cv_counters = cross_val_object.slices.keys()
 
@@ -1333,7 +1318,7 @@ def trainForest(
                 cv_slice_stores[cv_counter] = packed_cv_slice
                 t02 = time.time()
                 if config.verbosity >= 3:
-                    print(f"Time for packing cv_slice {cv_counter=} in trainForest: {t02 - t01} {slice_slices is None=} {para_number=} {(samples_store_id is None)=}")
+                    config.logger.info(f"Time for packing cv_slice {cv_counter=} in trainForest: {t02 - t01} {slice_slices is None=} {para_number=} {(samples_store_id is None)=}")
 
             if slice_slices is not None and cv_counter in slice_slices:
                 s_slice_slices = slice_slices[cv_counter]
@@ -1486,6 +1471,6 @@ def trainForest(
 
     t1 = time.time()
     if config.verbosity >= 2:
-        print(f"Time for trainForest: {t1 - t0}")
+        config.logger.info(f"Time for trainForest: {t1 - t0}")
 
     return forest, scores_obj, cross_val_object, ret_slice_slices

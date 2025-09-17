@@ -47,7 +47,7 @@ def para_calc_feat_corr(data_store, left, right):
             if feat_nr_a == feat_nr_b:
                 corr_values[index].append(1.0)
                 continue
-            #print(f'{value_vec=} {value_vec_b=}')
+            #config.logger.info(f'{value_vec=} {value_vec_b=}')
             cleaned_value_vec = []
             n_a = 0
             cleaned_value_vec_b = []
@@ -202,7 +202,7 @@ def splitDataSet(config, sample_dict, specific_id=None, protein_wise=False, debu
                     train_ids.append(sample_id)
 
         if debug >= 1:
-            print('Train size: ',train_size,' ,Test size: ',test_size)
+            config.logger.info('Train size: ',train_size,' ,Test size: ',test_size)
     else:
         # Protein-nested split
         test_proteins = set()
@@ -238,7 +238,7 @@ def splitDataSet(config, sample_dict, specific_id=None, protein_wise=False, debu
 
         #print 'Protein Id based sample splitting:\nTest set Ids: ',test_proteins,'\nTestset size: ',test_set_sum
         if debug >= 1:
-            print('Train size: ',train_size,' ,Test size: ',test_size)
+            config.logger.info('Train size: ',train_size,' ,Test size: ',test_size)
     if len(test_ids) == 0:
         if ignore_samples is not None:
             ignored_prots = set()
@@ -246,7 +246,7 @@ def splitDataSet(config, sample_dict, specific_id=None, protein_wise=False, debu
                 ignored_prots.add(prot_id)
         else:
             ignored_prots = None
-        print(f'Splitted into empty test set: {specific_id}, {ignored_prots}')
+        config.logger.info(f'Splitted into empty test set: {specific_id}, {ignored_prots}')
     return test_ids, train_ids
 
 class SampleSpace(Slotted_obj):
@@ -314,23 +314,23 @@ class SampleSpace(Slotted_obj):
         self.feature_names.remove(feat_name)
 
 
-    def print_feat_types(self):
+    def print_feat_types(self, config):
         for featname in self.features:
-            print(f'{featname} - {self.features[featname].f_type}')
+            config.logger.info(f'{featname} - {self.features[featname].f_type}')
 
-    def print_stats(self):
+    def print_stats(self, config):
         prot_ids = set()
         for sample_id in self.samples:
             prot_id, aac = sample_id
             prot_ids.add(prot_id)
 
-        print(f'State of samples object: Proteins: {len(prot_ids)}, Samples: {len(self.samples)}, Features: {len(self.feature_names)}')
+        config.logger.info(f'State of samples object: Proteins: {len(prot_ids)}, Samples: {len(self.samples)}, Features: {len(self.feature_names)}')
 
-    def oneHotify(self,feat_name):
+    def oneHotify(self,feat_name, config):
         feat = self.features[feat_name]
         f_type = feat.f_type
         if not f_type == 'categorical':
-            print('Warning: Cannot oneHotify non-categorical features')
+            config.logger.info('Warning: Cannot oneHotify non-categorical features')
             return
         for category in feat.category_map:
             oh_name = 'oh_%s_%s' % (feat_name,category)
@@ -342,14 +342,14 @@ class SampleSpace(Slotted_obj):
             oh_name = 'oh_%s_%s' % (feat_name,category)
             self.addValue(sample_id,1,oh_name)
 
-    def oneHotifyAll(self):
-        print('Convert all categorical features to 1-hot encodings')
+    def oneHotifyAll(self, config):
+        config.logger.info('Convert all categorical features to 1-hot encodings')
         del_list = []
         for feat_name in self.features:
             if self.features[feat_name].f_type == 'categorical':
                 del_list.append(feat_name)
         for feat_name in del_list:
-            self.oneHotify(feat_name)
+            self.oneHotify(feat_name, config)
             del self.features[feat_name]
             for sample_id in self.feature_matrix_dict:
                 del self.feature_matrix_dict[sample_id][feat_name]
@@ -399,23 +399,23 @@ class SampleSpace(Slotted_obj):
 
         complete_feat_stats = {}
         for feat_corr_slice, left, right, feat_stats in results:
-            #print(f'{left=} {right=} {len(feat_corr_slice)=} {feat_stats=}')
+            #config.logger.info(f'{left=} {right=} {len(feat_corr_slice)=} {feat_stats=}')
             for index in range(left,right):
                 slice_index = index-left
                 if slice_index >= len(feat_corr_slice):
                     break
                 feat_corr_matrix[index] = feat_corr_slice[slice_index]
-                #print(f'{index=} {slice_index=} {feat_corr_slice[slice_index][:10]=}')
+                #config.logger.info(f'{index=} {slice_index=} {feat_corr_slice[slice_index][:10]=}')
         
             for feat_nr in feat_stats:
                 feat_name = self.feature_names[feat_nr]
-                #print(f'{feat_nr} {feat_name}')
+                #config.logger.info(f'{feat_nr} {feat_name}')
                 complete_feat_stats[feat_name] = feat_stats[feat_nr]
 
         self.feat_stats = complete_feat_stats
         self.feat_corr_matrix = feat_corr_matrix
 
-        print(f'{len(self.feat_stats)=} {len(self.feat_corr_matrix)=} {len(self.feature_names)}')
+        config.logger.info(f'{len(self.feat_stats)=} {len(self.feat_corr_matrix)=} {len(self.feature_names)}')
         return feat_corr_matrix
 
 
@@ -456,7 +456,7 @@ class SampleSpace(Slotted_obj):
             feat = self.features[feat_name]
             if feat.f_type == 'categorical':
                 continue
-            #print(feat_name)
+            #config.logger.info(feat_name)
             min_val, max_val = self.get_bounds(feat_name)
             if min_val is not None:
                 impute_value = min_val - abs(max_val - min_val)
@@ -523,8 +523,8 @@ class SampleSpace(Slotted_obj):
             del self.feature_matrix_dict[sample_id]
         return
 
-    def removeFeaturesByType(self,feat_type):
-        print('Remove features of type: ',feat_type)
+    def removeFeaturesByType(self, feat_type, config):
+        config.logger.info('Remove features of type: ',feat_type)
         del_list = []
         for feat_name in self.features:
             feat = self.features[feat_name]
@@ -674,7 +674,7 @@ class SampleSpace(Slotted_obj):
             feat_matrix.append(feat_vec)
         return feat_matrix
 
-    def get_feat_matrix_from_feat_names(self, feat_names):
+    def get_feat_matrix_from_feat_names(self, feat_names, config):
         feat_id_vec = []
         for feat_name in feat_names:
             try:
@@ -682,7 +682,7 @@ class SampleSpace(Slotted_obj):
             except KeyError:
                 feat_id_vec.append(None)
             except TypeError:
-                print(f'{self.feat_pos_dict[:100]=}')
+                config.logger.warning(f'{self.feat_pos_dict[:100]=}')
 
         sample_pos_vec = list(range(len(self.raw_feature_matrix)))
         return self.get_feat_matrix(feat_id_vec, sample_pos_vec)
@@ -704,7 +704,7 @@ class SampleSpace(Slotted_obj):
         if self.geometric_distance_map is not None and self.current_geometric_exponent == config.geometric_exponent:
             return
         t0 = time.time()
-        print('Start of GDM calculation with gexp:', config.geometric_exponent)
+        config.logger.info('Start of GDM calculation with gexp:', config.geometric_exponent)
         self.geometric_distance_map = {}
         bin_size = len(self.samples) // config.proc_n
         if len(self.samples) % config.proc_n != 0:
@@ -714,7 +714,7 @@ class SampleSpace(Slotted_obj):
         store = ray.put((targets,sample_ids,bin_size,config))
 
         t1 = time.time()
-        print('GDM store created, time:',t1-t0)
+        config.logger.info('GDM store created, time:',t1-t0)
 
         block_ids = []
 
@@ -724,7 +724,7 @@ class SampleSpace(Slotted_obj):
         block_results = ray.get(block_ids)
 
         t2 = time.time()
-        print('GDM submatrices calculated, time:',t2-t1)
+        config.logger.info('GDM submatrices calculated, time:',t2-t1)
 
         for submatrix in block_results:
             self.geometric_distance_map.update(submatrix)
@@ -732,7 +732,7 @@ class SampleSpace(Slotted_obj):
         self.current_geometric_exponent = config.geometric_exponent
 
         t3 = time.time()
-        print('GDM calculation complete, time:',t3-t2)
+        config.logger.info('GDM calculation complete, time:',t3-t2)
 
     def detectOutliers(self,config):
         N = len(self.samples)
@@ -765,7 +765,7 @@ class SampleSpace(Slotted_obj):
             if len(bins[bin_lower]) <= min_bin_size:
                 for sample_id in bins[bin_lower]:
                     deletion_list.append(sample_id)
-                    print('Outlier detection:',sample_id,self.samples[sample_id].targetValue)
+                    config.logger.info('Outlier detection:',sample_id,self.samples[sample_id].targetValue)
         self.removeSamples(deletion_list)
 
     def printPureMixedProportion(self,config):
@@ -798,10 +798,10 @@ class SampleSpace(Slotted_obj):
         ppr = len(pure_map)/n_prot
         mpr = len(mixed_map)/n_prot
         if not config.regression:
-            print('# of Proteins: ',n_prot,'# of Variants: ',len(self.samples),'target value balance: ',target_value_map)
+            config.logger.info('# of Proteins: ',n_prot,'# of Variants: ',len(self.samples),'target value balance: ',target_value_map)
         else:
-            print('# of Proteins: ',n_prot,'# of Variants: ',len(self.samples))
-        print('Pure protein proportion: ',ppr,'Mixed protein proportion: ',mpr)
+            config.logger.info('# of Proteins: ',n_prot,'# of Variants: ',len(self.samples))
+        config.logger.info('Pure protein proportion: ',ppr,'Mixed protein proportion: ',mpr)
         return
 
     def undoBalancing(self,config):
@@ -811,12 +811,12 @@ class SampleSpace(Slotted_obj):
         return
 
     def getVectors(self,config,forceCalc=False):
-        if self.test_feature_matrix == None or forceCalc:
+        if self.test_feature_matrix is None or forceCalc:
             self.calcVectors(config)
         return self.test_feature_matrix,self.test_targets,self.train_feature_matrix,self.train_targets
 
-    def get_test_data_for_feature_list(self, extern_feature_list):
-        test_feature_matrix = self.get_feat_matrix_from_feat_names(extern_feature_list)
+    def get_test_data_for_feature_list(self, extern_feature_list, config):
+        test_feature_matrix = self.get_feat_matrix_from_feat_names(extern_feature_list, config)
         test_targets = []
         sample_id_list = []
         for sample_id in self.samples:
@@ -831,7 +831,7 @@ class SampleSpace(Slotted_obj):
                 self.samples[sample_id].amount_of_structures = 0
             if self.samples[sample_id].amount_of_structures < config.structure_threshold:
                 del_list.append(sample_id)
-        print('Filtered ',len(del_list),' samples in the structure filtering')
+        config.logger.info('Filtered ',len(del_list),' samples in the structure filtering')
         self.removeSamples(del_list)
 
     def standardFilter(self, config, filter_synon = False):
@@ -872,12 +872,12 @@ class SampleSpace(Slotted_obj):
                     continue
                 
             
-        print(f'Filtered {len(del_list)} of {N} samples in the standard filtering')
-        print(f'{num_tv_viol} due to target value violation')
-        print(f'{num_ff} due to feature filter')
-        print(f'{num_tf} due to tag filter')
-        print(f'{num_pf} due to protein filter')
-        print(f'{num_sf} due to synonoumus filter')
+        config.logger.info(f'Filtered {len(del_list)} of {N} samples in the standard filtering')
+        config.logger.info(f'{num_tv_viol} due to target value violation')
+        config.logger.info(f'{num_ff} due to feature filter')
+        config.logger.info(f'{num_tf} due to tag filter')
+        config.logger.info(f'{num_pf} due to protein filter')
+        config.logger.info(f'{num_sf} due to synonoumus filter')
         self.removeSamples(del_list)
 
     def adjustParameterRanges(self,config):
@@ -903,10 +903,10 @@ class CrossValidation(Slotted_obj):
     def getCurrentSlice(self):
         return self.slices[self.slice_ids[self.cv_counter]]
 
-    def getNextSlice(self):
+    def getNextSlice(self, config):
         self.cv_counter += 1
         if self.cv_counter >= len(self.slice_ids):
-            print('ERROR: cv_counter out of bounds')
+            config.logger.error('ERROR: cv_counter out of bounds')
             return None
         return ray.get(self.slices[self.slice_ids[self.cv_counter]])
 
@@ -934,7 +934,7 @@ class Tag_nested_cv(CrossValidation):
             test_tag = config.tag_based_crossValidation[self.tag_based_crossValidation_counter]
             self.tag_based_crossValidation_counter += 1
             if print_out:
-                print('Tag-based crossvailidation, test tag: ',test_tag)
+                config.logger.info('Tag-based crossvailidation, test tag: ',test_tag)
             for sample_id in self.samples:
                 sample = self.samples[sample_id]
                 tags = sample.tags
@@ -961,7 +961,7 @@ class FullSlice(CrossValidation):
         super().__init__()
 
         if config.verbosity >= 1:
-            print(f'Init of FullSlice: {internal_cv is None} {train_equal_test}')
+            config.logger.info(f'Init of FullSlice: {internal_cv is None} {train_equal_test}')
         
         self.slice_ids.append(0)
 
@@ -971,7 +971,7 @@ class FullSlice(CrossValidation):
             full_slice_obj.slice_slices = []
             for slice_id in internal_cv.slices:
                 if config.verbosity >= 1:
-                    print(f'Adding a slice_slice to the FullSlice: {slice_id}')
+                    config.logger.info(f'Adding a slice_slice to the FullSlice: {slice_id}')
                 full_slice_obj.slice_slices.append(internal_cv.slices[slice_id])
 
         self.slices[0] = full_slice_obj
@@ -1023,7 +1023,7 @@ class X_fold_cv(CrossValidation):
                     test_samples.add(self.sample_ids[n_of_assigned_samples])
                     n_of_assigned_samples += 1
                     slice_size += 1
-            print('Next crossvalidation slice, size: ',slice_size)
+            config.logger.info('Next crossvalidation slice, size: ',slice_size)
 
             if config.prot_based_separation:
                 test_ids, train_ids = splitDataSet(config, sampleSpace.samples, specific_id=test_prots, protein_wise=True)
@@ -1048,11 +1048,11 @@ def init_lopo_slice(store, test_prots, cv_counter = None):
         name = cv_counter
 
     if config.verbosity >= 2:
-        print(f'Init LOPO slice: {name}: Test set size: {len(test_ids)}, Train set size: {len(train_ids)}')
+        config.logger.info(f'Init LOPO slice: {name}: Test set size: {len(test_ids)}, Train set size: {len(train_ids)}')
 
     cv_slice = CrossValidationSlice(test_ids = test_ids, train_ids = train_ids, raw_feature_names = raw_feature_names, sample_dict = sample_dict, config = config, name = name, train_prots = train_prots, test_prots = test_prots)
     if config.verbosity >= 5:
-        #print(f'Features of slice {cv_slice.name}:\n{cv_slice.features}')
+        #config.logger.info(f'Features of slice {cv_slice.name}:\n{cv_slice.features}')
         cv_slice.featureSanityCheck()
     cv_slice = pack(cv_slice)
     return (name, cv_slice)
@@ -1061,7 +1061,7 @@ def init_lopo_slice(store, test_prots, cv_counter = None):
 class LOPO(CrossValidation):
     def __init__(self, sampleSpace, config):
         t0 = time.time()
-        print('-- LOPO initialization --')
+        config.logger.info('-- LOPO initialization --')
         super().__init__()
         prots = set([])
         for (u_ac,aac) in sampleSpace.samples:
@@ -1071,12 +1071,12 @@ class LOPO(CrossValidation):
 
         init_ids = []
 
-        print(f'Put sample space into store: {prots}')
+        config.logger.info(f'Put sample space into store: {prots}')
 
         store = ray.put((config, sampleSpace.samples, sampleSpace.feature_names, prots))
 
         t1 = time.time()
-        print('Start paralell slice init, with number of processes:',config.proc_n,',time:',t1-t0)
+        config.logger.info('Start paralell slice init, with number of processes:',config.proc_n,',time:',t1-t0)
 
         for prot in self.prots:
             init_ids.append(init_lopo_slice.remote(store, set([prot])))
@@ -1084,7 +1084,7 @@ class LOPO(CrossValidation):
         init_results = ray.get(init_ids)
 
         t2 = time.time()
-        print('Paralell slice init finished, time:',t2-t1)
+        config.logger.info('Paralell slice init finished, time:',t2-t1)
 
         for prot, cv_slice in init_results:
             self.slices[prot] = unpack(cv_slice)
@@ -1184,10 +1184,10 @@ class DataSAIL_cv(CrossValidation):
 
         t1 = time.time()
         if config.verbosity >= 2:
-            print(f'Time for init DataSAIL_cv Part 1: {t1-t0} {eps=}')
+            config.logger.info(f'Time for init DataSAIL_cv Part 1: {t1-t0} {eps=}')
         try:
             if config.verbosity >= 4:
-                print(f'Call of datasail with: e_data: {config.path_to_sequence_fasta}, e_weights: {len(weight_map)=}, splits: {splits}, names: {names}')
+                config.logger.info(f'Call of datasail with: e_data: {config.path_to_sequence_fasta}, e_weights: {len(weight_map)=}, splits: {splits}, names: {names}')
 
                 write_weight_map(weight_map, 'weight_map_for_datasail.tsv')
 
@@ -1232,12 +1232,12 @@ class DataSAIL_cv(CrossValidation):
                     )
         t2 = time.time()
         if config.verbosity >= 2:
-            print(f'Time for init DataSAIL_cv Part 2: {t2-t1}')
+            config.logger.info(f'Time for init DataSAIL_cv Part 2: {t2-t1}')
 
-        #print(raw_datasail_splits)
+        #config.logger.info(raw_datasail_splits)
 
         datasail_splits = raw_datasail_splits[0][technique[0]][0]
-        #print(datasail_splits)
+        #config.logger.info(datasail_splits)
 
         train_test_pairs = {}
         for cv_counter in range(config.crossValidation_fold):
@@ -1258,23 +1258,23 @@ class DataSAIL_cv(CrossValidation):
 
         t3 = time.time()
         if config.verbosity >= 2:
-            print(f'Time for init DataSAIL_cv Part 3: {t3-t2}')
+            config.logger.info(f'Time for init DataSAIL_cv Part 3: {t3-t2}')
 
         if config.verbosity >= 4:
-            print(f'Init datasail:\nSplits: {train_test_pairs}\n')
+            config.logger.info(f'Init datasail:\nSplits: {train_test_pairs}\n')
 
         store = ray.put((config, sampleSpace.samples, sampleSpace.feature_names, prots))
 
         t4 = time.time()
         if config.verbosity >= 2:
-            print(f'Time for init DataSAIL_cv Part 4: {t4-t3}')
+            config.logger.info(f'Time for init DataSAIL_cv Part 4: {t4-t3}')
 
         init_ids = []
         for cv_counter in train_test_pairs:
             train_set, test_set, _ = train_test_pairs[cv_counter]
 
             if config.verbosity >= 2:
-                print(f'Init datasail slice {cv_counter=}: {len(test_set)=}')
+                config.logger.info(f'Init datasail slice {cv_counter=}: {len(test_set)=}')
 
             init_ids.append(init_lopo_slice.remote(store, set(test_set), cv_counter = cv_counter))
 
@@ -1282,14 +1282,14 @@ class DataSAIL_cv(CrossValidation):
 
         t5 = time.time()
         if config.verbosity >= 2:
-            print(f'Time for init DataSAIL_cv Part 5: {t5-t4}')
+            config.logger.info(f'Time for init DataSAIL_cv Part 5: {t5-t4}')
 
         for cv_counter, cv_slice in init_results:
 
             self.slices[cv_counter] = unpack(cv_slice)
             if config.verbosity >= 5:
                 cv_slice = self.slices[cv_counter]
-                #print(f'Features of slice {cv_slice.name}:\n{cv_slice.features}')
+                #config.logger.info(f'Features of slice {cv_slice.name}:\n{cv_slice.features}')
                 cv_slice.featureSanityCheck(verbose = True)
 
             self.slice_ids.append(cv_counter)
@@ -1300,6 +1300,6 @@ class DataSAIL_cv(CrossValidation):
 
         t6 = time.time()
         if config.verbosity >= 2:
-            print(f'Time for init DataSAIL_cv Part 6: {t6-t5}')
+            config.logger.info(f'Time for init DataSAIL_cv Part 6: {t6-t5}')
 
 

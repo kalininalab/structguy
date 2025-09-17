@@ -239,7 +239,7 @@ def parse_feature_table(file_path, samples, config, filter_none_tv, non_feature_
         print(f"parse_feature_table, part 2: {t2 - t1}")
 
     if config.verbosity >= 4:
-        samples.print_feat_types()
+        samples.print_feat_types(config)
 
     output = parseLines(
         config, 0, len(headless_lines), samples.features, headless_lines, primary_protein_id_col, amount_of_struct_col, effect_col, aac_col_s, tags_col, non_feature_cols, feature_names
@@ -268,10 +268,10 @@ def parse_feature_table(file_path, samples, config, filter_none_tv, non_feature_
         n_s += 1
 
     if config.verbosity >= 3:
-        samples.print_stats()
+        samples.print_stats(config)
 
     if config.verbosity >= 4:
-        samples.print_feat_types()
+        samples.print_feat_types(config)
 
     if config.verbosity >= 1:
         t6 = time.time()
@@ -338,9 +338,9 @@ def createTrainingSet(
         samples.adjustParameterRanges(config)
 
         if config.filterStructuralFeatures:
-            samples.removeFeaturesByType("structural")
+            samples.removeFeaturesByType("structural", config)
 
-        samples.oneHotifyAll()
+        samples.oneHotifyAll(config)
 
         if external_impute is None:
             if config.impute_missing_values:
@@ -394,7 +394,7 @@ def createTrainingSet(
     else:
         parse_feature_table(config.path_to_processed_features_file, samples, config, filter_none_tv)
         if config.verbosity >= 4:
-            samples.print_feat_types()
+            samples.print_feat_types(config)
         # Propably call some stuff here, TODO
     config.n_of_features = len(samples.feature_names)
     if not stop_matrix_transformation:
