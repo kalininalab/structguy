@@ -787,7 +787,10 @@ def evaluate_dataset(config: Config):
                 lines.append(line)
         else:
             # number_of_displayed_features = 20
-            header = "Protein ID\tSAV\tPredicted effect value\tTree STD"
+            if config.calc_sd:
+                header = "Protein ID\tSAV\tPredicted effect value\tTree STD"
+            else:
+                header = "Protein ID\tSAV\tPredicted effect value"
 
             
             # for i in range(number_of_displayed_features):
@@ -803,12 +806,13 @@ def evaluate_dataset(config: Config):
                 if not os.path.isdir(force_plot_folder):
                     os.makedirs(force_plot_folder)
 
-            ind_preds = []
-            for tree_id, tree in enumerate(booster_obj):
-                ind_pred = tree.predict(DMatrix(test_feature_matrix, feature_names = extern_feature_names_list))
-                ind_preds.append(ind_pred)
+            if config.calc_sd:
+                ind_preds = []
+                for tree_id, tree in enumerate(booster_obj):
+                    ind_pred = tree.predict(DMatrix(test_feature_matrix, feature_names = extern_feature_names_list))
+                    ind_preds.append(ind_pred)
 
-            ind_preds = numpy.array(ind_preds).transpose()
+                ind_preds = numpy.array(ind_preds).transpose()
 
             for pos, sample_id in enumerate(combined_sample_id_list):
                 pred_value = combined_y_pred[pos]
@@ -816,9 +820,9 @@ def evaluate_dataset(config: Config):
 
                 words = [prot_id, aac, str(pred_value)]
 
-                pred_std = numpy.std(ind_preds[pos])
-
-                words.append(str(pred_std))
+                if config.calc_sd:
+                    pred_std = numpy.std(ind_preds[pos])
+                    words.append(str(pred_std))
 
                 if explanation is not None:
                     cat_exp, cat_shaps = util.categorize_shap_from_xgb(explanation[pos][:-1], extern_feature_names_list)

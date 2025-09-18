@@ -7,6 +7,8 @@ import logging
 from datetime import datetime
 
 from structguy import featureGenerator, util, learn, featureAnalysis
+from ray.train import ScalingConfig
+
 
 import structman.base_utils.ray_utils as ray_utils
 ## Import the Forest-Guided Clustering package
@@ -50,7 +52,8 @@ def parse_arguments(argument_start = 2, manual_args = None):
                 'penalize_ttg',
                 'nofshpo',
                 'forces',
-                'gpu='
+                'gpu=',
+                'sd'
             ]
             opts, args = getopt.getopt(argv, "i:n:m:d", long_paras)
 
@@ -84,6 +87,7 @@ def parse_arguments(argument_start = 2, manual_args = None):
 
     trace_decisions = False
     plot_sample_forces = False
+    calc_sd = False
 
     filter_syn = False
     random_split = False
@@ -169,6 +173,9 @@ def parse_arguments(argument_start = 2, manual_args = None):
         if opt == '--forces':
             plot_sample_forces = True
 
+        if opt == '--sd':
+            calc_sd = True
+
         if opt == '--gpu':
             multi_gpu = int(arg)
 
@@ -208,6 +215,7 @@ def parse_arguments(argument_start = 2, manual_args = None):
 
     config.trace_decisions = trace_decisions
     config.plot_sample_forces = plot_sample_forces
+    config.calc_sd = calc_sd
 
     if force_lopo:
         config.crossValidation = 'LOPO'
@@ -247,12 +255,13 @@ def parse_arguments(argument_start = 2, manual_args = None):
 
     if config.multi_gpu is not None:
         if config.multi_gpu > 1:
-            import dask
-            from dask_cuda import LocalCUDACluster
-            with LocalCUDACluster(n_workers=config.multi_gpu, threads_per_worker=config.proc_n) as cluster:
-                pass
+            #import dask
+            #from dask_cuda import LocalCUDACluster
+            #with LocalCUDACluster(n_workers=config.multi_gpu, threads_per_worker=config.proc_n) as cluster:
+            #    pass
             config.gpu_mode = True
-
+            cpu_per_worker = max([1, (config.proc_n//config.multi_gpu) - 2])
+            config.scaling_config = ScalingConfig(num_workers=config.multi_gpu, use_gpu=True, resources_per_worker={"CPU": cpu_per_worker})
 
     if test_config_path is not None:
         test_config = util.Config(test_config_path)

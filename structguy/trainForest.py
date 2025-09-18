@@ -17,15 +17,16 @@ import ray
 import contextlib
 from scipy import stats
 import xgboost as xgb
-import dask
+from ray.train.xgboost import XGBoostTrainer, RayTrainReportCallback
+#import dask
 
-from dask import array as da
-from dask import dataframe as dd
-from dask.distributed import Client
-from dask_cuda import LocalCUDACluster
+#from dask import array as da
+#from dask import dataframe as dd
+#from dask.distributed import Client
+#from dask_cuda import LocalCUDACluster
 
-from xgboost import dask as dxgb
-from xgboost.dask import DaskDMatrix
+#from xgboost import dask as dxgb
+#from xgboost.dask import DaskDMatrix
 
 from filelock import FileLock
 from structguy import featureSelection, util
@@ -34,6 +35,7 @@ from structguy.support_classes import CrossValidationSlice
 from structguy.sampleSpace import DataSAIL_cv
 import numpy
 from ray.util.queue import Queue
+from ray.train import RunConfig
 import shap
 from numba import njit
 
@@ -550,7 +552,31 @@ def using_dask_matrix(client: Client, X: da.Array, y: da.Array, config: util.Con
     #config.logger.info("Evaluation history:", history)
     return bst
 
-def xgb_train_wrapper(config: util.Config, forest, train_feature_matrix, train_targets, data_tuple_list, train_weights, es_list):
+def ray_xgb_train_func(params):
+    dtrain = xgb.DMatrix(params["train_feature_matrix"], params["train_targets"], weight = params["train_weights"])
+
+    config = params["config"]
+
+    xgb_params = {
+        "tree_method": "hist",
+        "device": "cuda",
+        "max_depth": config.tree_depth,
+        "reg_alpha ": config.xgb_alpha,
+        "reg_lambda ": config.xgb_lambda,
+        "colsample_bytree ": config.colsample_bytree,
+        "max_delta_step ": config.max_delta_step,
+        "gamma": config.xgb_gamma,
+        "learning_rate": config.learning_rate,
+        "min_child_weight": config.min_child_weight,
+        "early_stopping_rounds": config.early_stopping,
+        "subsample": config.max_sample_parameter,
+        "callbacks": params["es_list"],
+        "eval_metric": util.rho_eval_for_xgboost,
+        }
+    
+    xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees), evals=params["data_tuple_list"])
+
+def xgb_train_wrapper(config: util.Config, forest, train_feature_matrix, train_targets, data_tuple_list, train_weights, es_list, label = ''):
     if config.multi_gpu is None or config.multi_gpu < 2:
         try:
             if config.verbosity >= 3:
@@ -572,6 +598,7 @@ def xgb_train_wrapper(config: util.Config, forest, train_feature_matrix, train_t
         except xgb.core.XGBoostError:
             return None
     else:
+        """
         #import dask_cudf
         # `LocalCUDACluster` is used for assigning GPU to XGBoost processes.  Here
         # `n_workers` represents the number of GPUs since we use one GPU per worker process.
@@ -590,7 +617,27 @@ def xgb_train_wrapper(config: util.Config, forest, train_feature_matrix, train_t
 
                 config.logger.info(f"Using dask to train multi gpu xgboost training: {config.multi_gpu=}")
                 forest = using_dask_matrix(client, X, y, config, es_list, train_weights, data_tuple_list).compute()
-
+        """
+        params = {
+            "config" : config,
+            "train_feature_matrix" : train_feature_matrix,
+            "train_targets" : train_targets,
+            "train_weights" : train_weights,
+            "es_list" : es_list,
+            "data_tuple_list" : data_tuple_list
+        }
+        storage = f'{config.outfolder}/ray_storage'
+        if not os.path.isdir(storage):
+            os.makedirs(storage)
+        run_config = RunConfig(storage_path=storage, name=f"run_name{label}")
+        trainer = XGBoostTrainer(
+            ray_xgb_train_func, scaling_config=config.scaling_config, run_config=run_config, train_loop_config=params
+        )
+        result = trainer.fit()
+        with result.checkpoint.as_directory() as checkpoint_dir:
+            model_path = os.path.join(checkpoint_dir, RayTrainReportCallback.CHECKPOINT_NAME)
+            forest = xgb.Booster()
+            forest.load_model(model_path)
     return forest
 
 def trainRegressionForest(
