@@ -853,7 +853,7 @@ def trainRegressionForest(
                 data_name=f"validation_{n}",
             )
             es_list.append(es)
-            data_tuple_list.append(protwise_test_data_tuples[prot_id])
+            data_tuple_list.append(xgb.DMatrix(protwise_test_data_tuples[prot_id]))
 
         if config.multi_gpu is None or config.multi_gpu < 2:
             if config.gpu_mode:
@@ -1059,7 +1059,7 @@ def trainRegressionForest(
                     data_name=f"validation_{n}",
                 )
                 es_list.append(es)
-                data_tuple_list.append(protwise_test_data_tuples[prot_id])
+                data_tuple_list.append(xgb.DMatrix(protwise_test_data_tuples[prot_id]))
 
             if config.multi_gpu is None or config.multi_gpu < 2:
                 forest: xgb.XGBRegressor = xgb.XGBRegressor(

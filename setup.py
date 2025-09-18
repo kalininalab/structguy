@@ -46,9 +46,9 @@ setup(
         "shap==0.48.0",
         "supertree==0.5.5",
         "matplotlib==3.10.6",
-        "dask>=2025.5.0",
-        "dask-cudf-cu11>=24.6.0",
-        "dask-cuda"
+        #"dask>=2025.5.0",
+        #"dask-cudf-cu11>=24.6.0",
+        #"dask-cuda"
     ],
 
     package_data = {
