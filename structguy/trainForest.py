@@ -565,8 +565,9 @@ def ray_xgb_train_func(params):
             rounds=config.early_stopping,
             min_delta=1e-3,
             save_best=True,
-            maximize=True,
+            maximize=False,
             data_name=f"validation_{n}",
+            metric_name="irho"
         )
         es_list.append(es)
         data_tuple_list.append(xgb.DMatrix(numpy.array(params["protwise_test_data_tuples"][prot_id][0]), numpy.array(params["protwise_test_data_tuples"][prot_id][1])))
@@ -588,7 +589,7 @@ def ray_xgb_train_func(params):
         "eval_metric": util.rho_eval_for_xgboost,
         }
     
-    xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees), evals=params["data_tuple_list"])
+    xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees), evals=data_tuple_list, maximize=False, custom_metric=util.rho_eval_for_xgboost)
 
 def xgb_train_wrapper(
         config: util.Config,
@@ -880,8 +881,9 @@ def trainRegressionForest(
                     rounds=config.early_stopping,
                     min_delta=1e-3,
                     save_best=True,
-                    maximize=True,
+                    maximize=False,
                     data_name=f"validation_{n}",
+                    metric_name="irho"
                 )
                 es_list.append(es)
                 data_tuple_list.append(protwise_test_data_tuples[prot_id])
@@ -1080,8 +1082,9 @@ def trainRegressionForest(
                         rounds=config.early_stopping,
                         min_delta=1e-3,
                         save_best=True,
-                        maximize=True,
+                        maximize=False,
                         data_name=f"validation_{n}",
+                        metric_name="irho"
                     )
                     es_list.append(es)
                     data_tuple_list.append(protwise_test_data_tuples[prot_id])

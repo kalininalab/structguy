@@ -11,7 +11,7 @@ import matplotlib
 # Force matplotlib to not use any Xwindows backend.
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-
+import xgboost as xgb
 from structguy.scripts import radarplot
 from structman.base_utils.base_utils import Errorlog, resolve_path
 from structguy.consts import feat_name_category_dict, feature_categories
@@ -829,52 +829,52 @@ class Config:
                 )
         return sct
 
-    def logParameter(self, logger):
-        logger.log('Depth:',self.tree_depth)
-        logger.log('Min sample split:',self.min_sample_split)
-        logger.log('Min sample leaf:',self.tree_min_leaf_samples)
-        logger.log('Forest size:',self.num_of_trees)
-        logger.log('Class weight:',self.class_weight)
-        logger.log('Max features:',self.max_feature_parameter)
-        logger.log('Max features continuous:', self.max_feature_cont_parameter)
-        logger.log('Bootstrap:',self.bootstrap_parameter)
-        logger.log('Min impurity decrease exponent:',self.min_impurity_decrease_exp)
-        logger.log('Out of bag:',self.oob_score)
-        logger.log('CCP alpha exponent:',self.ccp_alpha_exp)
-        logger.log(f'Learning rate: {self.learning_rate}')
-        logger.log(f'Min Child Weight: {self.min_child_weight}')
-        logger.log(f'Early stopping: {self.early_stopping}')
-        logger.log('Max sample:',self.max_sample_parameter)
-        logger.log(f'XGB gamma: {self.xgb_gamma}')
-        logger.log(f'XGB alpha: {self.xgb_alpha}')
-        logger.log(f'XGB lambda: {self.xgb_lambda}')
-        logger.log(f'XGB colsample_bytree: {self.colsample_bytree}')
-        logger.log(f'XGB max delta step: {self.max_delta_step}')
-        logger.log(f'feat_impact_thresh: {self.feat_impact_thresh}')
-        logger.log('TVMB rank threshold:',self.tvmb_rank_threshold)
-        logger.log('TVPMB rank threshold:',self.tvpmb_rank_threshold)
-        logger.log('Confusion rank threshold:', self.confusion_rank_threshold)
-        logger.log('Sequential confusion rank threshold:', self.sequential_confusion_rank_threshold)
-        logger.log('Confusion error warping exponent:', self.err_warping_exp)
-        logger.log('Confusion normalization exponent:', self.confusion_normalization_exp)
-        logger.log('Criterion:',self.criterion)
-        logger.log('Number of bins:',self.number_of_bins)
-        logger.log('p-value threshold:',self.p_val_thresh)
-        logger.log('Sample weight parameter:',self.sample_weight_parameter)
-        logger.log('Regularization alpha exponent:', self.reg_alpha_exp)
-        logger.log('Regularization C exponent:', self.reg_c_exp)
-        logger.log('Regularization threshold exponent:', self.reg_thresh_exp)
-        logger.log('Geometric exponent:', self.geometric_exponent)
-        logger.log(f'Confusion goodwill: {self.confusion_goodwill}')
-        logger.log(f'List ranking thresh: {self.list_ranking_thresh}')
-        logger.log(f'FS tree depth: {self.fs_tree_depth}')
-        logger.log(f'FS # of trees: {self.fs_num_of_trees}')
-        logger.log(f'FS min impurity decrease: {self.fs_min_impurity_decrease_exp}')
-        logger.log(f'FS min sample split: {self.fs_min_sample_split}')
-        logger.log(f'FS min leaf samples: {self.fs_tree_min_leaf_samples}')
-        logger.log(f'FS CCP alpha exp: {self.fs_ccp_alpha_exp}')
-        logger.log(f'FS max sampes: {self.fs_max_sample_parameter}')
-        logger.log(f'Feature correlation threshold: {self.corr_thresh}')
+    def logParameter(self):
+        self.logger.info('Depth:',self.tree_depth)
+        self.logger.info('Min sample split:',self.min_sample_split)
+        self.logger.info('Min sample leaf:',self.tree_min_leaf_samples)
+        self.logger.info('Forest size:',self.num_of_trees)
+        self.logger.info('Class weight:',self.class_weight)
+        self.logger.info('Max features:',self.max_feature_parameter)
+        self.logger.info('Max features continuous:', self.max_feature_cont_parameter)
+        self.logger.info('Bootstrap:',self.bootstrap_parameter)
+        self.logger.info('Min impurity decrease exponent:',self.min_impurity_decrease_exp)
+        self.logger.info('Out of bag:',self.oob_score)
+        self.logger.info('CCP alpha exponent:',self.ccp_alpha_exp)
+        self.logger.info(f'Learning rate: {self.learning_rate}')
+        self.logger.info(f'Min Child Weight: {self.min_child_weight}')
+        self.logger.info(f'Early stopping: {self.early_stopping}')
+        self.logger.info('Max sample:',self.max_sample_parameter)
+        self.logger.info(f'XGB gamma: {self.xgb_gamma}')
+        self.logger.info(f'XGB alpha: {self.xgb_alpha}')
+        self.logger.info(f'XGB lambda: {self.xgb_lambda}')
+        self.logger.info(f'XGB colsample_bytree: {self.colsample_bytree}')
+        self.logger.info(f'XGB max delta step: {self.max_delta_step}')
+        self.logger.info(f'feat_impact_thresh: {self.feat_impact_thresh}')
+        self.logger.info('TVMB rank threshold:',self.tvmb_rank_threshold)
+        self.logger.info('TVPMB rank threshold:',self.tvpmb_rank_threshold)
+        self.logger.info('Confusion rank threshold:', self.confusion_rank_threshold)
+        self.logger.info('Sequential confusion rank threshold:', self.sequential_confusion_rank_threshold)
+        self.logger.info('Confusion error warping exponent:', self.err_warping_exp)
+        self.logger.info('Confusion normalization exponent:', self.confusion_normalization_exp)
+        self.logger.info('Criterion:',self.criterion)
+        self.logger.info('Number of bins:',self.number_of_bins)
+        self.logger.info('p-value threshold:',self.p_val_thresh)
+        self.logger.info('Sample weight parameter:',self.sample_weight_parameter)
+        self.logger.info('Regularization alpha exponent:', self.reg_alpha_exp)
+        self.logger.info('Regularization C exponent:', self.reg_c_exp)
+        self.logger.info('Regularization threshold exponent:', self.reg_thresh_exp)
+        self.logger.info('Geometric exponent:', self.geometric_exponent)
+        self.logger.info(f'Confusion goodwill: {self.confusion_goodwill}')
+        self.logger.info(f'List ranking thresh: {self.list_ranking_thresh}')
+        self.logger.info(f'FS tree depth: {self.fs_tree_depth}')
+        self.logger.info(f'FS # of trees: {self.fs_num_of_trees}')
+        self.logger.info(f'FS min impurity decrease: {self.fs_min_impurity_decrease_exp}')
+        self.logger.info(f'FS min sample split: {self.fs_min_sample_split}')
+        self.logger.info(f'FS min leaf samples: {self.fs_tree_min_leaf_samples}')
+        self.logger.info(f'FS CCP alpha exp: {self.fs_ccp_alpha_exp}')
+        self.logger.info(f'FS max sampes: {self.fs_max_sample_parameter}')
+        self.logger.info(f'Feature correlation threshold: {self.corr_thresh}')
         return
 
     def printParameter(self):
@@ -1187,45 +1187,45 @@ class Scores:
         self.mean_pearson = mean_pearson
         return
 
-    def logger_print(self, logger):
-        logger.log('------------Scores------------')
-        logger.log(f'Generated for {self.n_of_features} number of features')
+    def logger_print(self,config):
+        config.logger.info('------------Scores------------')
+        config.logger.info(f'Generated for {self.n_of_features} number of features')
         if self.mse is not None:
-            logger.log(f'-MSE: {self.mse}')
+            config.logger.info(f'-MSE: {self.mse}')
         if self.wmse is not None:
-            logger.log(f'-weighted MSE: {self.wmse}')
+            config.logger.info(f'-weighted MSE: {self.wmse}')
         if self.r2 is not None:
-            logger.log(f'-R2: {self.r2}')
+            config.logger.info(f'-R2: {self.r2}')
         if self.wr2 is not None:
-            logger.log(f'-weighted R2: {self.wr2}')
+            config.logger.info(f'-weighted R2: {self.wr2}')
         if self.corr is not None:
-            logger.log(f'-Spearmans Correlation: {self.corr}')
+            config.logger.info(f'-Spearmans Correlation: {self.corr}')
         if self.mean_spearman is not None:
-            logger.log(f'-Mean Protein-Wise Spearmans Corr: {self.mean_spearman}')
+            config.logger.info(f'-Mean Protein-Wise Spearmans Corr: {self.mean_spearman}')
         if self.pearson_r is not None:
-            logger.log(f'-Pearsons Correlation: {self.pearson_r}')
+            config.logger.info(f'-Pearsons Correlation: {self.pearson_r}')
         if self.mean_pearson is not None:
-            logger.log(f"-Mean Protein-Wise Pearsons Corr: {self.mean_pearson}")
+            config.logger.info(f"-Mean Protein-Wise Pearsons Corr: {self.mean_pearson}")
         if self.acc is not None:
-            logger.log(f'-Accuracy: {self.acc}')
+            config.logger.info(f'-Accuracy: {self.acc}')
         if self.roc is not None:
-            logger.log(f'-auROC: {self.roc}')
+            config.logger.info(f'-auROC: {self.roc}')
         if self.precision is not None:
-            logger.log(f'-Precision: {self.precision}')
+            config.logger.info(f'-Precision: {self.precision}')
         if self.recall is not None:
-            logger.log(f'-Recall: {self.recall}')
+            config.logger.info(f'-Recall: {self.recall}')
         if self.f1 is not None:
-            logger.log(f'-F1: {self.f1}')
+            config.logger.info(f'-F1: {self.f1}')
         if self.mcc is not None:
-            logger.log(f'-MCC: {self.mcc}')
+            config.logger.info(f'-MCC: {self.mcc}')
         if self.feature_penalty is not None:
-            logger.log(f'Feature penalty term: {self.feature_penalty}')
+            config.logger.info(f'Feature penalty term: {self.feature_penalty}')
 
-        logger.log('------------------------------')
+        config.logger.info('------------------------------')
 
-    def printOut(self, logger = None):
-        if logger is not None:
-            self.logger_print(logger)
+    def printOut(self, config = None):
+        if config is not None:
+            self.logger_print(config)
             return
         print('------------Scores------------')
         print(f'Generated for {self.n_of_features} number of features')
@@ -1314,11 +1314,15 @@ def calc_protein_wise_corr(y_test, y_pred, sample_ids, corr_function, mono_retur
     return prot_wise_corrs, mean_corr, prot_wise_raw_corrs
 
 
-def rho_eval_for_xgboost(predt, y):
+def rho_eval_for_xgboost(predt: np.ndarray, dtest: xgb.DMatrix) -> tuple[str, float]:
+    if isinstance(dtest, xgb.DMatrix):
+        y = dtest.get_label()
+    else:
+        y = dtest
     corr, _ = stats.spearmanr(predt, y)
-    return (1.0-corr)
+    return 'irho', (1.0-corr)
 
-def objective_function_criterium(config, scores, best_scores, feature_penalty = None, margin=1.0, logger=None):
+def objective_function_criterium(config, scores, best_scores, feature_penalty = None, margin=1.0):
     if best_scores is None:
         if scores is None:
             return False
@@ -1336,27 +1340,18 @@ def objective_function_criterium(config, scores, best_scores, feature_penalty = 
         if config.verbosity >= 2:
             message = f'Objective function criterium - penalize train test gap {obj_score=} {obj_best_score=} {train_score=} {best_train_score=}'
 
-            if logger is None:
-                print(message)
-            else:
-                logger.log(message)
+            config.logger.info(message)
 
         obj_score = ((1+obj_score)**2) - abs(train_score-obj_score)
         obj_best_score = ((1+obj_best_score)**2) - abs(best_train_score-obj_best_score)
 
         if config.verbosity >= 2:
             message = f'After penalizing: {obj_score=} {obj_best_score=}'
-            if logger is None:
-                print(message)
-            else:
-                logger.log(message)
+            config.logger.info(message)
     else:
         if config.verbosity >= 2:
             message = f'Objective function criterium {obj_score=} {obj_best_score=} {train_score=} {best_train_score=}'
-            if logger is None:
-                print(message)
-            else:
-                logger.log(message)
+            config.logger.info(message)
 
     better = obj_score > (obj_best_score*margin)
 
