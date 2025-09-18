@@ -1026,13 +1026,13 @@ class CrossValidationSlice(Slotted_obj):
         self.sub_sampled_train_targets = [self.train_targets[pos] for pos in sub_sampled_ids]
         self.sub_sampled_train_class_weight_vector = [self.train_class_weight_vector[pos] for pos in sub_sampled_ids]
 
-    def get_train_feature_matrix(self, samples, sub_sampling = 1.0):
+    def get_train_feature_matrix(self, samples, sub_sampling = 1.0) -> list[list[int | float | None]]:
         if sub_sampling == 1.0:
-            feat_matrix = samples.get_feat_matrix_from_ids(self.train_sample_ids, self.feature_names)
+            feat_matrix: list[list[int | float | None]] = samples.get_feat_matrix_from_ids(self.train_sample_ids, self.feature_names)
         else:
             if self.sub_sampled_train_ids is None:
                 self.set_sub_sampled_train_ids(sub_sampling)
-            feat_matrix = samples.get_feat_matrix_from_ids(self.sub_sampled_train_ids, self.feature_names)
+            feat_matrix: list[list[int | float | None]] = samples.get_feat_matrix_from_ids(self.sub_sampled_train_ids, self.feature_names)
         return feat_matrix
     
     def get_skewed_feat_matrices(self, samples, thresh):

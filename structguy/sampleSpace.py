@@ -660,8 +660,8 @@ class SampleSpace(Slotted_obj):
         return feature_value_vector
 
 
-    def get_feat_matrix(self, feat_id_vec, sample_pos_vec):
-        feat_matrix: list[list[int | float]] = []
+    def get_feat_matrix(self, feat_id_vec, sample_pos_vec) -> list[list[int | float | None]]:
+        feat_matrix: list[list[int | float| None]] = []
         for sample_pos in sample_pos_vec:
             feat_vec = []
             for feat_id in feat_id_vec:
@@ -690,7 +690,7 @@ class SampleSpace(Slotted_obj):
         sample_pos_vec = list(range(len(self.raw_feature_matrix)))
         return self.get_feat_matrix(feat_id_vec, sample_pos_vec)
     
-    def get_feat_matrix_from_ids(self, sample_ids, feat_names):
+    def get_feat_matrix_from_ids(self, sample_ids, feat_names)-> list[list[int | float | None]]:
         feat_id_vec = []
         for feat_name in feat_names:
             feat_id_vec.append(self.feat_pos_dict[feat_name])
@@ -711,7 +711,7 @@ class SampleSpace(Slotted_obj):
         sample_pos_vec_l = []
         sample_pos_vec_r = []
         for sample_id in sample_ids:
-            target_value = self.samples[sample_id].targtValue
+            target_value = self.samples[sample_id].targetValue
             if target_value < thresh:
                 try:
                     sample_pos_vec_l.append(self.sample_pos_dict[sample_id])

@@ -558,6 +558,19 @@ def ray_xgb_train_func(params):
 
     config = params["config"]
 
+    es_list = []
+    data_tuple_list: list[tuple[list[list[int | float | None]], list[float]]] = []
+    for n, prot_id in enumerate(params["protwise_test_data_tuples"]):
+        es = xgb.callback.EarlyStopping(
+            rounds=config.early_stopping,
+            min_delta=1e-3,
+            save_best=True,
+            maximize=True,
+            data_name=f"validation_{n}",
+        )
+        es_list.append(es)
+        data_tuple_list.append(xgb.DMatrix(numpy.array(params["protwise_test_data_tuples"][prot_id][0]), numpy.array(params["protwise_test_data_tuples"][prot_id][1])))
+
     xgb_params = {
         "tree_method": "hist",
         "device": "cuda",
@@ -571,13 +584,21 @@ def ray_xgb_train_func(params):
         "min_child_weight": config.min_child_weight,
         "early_stopping_rounds": config.early_stopping,
         "subsample": config.max_sample_parameter,
-        "callbacks": params["es_list"],
+        "callbacks": es_list,
         "eval_metric": util.rho_eval_for_xgboost,
         }
     
     xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees), evals=params["data_tuple_list"])
 
-def xgb_train_wrapper(config: util.Config, forest, train_feature_matrix, train_targets, data_tuple_list, train_weights, es_list, label = ''):
+def xgb_train_wrapper(
+        config: util.Config,
+        forest: None | xgb.XGBRegressor,
+        train_feature_matrix: list[list[int | float | None]],
+        train_targets: list[float],
+        data_tuple_list: list[tuple[list[list[int | float | None]], list[float]]],
+        protwise_test_data_tuples: list[tuple[list[list[int | float | None]], list[float]]],
+        train_weights: list[float],
+        label: str = ''):
     if config.multi_gpu is None or config.multi_gpu < 2:
         try:
             if config.verbosity >= 3:
@@ -624,8 +645,7 @@ def xgb_train_wrapper(config: util.Config, forest, train_feature_matrix, train_t
             "train_feature_matrix" : train_feature_matrix,
             "train_targets" : train_targets,
             "train_weights" : train_weights,
-            "es_list" : es_list,
-            "data_tuple_list" : data_tuple_list
+            "protwise_test_data_tuples" : protwise_test_data_tuples,
         }
         storage = f'{config.outfolder}/ray_storage'
         if not os.path.isdir(storage):
@@ -842,19 +862,7 @@ def trainRegressionForest(
             samples = unpack(ray.get(samples_store_id))
 
         protwise_test_data_tuples = slice_slice.get_prot_wise_test_data_tuples(samples)
-        es_list = []
-        data_tuple_list = []
-        for n, prot_id in enumerate(protwise_test_data_tuples):
-            es = xgb.callback.EarlyStopping(
-                rounds=config.early_stopping,
-                min_delta=1e-3,
-                save_best=True,
-                maximize=True,
-                data_name=f"validation_{n}",
-            )
-            es_list.append(es)
-            data_tuple_list.append(xgb.DMatrix(numpy.array(protwise_test_data_tuples[prot_id][0]),numpy.array(protwise_test_data_tuples[prot_id][1])))
-
+        
         if config.multi_gpu is None or config.multi_gpu < 2:
             if config.gpu_mode:
                 n_jobs=config.proc_n
@@ -864,6 +872,20 @@ def trainRegressionForest(
                 n_jobs=config.proc_n
                 device = 'cpu'
                 tree_method = 'hist'
+
+            es_list = []
+            data_tuple_list: list[tuple[list[list[int | float | None]], list[float]]] = []
+            for n, prot_id in enumerate(protwise_test_data_tuples):
+                es = xgb.callback.EarlyStopping(
+                    rounds=config.early_stopping,
+                    min_delta=1e-3,
+                    save_best=True,
+                    maximize=True,
+                    data_name=f"validation_{n}",
+                )
+                es_list.append(es)
+                data_tuple_list.append(protwise_test_data_tuples[prot_id])
+
 
             forest: xgb.XGBRegressor = xgb.XGBRegressor(
                 n_jobs=n_jobs,
@@ -886,6 +908,7 @@ def trainRegressionForest(
             )
         else:
             forest = None
+            data_tuple_list = None
 
     elif skip_feature_selection:
         forest = RandomForestRegressor(
@@ -945,7 +968,7 @@ def trainRegressionForest(
             slice_slice.calcSampleWeights(config, distance_map)
         elif config.weighting == "subsample_distance":
             weights_updated = slice_slice.calcSubsampleDistanceWeights(config, para_number=proc)
-        train_feature_matrix = slice_slice.get_train_feature_matrix(samples, sub_sampling=config.sub_sample_factor)
+        train_feature_matrix: list[list[int | float | None]] = slice_slice.get_train_feature_matrix(samples, sub_sampling=config.sub_sample_factor)
         if config.sub_sample_factor == 1.0:
             train_targets = slice_slice.train_targets
             train_weights = slice_slice.train_class_weight_vector
@@ -955,7 +978,7 @@ def trainRegressionForest(
 
         ta = add_to_times(times, ta) #6
 
-        forest = xgb_train_wrapper(config, forest, train_feature_matrix, train_targets, data_tuple_list, train_weights, es_list)
+        forest = xgb_train_wrapper(config, forest, train_feature_matrix, train_targets, data_tuple_list, protwise_test_data_tuples, train_weights)
         if forest is None:
             return return_zero(zero_return, remote, cv_slice)
 
@@ -985,7 +1008,7 @@ def trainRegressionForest(
             cv_slice.calcSampleWeights(config, distance_map)
         elif config.weighting == "subsample_distance":
             weights_updated = cv_slice.calcSubsampleDistanceWeights(config, para_number=proc)
-        train_feature_matrix = cv_slice.get_train_feature_matrix(samples, sub_sampling=config.sub_sample_factor)
+        train_feature_matrix: list[list[int | float | None]] = cv_slice.get_train_feature_matrix(samples, sub_sampling=config.sub_sample_factor)
         if config.sub_sample_factor == 1.0:
             train_targets = cv_slice.train_targets
             train_weights = cv_slice.train_class_weight_vector
@@ -1043,25 +1066,26 @@ def trainRegressionForest(
                 slice_slice.calcSampleWeights(config, distance_map)
             elif config.weighting == "subsample_distance":
                 weights_updated = slice_slice.calcSubsampleDistanceWeights(config, para_number=proc)
-            train_feature_matrix = slice_slice.get_train_feature_matrix(samples, sub_sampling=config.sub_sample_factor)
+            train_feature_matrix: list[list[int | float | None]] = slice_slice.get_train_feature_matrix(samples, sub_sampling=config.sub_sample_factor)
             
             #with FileLock("rf_regressor.lock"):
             
             protwise_test_data_tuples = slice_slice.get_prot_wise_test_data_tuples(samples)
-            es_list = []
-            data_tuple_list = []
-            for n, prot_id in enumerate(protwise_test_data_tuples):
-                es = xgb.callback.EarlyStopping(
-                    rounds=config.early_stopping,
-                    min_delta=1e-3,
-                    save_best=True,
-                    maximize=True,
-                    data_name=f"validation_{n}",
-                )
-                es_list.append(es)
-                data_tuple_list.append(xgb.DMatrix(numpy.array(protwise_test_data_tuples[prot_id][0]),numpy.array(protwise_test_data_tuples[prot_id][1])))
-
+            
             if config.multi_gpu is None or config.multi_gpu < 2:
+                es_list = []
+                data_tuple_list: list[tuple[list[list[int | float | None]], list[float]]] = []
+                for n, prot_id in enumerate(protwise_test_data_tuples):
+                    es = xgb.callback.EarlyStopping(
+                        rounds=config.early_stopping,
+                        min_delta=1e-3,
+                        save_best=True,
+                        maximize=True,
+                        data_name=f"validation_{n}",
+                    )
+                    es_list.append(es)
+                    data_tuple_list.append(protwise_test_data_tuples[prot_id])
+
                 forest: xgb.XGBRegressor = xgb.XGBRegressor(
                     n_jobs=n_jobs,
                     device=device,
@@ -1083,7 +1107,8 @@ def trainRegressionForest(
                 )
             else:
                 forest = None
-            forest = xgb_train_wrapper(config, forest, train_feature_matrix, train_targets, data_tuple_list, train_weights, es_list)
+                data_tuple_list = None
+            forest = xgb_train_wrapper(config, forest, train_feature_matrix, train_targets, data_tuple_list, protwise_test_data_tuples, train_weights)
             if forest is None:
                 return return_zero(zero_return, remote, cv_slice)
             """
