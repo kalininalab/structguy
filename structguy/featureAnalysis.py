@@ -673,7 +673,10 @@ def plot_violins(config):
     cross_val_obj: FullSlice = FullSlice(samples, config)
     full_slice: CrossValidationSlice = cross_val_obj.slices[0]
 
-    feat_matrix = np.array(full_slice.get_train_feature_matrix(samples)).transpose()
+    l_feat_matrix, r_feat_matrix = full_slice.get_skewed_feat_matrices(samples, 0.5)
+
+    l_feat_matrix = np.array(l_feat_matrix).transpose()
+    r_feat_matrix = np.array(r_feat_matrix).transpose()
 
     plot_folder = f"{config.outfolder}/violin_plots"
     if not os.path.isdir(plot_folder):
@@ -681,26 +684,40 @@ def plot_violins(config):
     for feat_nr, feat_name in enumerate(full_slice.feature_names):
 
         print(feat_name)
-        feat_vec = feat_matrix[feat_nr]
+        l_feat_vec = l_feat_matrix[feat_nr]
+        r_feat_vec = r_feat_matrix[feat_nr]
 
         if feat_name[0:3] == 'oh_':
-            print(f'Cat feat: {feat_name}: {np.mean(feat_vec)=}')
+            print(f'Cat feat: {feat_name}: {np.mean(l_feat_vec)=} {np.mean(r_feat_vec)=}')
             continue
         
-        no_nones_feat_vec = []
-        for feat_val in feat_vec:
+        no_nones_feat_vec_l = []
+        no_nones_feat_vec_r = []
+        for feat_val in l_feat_vec:
             if feat_val is not None:
-                no_nones_feat_vec.append(feat_val)
+                no_nones_feat_vec_l.append(feat_val)
 
-        if len(no_nones_feat_vec) < 2:
-            continue
+        for feat_val in r_feat_vec:
+            if feat_val is not None:
+                no_nones_feat_vec_r.append(feat_val)
 
-        try:
-            plt.violinplot(no_nones_feat_vec, orientation='horizontal')
-        except TypeError or AttributeError as e:
-            print(f'Failed for {feat_name} due to\n{e}')
-            plt.clf()
-            continue
+        if len(no_nones_feat_vec_l) > 1:
+
+            try:
+                plt.violinplot(no_nones_feat_vec_l, orientation='horizontal', side='low')
+            except TypeError or AttributeError as e:
+                print(f'Failed for {feat_name} due to\n{e}')
+                plt.clf()
+                continue
+        
+        if len(no_nones_feat_vec_r) > 1:
+
+            try:
+                plt.violinplot(no_nones_feat_vec_r, orientation='horizontal', side='high')
+            except TypeError or AttributeError as e:
+                print(f'Failed for {feat_name} due to\n{e}')
+                plt.clf()
+                continue
 
         plt.title(f'{feat_name} violin plot')
 

@@ -703,6 +703,28 @@ class SampleSpace(Slotted_obj):
                 sample_pos_vec.append(None)
         return self.get_feat_matrix(feat_id_vec, sample_pos_vec)
 
+    def get_skewed_feat_matrices_from_ids(self, sample_ids, feat_names, thresh):
+        feat_id_vec = []
+        for feat_name in feat_names:
+            feat_id_vec.append(self.feat_pos_dict[feat_name])
+
+        sample_pos_vec_l = []
+        sample_pos_vec_r = []
+        for sample_id in sample_ids:
+            target_value = self.samples[sample_id].targtValue
+            if target_value < thresh:
+                try:
+                    sample_pos_vec_l.append(self.sample_pos_dict[sample_id])
+                except KeyError:
+                    sample_pos_vec_l.append(None)
+            else:
+                try:
+                    sample_pos_vec_r.append(self.sample_pos_dict[sample_id])
+                except KeyError:
+                    sample_pos_vec_r.append(None)
+
+        return self.get_feat_matrix(feat_id_vec, sample_pos_vec_l), self.get_feat_matrix(feat_id_vec, sample_pos_vec_r)
+
     def setGeometricDistanceMap(self,config):
         if self.geometric_distance_map is not None and self.current_geometric_exponent == config.geometric_exponent:
             return

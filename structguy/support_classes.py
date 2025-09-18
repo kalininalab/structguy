@@ -1035,6 +1035,10 @@ class CrossValidationSlice(Slotted_obj):
             feat_matrix = samples.get_feat_matrix_from_ids(self.sub_sampled_train_ids, self.feature_names)
         return feat_matrix
     
+    def get_skewed_feat_matrices(self, samples, thresh):
+        feat_matrices = samples.get_skewed_feat_matrices_from_ids(self.train_sample_ids, self.feature_names, thresh)
+        return feat_matrices
+    
     def get_prot_wise_test_data_tuples(self, samples):
         test_pred_pairs = {}
         for sample_nr, yt_value in enumerate(self.test_targets):
