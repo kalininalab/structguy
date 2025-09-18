@@ -507,7 +507,7 @@ def return_zero(zero_return, remote, cv_slice):
     return zero_return
 
 
-
+"""
 def using_dask_matrix(client: Client, X: da.Array, y: da.Array, config: util.Config, es_list, train_weights, data_tuple_list) -> da.Array:
     # DaskDMatrix acts like normal DMatrix, works as a proxy for local DMatrix scatter
     # around workers.
@@ -551,7 +551,8 @@ def using_dask_matrix(client: Client, X: da.Array, y: da.Array, config: util.Con
     #prediction = dxgb.predict(client, bst, dtrain)
     #config.logger.info("Evaluation history:", history)
     return bst
-
+"""
+    
 def ray_xgb_train_func(params):
     dtrain = xgb.DMatrix(params["train_feature_matrix"], params["train_targets"], weight = params["train_weights"])
 
