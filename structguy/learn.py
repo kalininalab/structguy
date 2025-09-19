@@ -870,7 +870,7 @@ def evaluate_dataset(config: Config):
                                 modified_feat_labels.append('None')
                             cat_shaps.append(shap_val)
 
-                        shap.plots.force(explanation[pos][-1], numpy.array(cat_shaps), matplotlib=True, show=False, feature_names=modified_feat_labels, figsize=(26,5))
+                        shap.plots.force(explanation[pos][-1], numpy.array(cat_shaps), matplotlib=True, show=False, feature_names=modified_feat_labels, figsize=(28,4))
                         plt.savefig(f"{force_plot_folder}/{prot_id}_{aac}_cat_force_plot.png")
                         shap.plots.force(explanation[pos][-1], explanation[pos][:-1], matplotlib=True, show=False, feature_names=extern_feature_names_list)
                         plt.savefig(f"{force_plot_folder}/{prot_id}_{aac}_force_plot.png")
