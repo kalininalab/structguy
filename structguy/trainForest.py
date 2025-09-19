@@ -553,7 +553,12 @@ def using_dask_matrix(client: Client, X: da.Array, y: da.Array, config: util.Con
     return bst
 """
     
-def ray_xgb_train_func(params):
+def ray_xgb_train_func(packed_params):
+    dump_path = packed_params['dump_path']
+    f = open(dump_path, 'rb')
+    packed_par = f.read()
+    f.close()
+    params = unpack(packed_par)
     dtrain = xgb.DMatrix(params["train_feature_matrix"], params["train_targets"], weight = params["train_weights"])
 
     config = params["config"]
@@ -641,6 +646,10 @@ def xgb_train_wrapper(
                 config.logger.info(f"Using dask to train multi gpu xgboost training: {config.multi_gpu=}")
                 forest = using_dask_matrix(client, X, y, config, es_list, train_weights, data_tuple_list).compute()
         """
+        storage = f'{config.outfolder}/ray_storage'
+        if not os.path.isdir(storage):
+            os.makedirs(storage)
+        data_dump = f'{storage}/data.dump'
         params = {
             "config" : config,
             "train_feature_matrix" : train_feature_matrix,
@@ -648,12 +657,13 @@ def xgb_train_wrapper(
             "train_weights" : train_weights,
             "protwise_test_data_tuples" : protwise_test_data_tuples,
         }
-        storage = f'{config.outfolder}/ray_storage'
-        if not os.path.isdir(storage):
-            os.makedirs(storage)
+        packed_params = {'dump_path' : pack(params)}
+        with open(data_dump, 'wb') as f:
+            f.write(packed_params)
+        
         run_config = RunConfig(storage_path=storage, name=f"run_name{label}")
         trainer = XGBoostTrainer(
-            ray_xgb_train_func, scaling_config=config.scaling_config, run_config=run_config, train_loop_config=params
+            ray_xgb_train_func, scaling_config=config.scaling_config, run_config=run_config, train_loop_config=packed_params
         )
         result = trainer.fit()
         with result.checkpoint.as_directory() as checkpoint_dir:

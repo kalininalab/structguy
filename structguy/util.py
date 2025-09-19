@@ -1314,13 +1314,22 @@ def calc_protein_wise_corr(y_test, y_pred, sample_ids, corr_function, mono_retur
     return prot_wise_corrs, mean_corr, prot_wise_raw_corrs
 
 
-def rho_eval_for_xgboost(predt: np.ndarray, dtest: xgb.DMatrix) -> tuple[str, float]:
+def rho_eval_for_xgboost_cb(predt: np.ndarray, dtest: xgb.DMatrix) -> tuple[str, float]:
     if isinstance(dtest, xgb.DMatrix):
         y = dtest.get_label()
     else:
         y = dtest
     corr, _ = stats.spearmanr(predt, y)
     return 'irho', (1.0-corr)
+
+
+def rho_eval_for_xgboost(predt: np.ndarray, dtest: xgb.DMatrix) -> tuple[str, float]:
+    if isinstance(dtest, xgb.DMatrix):
+        y = dtest.get_label()
+    else:
+        y = dtest
+    corr, _ = stats.spearmanr(predt, y)
+    return (1.0-corr)
 
 def objective_function_criterium(config, scores, best_scores, feature_penalty = None, margin=1.0):
     if best_scores is None:
