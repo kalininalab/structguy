@@ -572,7 +572,7 @@ def ray_xgb_train_func(packed_params):
             data_name=f"validation_{n}",
         )
         es_list.append(es)
-        data_tuple_list.append(xgb.DMatrix(numpy.array(params["protwise_test_data_tuples"][prot_id][0]), numpy.array(params["protwise_test_data_tuples"][prot_id][1])))
+        data_tuple_list.append((xgb.DMatrix(numpy.array(params["protwise_test_data_tuples"][prot_id][0]), numpy.array(params["protwise_test_data_tuples"][prot_id][1])), f"valid_{prot_id}"))
 
     xgb_params = {
         "tree_method": "hist",
