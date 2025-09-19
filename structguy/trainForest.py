@@ -591,7 +591,7 @@ def ray_xgb_train_func(packed_params):
         "eval_metric": util.rho_eval_for_xgboost,
         }
     
-    xgb.train(xgb_params, dtrain, num_boost_round=int(params["num_of_trees"]), evals=data_tuple_list, maximize=False, custom_metric=util.rho_eval_for_xgboost)
+    xgb.train(xgb_params, dtrain, num_boost_round=int(params["num_of_trees"]), evals=data_tuple_list, maximize=False)
 
 def xgb_train_wrapper(
         config: util.Config,
