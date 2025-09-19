@@ -671,7 +671,7 @@ def xgb_train_wrapper(
         
         run_config = RunConfig(storage_path=storage, name=f"run_name{label}")
         trainer = XGBoostTrainer(
-            ray_xgb_train_func, scaling_config=config.scaling_config, run_config=run_config, train_loop_config={'dump_path' : packed_params}
+            ray_xgb_train_func, scaling_config=config.scaling_config, run_config=run_config, train_loop_config={'dump_path' : data_dump}
         )
         result = trainer.fit()
         with result.checkpoint.as_directory() as checkpoint_dir:

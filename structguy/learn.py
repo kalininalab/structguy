@@ -865,12 +865,12 @@ def evaluate_dataset(config: Config):
                                 mean_val = feat_st[2]
                                 mean_val_str = val_to_str(mean_val)
 
-                                modified_feat_labels.append(f"{feat_cat}\n{max_feat}\nshap={max_feat_shap:.4f} ({perc_shap:.2f}%)\nval={val_str} (mean={mean_val_str})")
+                                modified_feat_labels.append(f"{feat_cat}\n{max_feat}\nshap={max_feat_shap:.3f} ({perc_shap:.1f}%)\nval={val_str} (mean={mean_val_str})")
                             else:
                                 modified_feat_labels.append('None')
                             cat_shaps.append(shap_val)
 
-                        shap.plots.force(explanation[pos][-1], numpy.array(cat_shaps), matplotlib=True, show=False, feature_names=modified_feat_labels, figsize=(20,4))
+                        shap.plots.force(explanation[pos][-1], numpy.array(cat_shaps), matplotlib=True, show=False, feature_names=modified_feat_labels, figsize=(26,5))
                         plt.savefig(f"{force_plot_folder}/{prot_id}_{aac}_cat_force_plot.png")
                         shap.plots.force(explanation[pos][-1], explanation[pos][:-1], matplotlib=True, show=False, feature_names=extern_feature_names_list)
                         plt.savefig(f"{force_plot_folder}/{prot_id}_{aac}_force_plot.png")
