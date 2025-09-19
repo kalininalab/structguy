@@ -552,7 +552,14 @@ def using_dask_matrix(client: Client, X: da.Array, y: da.Array, config: util.Con
     #config.logger.info("Evaluation history:", history)
     return bst
 """
-    
+def rho_eval_for_xgboost_cb(predt: numpy.ndarray, dtest: xgb.DMatrix) -> tuple[str, float]:
+    if isinstance(dtest, xgb.DMatrix):
+        y = dtest.get_label()
+    else:
+        y = dtest
+    corr, _ = stats.spearmanr(predt, y)
+    return 'irho', (1.0-corr)
+
 def ray_xgb_train_func(packed_params):
     dump_path = packed_params['dump_path']
     f = open(dump_path, 'rb')
@@ -570,6 +577,7 @@ def ray_xgb_train_func(packed_params):
             save_best=True,
             maximize=False,
             data_name=f"validation_{n}",
+            metric_name='irho'
         )
         es_list.append(es)
         data_tuple_list.append((xgb.DMatrix(numpy.array(params["protwise_test_data_tuples"][prot_id][0]), numpy.array(params["protwise_test_data_tuples"][prot_id][1])), f"valid_{prot_id}"))
@@ -588,10 +596,10 @@ def ray_xgb_train_func(packed_params):
         "early_stopping_rounds": params["early_stopping"],
         "subsample": params["subsample"],
         "callbacks": es_list,
-        "eval_metric": util.rho_eval_for_xgboost,
+        "eval_metric": ['irho'],
         }
     
-    xgb.train(xgb_params, dtrain, num_boost_round=int(params["num_of_trees"]), evals=data_tuple_list, maximize=False)
+    xgb.train(xgb_params, dtrain, num_boost_round=int(params["num_of_trees"]), evals=data_tuple_list, maximize=False, feval=rho_eval_for_xgboost_cb)
 
 def xgb_train_wrapper(
         config: util.Config,
