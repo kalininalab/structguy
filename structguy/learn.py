@@ -472,16 +472,30 @@ def load_data_for_pred(
 
 
 def val_to_str(val):
+    try:
+        int_val = int(str(val))
+        return str(int_val)
+    except ValueError:
+        pass
     if val is None:
         val_str = "None"
     else:
-        ival = int(val)
-        if ival > 0:
-            prec = 6 - int(math.log10(ival))
+        if val < 0:
+            if val < -1:
+                if val < -10:
+                    prec = 1
+                else:
+                    prec = 2
+            else:
+                prec = 4
+        elif val > 1:
+            if val > 10:
+                prec = 1
+            else:
+                prec = 2
         else:
-            prec = 5
-        if prec < 1:
-            prec = 1
+            prec = 4
+
         val_str = f"{val:.{prec}f}"
     return val_str
 
@@ -849,7 +863,7 @@ def evaluate_dataset(config: Config):
                                 modified_feat_labels.append('None')
                             cat_shaps.append(shap_val)
 
-                        shap.plots.force(explanation[pos][-1], numpy.array(cat_shaps), matplotlib=True, show=False, feature_names=modified_feat_labels, figsize=(30,5))
+                        shap.plots.force(explanation[pos][-1], numpy.array(cat_shaps), matplotlib=True, show=False, feature_names=modified_feat_labels, figsize=(15,4))
                         plt.savefig(f"{force_plot_folder}/{prot_id}_{aac}_cat_force_plot.png")
                         shap.plots.force(explanation[pos][-1], explanation[pos][:-1], matplotlib=True, show=False, feature_names=extern_feature_names_list)
                         plt.savefig(f"{force_plot_folder}/{prot_id}_{aac}_force_plot.png")

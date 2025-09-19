@@ -561,18 +561,15 @@ def ray_xgb_train_func(packed_params):
     params = unpack(packed_par)
     dtrain = xgb.DMatrix(params["train_feature_matrix"], params["train_targets"], weight = params["train_weights"])
 
-    config = params["config"]
-
     es_list = []
     data_tuple_list: list[tuple[list[list[int | float | None]], list[float]]] = []
     for n, prot_id in enumerate(params["protwise_test_data_tuples"]):
         es = xgb.callback.EarlyStopping(
-            rounds=config.early_stopping,
+            rounds=params["early_stopping"],
             min_delta=1e-3,
             save_best=True,
             maximize=False,
             data_name=f"validation_{n}",
-            metric_name="irho"
         )
         es_list.append(es)
         data_tuple_list.append(xgb.DMatrix(numpy.array(params["protwise_test_data_tuples"][prot_id][0]), numpy.array(params["protwise_test_data_tuples"][prot_id][1])))
@@ -580,21 +577,21 @@ def ray_xgb_train_func(packed_params):
     xgb_params = {
         "tree_method": "hist",
         "device": "cuda",
-        "max_depth": config.tree_depth,
-        "reg_alpha ": config.xgb_alpha,
-        "reg_lambda ": config.xgb_lambda,
-        "colsample_bytree ": config.colsample_bytree,
-        "max_delta_step ": config.max_delta_step,
-        "gamma": config.xgb_gamma,
-        "learning_rate": config.learning_rate,
-        "min_child_weight": config.min_child_weight,
-        "early_stopping_rounds": config.early_stopping,
-        "subsample": config.max_sample_parameter,
+        "max_depth": params["max_depth"],
+        "reg_alpha ": params["reg_alpha"],
+        "reg_lambda ": params["reg_lambda"],
+        "colsample_bytree ": params["colsample_bytree"],
+        "max_delta_step ": params["max_delta_step"],
+        "gamma": params["gamma"],
+        "learning_rate": params["learning_rate"],
+        "min_child_weight": params["min_child_weight"],
+        "early_stopping_rounds": params["early_stopping"],
+        "subsample": params["subsample"],
         "callbacks": es_list,
         "eval_metric": util.rho_eval_for_xgboost,
         }
     
-    xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees), evals=data_tuple_list, maximize=False, custom_metric=util.rho_eval_for_xgboost)
+    xgb.train(xgb_params, dtrain, num_boost_round=int(params["num_of_trees"]), evals=data_tuple_list, maximize=False, custom_metric=util.rho_eval_for_xgboost)
 
 def xgb_train_wrapper(
         config: util.Config,
@@ -651,7 +648,18 @@ def xgb_train_wrapper(
             os.makedirs(storage)
         data_dump = f'{storage}/data.dump'
         params = {
-            "config" : config,
+            "num_of_trees" : config.num_of_trees,
+            "early_stopping" : config.early_stopping,
+            "max_depth": config.tree_depth,
+            "reg_alpha ": config.xgb_alpha,
+            "reg_lambda ": config.xgb_lambda,
+            "colsample_bytree ": config.colsample_bytree,
+            "max_delta_step ": config.max_delta_step,
+            "gamma": config.xgb_gamma,
+            "learning_rate": config.learning_rate,
+            "min_child_weight": config.min_child_weight,
+            "early_stopping_rounds": config.early_stopping,
+            "subsample": config.max_sample_parameter,
             "train_feature_matrix" : train_feature_matrix,
             "train_targets" : train_targets,
             "train_weights" : train_weights,
@@ -701,7 +709,6 @@ def trainRegressionForest(
         proc = int(overwrite_proc_n)
     leaf_samples = config.tree_min_leaf_samples
     n_of_trees = int(config.num_of_trees)
-    rel_max_leaf_node_pruning = config.rel_max_leaf_node_pruning
 
     max_feature_parameter = config.max_feature_parameter
     if config.max_feature_cont_parameter is not None:
@@ -893,7 +900,6 @@ def trainRegressionForest(
                     save_best=True,
                     maximize=False,
                     data_name=f"validation_{n}",
-                    metric_name="irho"
                 )
                 es_list.append(es)
                 data_tuple_list.append(protwise_test_data_tuples[prot_id])
@@ -1094,7 +1100,6 @@ def trainRegressionForest(
                         save_best=True,
                         maximize=False,
                         data_name=f"validation_{n}",
-                        metric_name="irho"
                     )
                     es_list.append(es)
                     data_tuple_list.append(protwise_test_data_tuples[prot_id])
