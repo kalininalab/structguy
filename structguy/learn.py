@@ -497,7 +497,7 @@ def val_to_str(val):
         elif val < 0.01:
             prec = 4
         elif val < 0.1:
-            prec = 3:
+            prec = 3
         elif val < 1:
             prec = 2
         else:
