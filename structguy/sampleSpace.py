@@ -327,11 +327,15 @@ class SampleSpace(Slotted_obj):
         config.logger.info(f'State of samples object: Proteins: {len(prot_ids)}, Samples: {len(self.samples)}, Features: {len(self.feature_names)}')
 
     def oneHotify(self,feat_name, config):
+        if config.verbosity >= 4:
+            config.logger.info(f'oneHotify of {feat_name}')
         feat = self.features[feat_name]
         f_type = feat.f_type
         if not f_type == 'categorical':
             config.logger.info('Warning: Cannot oneHotify non-categorical features')
             return
+        if config.verbosity >= 4:
+            config.logger.info(f'{feat.category_map=}')
         for category in feat.category_map:
             oh_name = 'oh_%s_%s' % (feat_name,category)
             self.addFeature(oh_name,'binary',group=feat.group,default_value=0)
@@ -341,6 +345,8 @@ class SampleSpace(Slotted_obj):
             category = feat.category_backmap[cat_value]
             oh_name = 'oh_%s_%s' % (feat_name,category)
             self.addValue(sample_id,1,oh_name)
+            if config.verbosity >= 5:
+                config.logger.info(f'Converting {feat_name=} of {sample_id=}: {cat_value=} {category=}')
 
     def oneHotifyAll(self, config):
         config.logger.info('Convert all categorical features to 1-hot encodings')
@@ -665,6 +671,9 @@ class SampleSpace(Slotted_obj):
         for sample_pos in sample_pos_vec:
             feat_vec = []
             for feat_id in feat_id_vec:
+                if feat_id == -1:
+                    feat_vec.append(0)
+                    continue
                 try:
                     feat_vec.append(self.raw_feature_matrix[sample_pos][feat_id])
                 except KeyError:
@@ -674,21 +683,23 @@ class SampleSpace(Slotted_obj):
             feat_matrix.append(feat_vec)
         return feat_matrix
 
-    def get_feat_matrix_from_feat_names(self, feat_names, config):
+    def get_feat_matrix_from_feat_names(self, feat_names : list[str], config):
         feat_id_vec = []
         for feat_name in feat_names:
             try:
                 feat_id_vec.append(self.feat_pos_dict[feat_name])
             except KeyError:
+                if config.verbosity >= 3:
+                    config.logger.warning(f'In get_feat_matrix_from_feat_names: {feat_name} not in feat_pos_dict')
                 if feat_name[0:3] == 'oh_':
-                    feat_id_vec.append(0)
+                    feat_id_vec.append(-1)
                 else:
                     feat_id_vec.append(None)
             except TypeError:
                 config.logger.warning(f'{self.feat_pos_dict[:100]=}')
 
         sample_pos_vec = list(range(len(self.raw_feature_matrix)))
-        return self.get_feat_matrix(feat_id_vec, sample_pos_vec)
+        return self.get_feat_matrix(feat_id_vec, sample_pos_vec), feat_id_vec
     
     def get_feat_matrix_from_ids(self, sample_ids, feat_names)-> list[list[int | float | None]]:
         feat_id_vec = []
@@ -781,7 +792,7 @@ class SampleSpace(Slotted_obj):
         for sample_id in self.samples:
             tv = self.samples[sample_id].targetValue
             bin_lower = int((tv-lower_bin_thresh)//bin_size)
-            if not bin_lower in bins:
+            if bin_lower not in bins:
                 bins[bin_lower] = []
             bins[bin_lower].append(sample_id)
 
@@ -801,12 +812,12 @@ class SampleSpace(Slotted_obj):
         for (u_ac,aac) in self.samples:
             prot_set.add(u_ac)
             targetValue = self.samples[(u_ac,aac)].targetValue
-            if not targetValue in target_value_map:
+            if targetValue not in target_value_map:
                 target_value_map[targetValue] = 0
             target_value_map[targetValue] += 1
             if u_ac in mixed_map:
                 continue
-            if not u_ac in pure_map:
+            if u_ac not in pure_map:
                 pure_map[u_ac] = targetValue
             else:
                 if targetValue == pure_map[u_ac]:
@@ -823,10 +834,10 @@ class SampleSpace(Slotted_obj):
         ppr = len(pure_map)/n_prot
         mpr = len(mixed_map)/n_prot
         if not config.regression:
-            config.logger.info('# of Proteins: ',n_prot,'# of Variants: ',len(self.samples),'target value balance: ',target_value_map)
+            config.logger.info(f'# of Proteins: {n_prot}, # of Variants: {len(self.samples)}, target value balance: {target_value_map}')
         else:
-            config.logger.info('# of Proteins: ',n_prot,'# of Variants: ',len(self.samples))
-        config.logger.info('Pure protein proportion: ',ppr,'Mixed protein proportion: ',mpr)
+            config.logger.info(f'# of Proteins: {n_prot}, # of Variants: {len(self.samples)}')
+        config.logger.info(f'Pure protein proportion: {ppr}, Mixed protein proportion: {mpr}')
         return
 
     def undoBalancing(self,config):
@@ -840,14 +851,14 @@ class SampleSpace(Slotted_obj):
             self.calcVectors(config)
         return self.test_feature_matrix,self.test_targets,self.train_feature_matrix,self.train_targets
 
-    def get_test_data_for_feature_list(self, extern_feature_list, config):
-        test_feature_matrix = self.get_feat_matrix_from_feat_names(extern_feature_list, config)
+    def get_test_data_for_feature_list(self, extern_feature_list: list[str], config):
+        test_feature_matrix, feat_id_vec = self.get_feat_matrix_from_feat_names(extern_feature_list, config)
         test_targets = []
         sample_id_list = []
         for sample_id in self.samples:
             sample_id_list.append(sample_id)
             test_targets.append(self.samples[sample_id].targetValue)
-        return test_feature_matrix, test_targets, sample_id_list
+        return test_feature_matrix, test_targets, sample_id_list, feat_id_vec
 
     def filterSamplesByMappedStructures(self,config):
         del_list = []

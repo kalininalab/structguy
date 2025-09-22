@@ -466,9 +466,9 @@ def load_data_for_pred(
     for sample_id in samples.samples:
         samples.samples[sample_id].testtrain = "test"
 
-    test_feature_matrix, test_targets, sample_id_list = samples.get_test_data_for_feature_list(feature_names, config)
+    test_feature_matrix, test_targets, sample_id_list, feat_id_vec = samples.get_test_data_for_feature_list(feature_names, config)
 
-    return samples, test_feature_matrix, test_targets, sample_id_list
+    return samples, test_feature_matrix, test_targets, sample_id_list, feat_id_vec
 
 
 def val_to_str(val):
@@ -508,6 +508,7 @@ def val_to_str(val):
 
 def evaluate_dataset(config: Config):
     t0 = time.time()
+    extern_feature_names_list: list[str]
     forest, extern_feature_names_list, impute_map, model_config, feat_stats = loadModel(config.path_to_model)
     t1 = time.time()
 
@@ -523,9 +524,23 @@ def evaluate_dataset(config: Config):
         model_name = model_filename
 
     if config.verbosity >= 2:
-        config.logger.info(f"{extern_feature_names_list[:5]}\n...\n{extern_feature_names_list[-5:]}")
+        config.logger.info(f"{type(extern_feature_names_list)=} {extern_feature_names_list[:5]}\n...\n{extern_feature_names_list[-5:]}")
 
-    samples, test_feature_matrix, test_targets, sample_id_list = load_data_for_pred(config, impute_map, extern_feature_names_list)
+    if config.verbosity >= 5:
+        config.logger.info(f'{extern_feature_names_list=}')
+
+    samples, test_feature_matrix, test_targets, sample_id_list, feat_id_vec = load_data_for_pred(config, impute_map, extern_feature_names_list)
+
+    external_feat_pos_dict = dict(zip(extern_feature_names_list, range(len(extern_feature_names_list))))
+
+    if config.verbosity >= 5:
+        print(f'{feat_id_vec=}')
+        print(f'{samples.feat_pos_dict['oh_Wildtype AA_I']=}')
+
+        for pos, sample_id in enumerate(sample_id_list):
+            feat_pos = external_feat_pos_dict['oh_Wildtype AA_I']
+            print(f'{sample_id=} {feat_pos=} {test_feature_matrix[pos][feat_pos]=}')
+            print(f'{samples.raw_feature_matrix[pos][samples.feat_pos_dict['oh_Wildtype AA_I']]=}')
 
     if len(test_feature_matrix) == 0:
         return None, None, None
@@ -846,19 +861,21 @@ def evaluate_dataset(config: Config):
                     words.append(str(pred_std))
 
                 if explanation is not None:
+                    #print(f'{sample_id} {pos=} {len(explanation[pos][:-1])=} {len(extern_feature_names_list)=}')
                     cat_exp, cat_shaps = util.categorize_shap_from_xgb(explanation[pos][:-1], extern_feature_names_list)
                     if config.plot_sample_forces:
                         modified_feat_labels = []
                         cat_shaps = []
-                        for pos, shap_val, (max_feat_shap, max_feat, feat_pos) in cat_exp:
+                        for cat_pos, shap_val, (max_feat_shap, max_feat, feat_pos) in cat_exp:
                             if max_feat is not None:
-                                feat_cat = feature_categories[pos]
+                                feat_cat = feature_categories[cat_pos]
                                 if feat_pos is not None:
                                     val = test_feature_matrix[pos][feat_pos]
                                     val_str = val_to_str(val)
                                     
                                 else:
                                     val_str = "None"
+
                                 perc_shap = (100*max_feat_shap)/shap_val
 
                                 feat_st = feat_stats[max_feat]
@@ -870,14 +887,14 @@ def evaluate_dataset(config: Config):
                                 modified_feat_labels.append('None')
                             cat_shaps.append(shap_val)
 
-                        shap.plots.force(explanation[pos][-1], numpy.array(cat_shaps), matplotlib=True, show=False, feature_names=modified_feat_labels, figsize=(28,4))
+                        shap.plots.force(explanation[pos][-1], numpy.array(cat_shaps), matplotlib=True, show=False, feature_names=modified_feat_labels, figsize=(28,5))
                         plt.savefig(f"{force_plot_folder}/{prot_id}_{aac}_cat_force_plot.png")
                         shap.plots.force(explanation[pos][-1], explanation[pos][:-1], matplotlib=True, show=False, feature_names=extern_feature_names_list)
                         plt.savefig(f"{force_plot_folder}/{prot_id}_{aac}_force_plot.png")
                         plt.clf()
 
-                    for pos, shap_val, (max_feat_shap, max_feat, feat_pos) in cat_exp:
-                        feat_cat = feature_categories[pos]
+                    for cat_pos, shap_val, (max_feat_shap, max_feat, feat_pos) in cat_exp:
+                        feat_cat = feature_categories[cat_pos]
                         if shap_val < 0:
                             words.append(f"{feat_cat} features skews prediction towards functional consequence")
                         else:

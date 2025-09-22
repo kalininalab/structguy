@@ -349,8 +349,8 @@ def createTrainingSet(
                 samples.dump_impute_map(path_to_impute_map_dump)
                 config.add_entry_to_project_file("path_to_impute_map", path_to_impute_map_dump)
 
-            #config.path_to_processed_features_file = f"{config.outfolder}/{config.dataset_name}_structguy_features_processed.tsv"
-            #samples.write(config.path_to_processed_features_file)
+            config.path_to_processed_features_file = f"{config.outfolder}/{config.dataset_name}_structguy_features_processed.tsv"
+            samples.write(config.path_to_processed_features_file)
             config.path_to_processed_features_file = f"{config.outfolder}/{config.dataset_name}_structguy_features_processed.dump"
             if not stop_matrix_transformation:
                 t_0 = time.time()
@@ -372,8 +372,8 @@ def createTrainingSet(
 
                 config.add_entry_to_project_file("path_to_imputed_features_file", config.path_to_imputed_features_file)
             else:
-                #config.path_to_processed_features_file = f"{config.outfolder}/{config.dataset_name}_structguy_features_processed.tsv"
-                #samples.write(config.path_to_processed_features_file)
+                config.path_to_processed_features_file = f"{config.outfolder}/{config.dataset_name}_structguy_features_processed.tsv"
+                samples.write(config.path_to_processed_features_file)
                 config.path_to_processed_features_file = f"{config.outfolder}/{config.dataset_name}_structguy_features_processed.dump"
                 if not stop_matrix_transformation:
                     t_0 = time.time()
