@@ -453,12 +453,12 @@ def shap_analysis(config, forest, feat_vecs, feature_names, prediction_vector, t
                     h = len(feat_vecs) // 2
                     d_feat_vecs_1 = xgb.DMatrix(feat_vecs[:h], feature_names = feature_names)
                     d_feat_vecs_2 = xgb.DMatrix(feat_vecs[h:], feature_names = feature_names)
-                    explanation_1 = forest.get_booster().predict(d_feat_vecs_1, pred_contribs=True)
-                    explanation_2 = forest.get_booster().predict(d_feat_vecs_2, pred_contribs=True)
+                    explanation_1 = forest.predict(d_feat_vecs_1, pred_contribs=True)
+                    explanation_2 = forest.predict(d_feat_vecs_2, pred_contribs=True)
 
                     explanation = numpy.concatenate(explanation_1, explanation_2)
                 else:
-                    explanation = forest.get_booster().predict(d_feat_vecs, pred_contribs=True)
+                    explanation = forest.predict(d_feat_vecs, pred_contribs=True)
                 done = True
             except xgb.core.XGBoostError:
                 done = False
@@ -693,7 +693,7 @@ def xgb_train_wrapper(
             "early_stopping_rounds": params["early_stopping"],
             "subsample": params["subsample"],
             "callbacks": es_list,
-            "eval_metric": ['irho'],
+            #"eval_metric": ['irho'],
             "disable_default_eval_metric": True
             }
         forest = xgb.train(xgb_params, dtrain, num_boost_round=int(params["num_of_trees"]), evals=data_tuple_list, maximize=False, custom_metric=rho_eval_for_xgboost_cb)
@@ -1140,7 +1140,8 @@ def trainRegressionForest(
         ta = add_to_times(times, ta) #8
 
         test_feature_matrix = slice_slice.get_test_feature_matrix(samples)
-        y_pred = forest.predict(test_feature_matrix)
+        dtest_feature_matrix = xgb.DMatrix(numpy.array(test_feature_matrix))
+        y_pred = forest.predict(dtest_feature_matrix)
 
         ta = add_to_times(times, ta) #9
 
@@ -1242,8 +1243,9 @@ def trainRegressionForest(
         cv_slice.printBalance(config)
 
     test_feature_matrix = cv_slice.get_test_feature_matrix(samples)
+    dtest_feature_matrix = xgb.DMatrix(numpy.array(test_feature_matrix))
     try:
-        y_pred = forest.predict(test_feature_matrix)
+        y_pred = forest.predict(dtest_feature_matrix)
     except ValueError:
         [e, f, g] = sys.exc_info()
         g = traceback.format_exc()
@@ -1252,6 +1254,7 @@ def trainRegressionForest(
     if score_train:
         if config.forest_type == "xgboost" and not skip_feature_selection:
             train_feature_matrix = cv_slice.get_train_feature_matrix(samples, sub_sampling=config.sub_sample_factor)
+            dtrain_feature_matrix = xgb.DMatrix(numpy.array(train_feature_matrix))
         if config.sub_sample_factor == 1.0:
             train_sample_ids = cv_slice.train_sample_ids
             train_targets = cv_slice.train_targets
@@ -1265,9 +1268,9 @@ def trainRegressionForest(
         while not done:
             try:
                 if n > 1:
-                    x_pred = cut_and_predict(train_feature_matrix, forest)
+                    x_pred = cut_and_predict(dtrain_feature_matrix, forest)
                 else:
-                    x_pred = forest.predict(train_feature_matrix)
+                    x_pred = forest.predict(dtrain_feature_matrix)
                 done = True
             except ValueError:
                 if n < 4:
