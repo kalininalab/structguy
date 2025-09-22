@@ -976,6 +976,8 @@ def para_eval(package, store, para_number):
 
 
 def initConfParameters(config, parameters, thresh_only = False):
+    if config.forest_type == "xgboost":
+        return parameters
     parameters["confusion_rank_threshold"] = Parameter(
         "confusion_rank_threshold", "integer", half_step_limits=config.confusion_rank_threshold_bounds, transform_limits=(max_to_n_of_features, config.n_of_features)
     )
@@ -1098,7 +1100,7 @@ def initParameters(
             parameters["xgb_lambda"] = Parameter("xgb_lambda", "real", half_step_limits=[0.,5.])
             parameters["colsample_bytree"] = Parameter("colsample_bytree", "real", half_step_limits=[0.,1.])
             parameters["max_delta_step"] = Parameter("max_delta_step", "real", half_step_limits=[0.,10.])
-            parameters["feat_impact_thresh"] = Parameter("feat_impact_thresh", "real", half_step_limits=[-0.1,0.1])
+            parameters["feat_impact_thresh"] = Parameter("feat_impact_thresh", "real", half_step_limits=[-0.01,0.01])
             parameters["tree_depth"] = Parameter("tree_depth", "integer", half_step_limits=[1,31])
             parameters["num_of_trees"] = Parameter("num_of_trees", "integer", half_step_limits=[10,10_000])
 
@@ -1261,43 +1263,49 @@ def threeDimHyperOptimization(
                     if new_opti:
                         converged = False
             else:
-                while len(param_names) > 2:
-                    param_trio = param_names.pop(), param_names.pop(), param_names.pop()
-                    new_opti, best_scores, first_scores, cv_obj, slice_slices = threeDim(
-                        param[param_trio[0]],
-                        param[param_trio[1]],
-                        param[param_trio[2]],
-                        best_scores,
-                        first_scores,
+                while len(param_names) > 3:
+                    param_set = [
+                        parameters[param_names.pop()],
+                        parameters[param_names.pop()],
+                        parameters[param_names.pop()],
+                        parameters[param_names.pop()]
+                    ]
+                    new_opti, best_scores, first_scores, cv_obj, slice_slices = bayesian_optimisation(
+                        None,
                         config,
+                        param_set,
                         score_matrix,
                         cv_obj,
+                        best_scores,
+                        first_scores,
                         distance_map,
                         slice_slices,
                         samples=samples,
                         samples_store_id=samples_store_id,
+                        n_pre_samples=None,
                         debug=debug,
                     )
                     if new_opti:
                         converged = False
 
-                if len(param_names) == 2:
-                    new_opti, best_scores, first_scores, cv_obj, slice_slices = twoDim(
-                        param[param_names.pop()],
-                        param[param_names.pop()],
-                        best_scores,
-                        first_scores,
-                        config,
-                        score_matrix,
-                        cv_obj,
-                        distance_map,
-                        slice_slices,
-                        samples=samples,
-                        samples_store_id=samples_store_id,
-                        debug=debug,
-                    )
-                    if new_opti:
-                        converged = False
+                param_set = [parameters[param] for param in param_names]
+                new_opti, best_scores, first_scores, cv_obj, slice_slices = bayesian_optimisation(
+                    None,
+                    config,
+                    param_set,
+                    score_matrix,
+                    cv_obj,
+                    best_scores,
+                    first_scores,
+                    distance_map,
+                    slice_slices,
+                    samples=samples,
+                    samples_store_id=samples_store_id,
+                    n_pre_samples=None,
+                    debug=debug,
+                )
+                if new_opti:
+                    converged = False
 
         config.logger.info(f"Iteration: {n}")
         config.logParameter()
