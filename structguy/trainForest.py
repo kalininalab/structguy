@@ -566,9 +566,20 @@ def ray_xgb_train_func(packed_params):
     packed_par = f.read()
     f.close()
     params = unpack(packed_par)
-    dtrain = xgb.DMatrix(params["train_feature_matrix"], params["train_targets"], weight = params["train_weights"])
+
+    train_ds_iter = ray.train.get_dataset_shard("train")
+    
+    train_df = train_ds_iter.materialize().to_pandas()
+
+    train_X, train_y = train_df.drop("y", axis=1).to_numpy(), train_df["y"].to_numpy()
+    train_X = numpy.concatenate([list(x) for x in train_X])
+
+    
+    dtrain = xgb.DMatrix(train_X, label=train_y)
+    #dtrain = xgb.DMatrix(params["train_feature_matrix"], params["train_targets"], weight = params["train_weights"])
 
     es_list = []
+    es_list.append(RayTrainReportCallback(metrics = ['irho'], checkpoint_at_end=True))
     data_tuple_list: list[tuple[list[list[int | float | None]], list[float]]] = []
     for n, prot_id in enumerate(params["protwise_test_data_tuples"]):
         es = xgb.callback.EarlyStopping(
@@ -580,7 +591,9 @@ def ray_xgb_train_func(packed_params):
             metric_name='irho'
         )
         es_list.append(es)
-        data_tuple_list.append((xgb.DMatrix(numpy.array(params["protwise_test_data_tuples"][prot_id][0]), numpy.array(params["protwise_test_data_tuples"][prot_id][1])), f"valid_{prot_id}"))
+        data_tuple_list.append((xgb.DMatrix(numpy.array(params["protwise_test_data_tuples"][prot_id][0]), numpy.array(params["protwise_test_data_tuples"][prot_id][1])), f"valid_{n}"))
+
+
 
     xgb_params = {
         "tree_method": "hist",
@@ -596,10 +609,10 @@ def ray_xgb_train_func(packed_params):
         "early_stopping_rounds": params["early_stopping"],
         "subsample": params["subsample"],
         "callbacks": es_list,
-        "eval_metric": ['irho'],
+        #"eval_metric": ['irho'],
         }
     
-    xgb.train(xgb_params, dtrain, num_boost_round=int(params["num_of_trees"]), evals=data_tuple_list, maximize=False, custom_metric=rho_eval_for_xgboost_cb)
+    bst = xgb.train(xgb_params, dtrain, num_boost_round=int(params["num_of_trees"]), evals=data_tuple_list, maximize=False, custom_metric=rho_eval_for_xgboost_cb)
 
 def xgb_train_wrapper(
         config: util.Config,
@@ -723,24 +736,37 @@ def xgb_train_wrapper(
             "min_child_weight": config.min_child_weight,
             "early_stopping_rounds": config.early_stopping,
             "subsample": config.max_sample_parameter,
-            "train_feature_matrix" : train_feature_matrix,
-            "train_targets" : train_targets,
-            "train_weights" : train_weights,
+            #"train_feature_matrix" : train_feature_matrix,
+            #"train_targets" : train_targets,
+            #"train_weights" : train_weights,
             "protwise_test_data_tuples" : protwise_test_data_tuples,
         }
         packed_params = pack(params)
         with open(data_dump, 'wb') as f:
             f.write(packed_params)
-        
+
+        train_data_item = [{"x" : train_feature_matrix[pos], "y": train_targets[pos]} for pos in range(len(train_feature_matrix))]
+
+        ray_train_ds = ray.data.from_items(train_data_item)
+
         run_config = RunConfig(storage_path=storage, name=f"run_name{label}")
         trainer = XGBoostTrainer(
-            ray_xgb_train_func, scaling_config=config.scaling_config, run_config=run_config, train_loop_config={'dump_path' : data_dump}
+            ray_xgb_train_func,
+            scaling_config=config.scaling_config,
+            run_config=run_config,
+            train_loop_config={'dump_path' : data_dump},
+            datasets = {'train': ray_train_ds}
         )
         result = trainer.fit()
+        config.logger.info(f'{result=} {result.checkpoint=}')
+        #"""
         with result.checkpoint.as_directory() as checkpoint_dir:
             model_path = os.path.join(checkpoint_dir, RayTrainReportCallback.CHECKPOINT_NAME)
             forest = xgb.Booster()
             forest.load_model(model_path)
+        #"""
+        #forest = xgb.Booster()
+        #forest.load_model(result.path)
     return forest
 
 def trainRegressionForest(
@@ -1137,10 +1163,10 @@ def trainRegressionForest(
         if len(feats_to_remove) >= (len(cv_slice.feature_names)+ len(filtered_features)):
             return return_zero(zero_return, remote, cv_slice)
         
+
         if len(feats_to_remove) > len(filtered_features):
             cv_slice.filterFeatures(feats_to_remove)
-            slice_slice.filterFeatures(feats_to_remove)
-            
+            slice_slice.filterFeatures(feats_to_remove)      
             ta = add_to_times(times, ta) #11
 
             if config.weighting == "geometric":
@@ -1202,6 +1228,9 @@ def trainRegressionForest(
                 )
             """
 
+            slice_slice.filterFeatures([])
+        else:
+            cv_slice.filterFeatures(filtered_features)
             slice_slice.filterFeatures([])
 
         ta = add_to_times(times, ta) #12
