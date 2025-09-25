@@ -14,6 +14,8 @@ from structguy import util, trainForest
 from structguy.sampleSpace import DataSAIL_cv, CrossValidationSlice
 from structman.base_utils.base_utils import pack, unpack
 
+from ray.util.queue import Queue
+
 
 # Taken from https://github.com/thuijskens/bayesian-optimization
 def expected_improvement(x, gaussian_process, evaluated_loss, greater_is_better=False, n_params=1):
@@ -165,7 +167,7 @@ def bayes_random_init(
 
     number_of_sub_jobs = min([len(initial_cv_obj.slices) * (len(initial_cv_obj.slices) - 1), 1])
 
-    if n_of_samples < sample_size_threshold and config.crossValidation == "DataSAIL" and not config.gpu_mode:
+    if config.multi_gpu > 1:
         para_random_init = True
     else:
         para_random_init = False
@@ -181,6 +183,7 @@ def bayes_random_init(
 
     # if not 'geometric_exponent' in param_names:
     if para_random_init:
+        results = []
         randomized_parameters = np.random.uniform(bounds[:, 0], bounds[:, 1], (n_pre_samples, bounds.shape[0]))
         max_packages = min([max([2, 4 * (sample_size_threshold // n_of_samples)]), len(randomized_parameters) - 1, 4])
         packagesize = math.ceil((n_pre_samples - 1) / max_packages)
@@ -193,25 +196,7 @@ def bayes_random_init(
         if debug:
             config.logger.info(f"Init params: {init_params}")
 
-        scores, cv_obj, slice_slices, first_scores = get_scores(
-            config,
-            score_matrix,
-            initial_cv_obj,
-            distance_map,
-            slice_slices,
-            samples=samples,
-            samples_store_id=samples_store_id,
-            debug=debug,
-            force_confusion=force_confusion,
-            get_first_scores=True,
-            cv_interuption=(0.95, best_first_scores)
-        )
-        results = [(scores, first_scores, init_params, cv_obj)]
-
-        if config.verbosity >= 1:
-            config.logger.info(f"Objective score: {util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)}, unpenalized: {scores.objective_value(config)}")
-
-        store = ray.put((config, pack(cv_obj), parameters, samples_store_id, pack(slice_slices), force_confusion, best_first_scores))
+        store = ray.put((config, pack(initial_cv_obj), parameters, samples_store_id, pack(slice_slices), force_confusion, best_first_scores))
 
         config.logger.info(f"after store init, samples is None: {samples is None}, max_packages: {max_packages}, package_size: {packagesize}")
 
@@ -221,28 +206,40 @@ def bayes_random_init(
             if para_number % number_of_sub_jobs != 0:
                 para_number = ((para_number // number_of_sub_jobs) + 1) * number_of_sub_jobs
 
-        # Get n_pre_samples amount of random points
-        try:
-            package = []
-            for params in randomized_parameters[1:]:
-                package.append(params)
-                if len(package) == packagesize:
-                    para_eval_ret_ids.append(para_eval.remote(package, store, para_number))
-                    package = []
-            if len(package) > 0:
-                para_eval_ret_ids.append(para_eval.remote(package, store, para_number))
-        except:
-            [e, f, g] = sys.exc_info()
-            g = traceback.format_exc()
-            config.logger.error(f"ERROR in bayes_random_init: {n_pre_samples}, {bounds}\n{e}\n{f}\n{g}")
-            sys.exit()
+        current_params_id = 0
+        remote_processes = []
+        for gpu_id in range(config.multi_gpu):
+            com_queue = Queue()
+            out_queue = Queue()
+            com_queue.put((randomized_parameters[current_params_id]))
+            current_params_id += 1
+            proc_id = para_eval.remote(com_queue, out_queue, store, para_number, gpu_id)
+            remote_processes.append((com_queue, out_queue, proc_id))
 
         config.logger.info(f"Para random init started: # of packages: {len(para_eval_ret_ids)} # of subthreads: {para_number}")
 
-        para_results_package = ray.get(para_eval_ret_ids)
-        for para_results in para_results_package:
-            for scores, first_scores, params, packed_cv_obj in para_results:
-                results.append((scores, first_scores, params, packed_cv_obj))
+        dones = []
+        for i in range(len(remote_processes)):
+            dones.append(False)
+        all_done = False
+        while not all_done:
+            for i, (com_queue, out_queue, proc_id) in enumerate(remote_processes):
+                if dones[i]:
+                    continue
+                (scores, params, first_scores) = out_queue.get(timeout=1)
+                results.append((scores, first_scores, params))
+
+                if current_params_id == len(randomized_parameters):
+                    com_queue.put(None)
+                    dones[i] = True
+                else:
+                    com_queue.put(randomized_parameters[current_params_id])
+                    current_params_id += 1
+            all_done = True
+            for done in dones:
+                if not done:
+                    all_done = False
+
     else:
         results = []
         try:
@@ -262,7 +259,7 @@ def bayes_random_init(
                     get_first_scores=True,
                     cv_interuption=(0.95, best_first_scores)
                     )
-                results.append((scores, first_scores, params, cv_obj))
+                results.append((scores, first_scores, params))
                 # projected_parameter_values = fill_plane(params, integer_type_params)
                 # for projected_param in projected_parameter_values:
                 #    results.append((scores, projected_param))
@@ -277,8 +274,7 @@ def bayes_random_init(
 
     cat_param_map = {}
 
-    return_cv_obj = initial_cv_obj
-    for scores, first_scores, params, cv_obj in results:
+    for scores, first_scores, params in results:
         obj_sc = util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)
         if obj_sc is None or obj_sc != obj_sc:
             config.logger.info(f"========= Warning: None or NaN objective score for: {param_names}, {params}")
@@ -296,13 +292,7 @@ def bayes_random_init(
             best_first_scores = first_scores
             best_params = params
             new_optimimum = True
-            if para_random_init:
-                try:
-                    cv_obj = unpack(ray.get(cv_obj))
-                except:
-                    # The first obj is not packed
-                    pass
-            return_cv_obj = cv_obj
+            
             config.logger.info("===========Found new optimum:=======================\n")
             config.logger.info(f'{params}')
             scores.printOut(config=config)
@@ -355,7 +345,7 @@ def bayes_random_init(
 
         for p_pos in reversed(fix_parameters_pos):
             del parameters[p_pos]
-    return x_list, y_list, bounds, n_params, best_scores, best_first_scores, best_params, initial_values, new_optimimum, len(fix_parameters_pos), param_names, integer_type_params, return_cv_obj, slice_slices
+    return x_list, y_list, bounds, n_params, best_scores, best_first_scores, best_params, initial_values, new_optimimum, len(fix_parameters_pos), param_names, integer_type_params, cv_obj, slice_slices
 
 
 # Taken from https://github.com/thuijskens/bayesian-optimization
@@ -915,7 +905,8 @@ def get_scores(
         debug=False,
         force_confusion=False,
         get_first_scores=False,
-        cv_interuption=None
+        cv_interuption=None,
+        gpu_id = None
         ):
     if (score_matrix is not None) and parametersInScoreMatrix(config, score_matrix):
         scores = getFromScoreMatrix(config, score_matrix)
@@ -936,7 +927,8 @@ def get_scores(
             debug=debug,
             force_confusion=force_confusion,
             get_first_scores=get_first_scores,
-            cv_interuption=cv_interuption
+            cv_interuption=cv_interuption,
+            gpu_id = gpu_id
         )
         t1 = time.time()
         config.logger.info(f"Time for training forest in get_scores: {t1 - t0}")
@@ -950,12 +942,17 @@ def get_scores(
 
 
 @ray.remote(max_calls=1)
-def para_eval(package, store, para_number):
+def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_id):
     (config, packed_cv_obj, parameters, samples_store_id, packed_slice_slices, force_confusion, best_first_scores) = store
     cv_obj = unpack(packed_cv_obj)
     slice_slices = unpack(packed_slice_slices)
-    returns = []
-    for params in package:
+
+    not_done = True
+    while not_done:
+        params = com_queue.get()
+        if params is None:
+            break
+
         for pos, para_value in enumerate(params):
             parameters[pos].setValue(config, para_value)
         scores, cv_obj, slice_slices, first_scores = get_scores(
@@ -969,10 +966,11 @@ def para_eval(package, store, para_number):
             para_number=para_number,
             force_confusion=force_confusion,
             get_first_scores=True,
-            cv_interuption=(0.95, best_first_scores))
-        packed_cv_obj = ray.put(pack(cv_obj))
-        returns.append((scores, params, packed_cv_obj, first_scores))
-    return returns
+            cv_interuption=(0.95, best_first_scores),
+            gpu_id = gpu_id)
+        
+        out_queue.put((scores, params, first_scores))
+    return
 
 
 def initConfParameters(config, parameters, thresh_only = False):
