@@ -1290,7 +1290,7 @@ def calc_protein_wise_corr(y_test, y_pred, sample_ids, corr_function, mono_retur
     test_pred_pairs = {}
     for sample_nr, yt_value in enumerate(y_test):
         prot_id, _ = sample_ids[sample_nr]
-        if not prot_id in test_pred_pairs:
+        if prot_id not in test_pred_pairs:
             test_pred_pairs[prot_id] = [], []
         test_pred_pairs[prot_id][0].append(yt_value)
         test_pred_pairs[prot_id][1].append(y_pred[sample_nr])
@@ -1586,111 +1586,66 @@ def radar(labels,values,title,outfile):
     plt.savefig(outfile,dpi=300)
     plt.clf()
 
-def scatterplot(prediction_values,feature_matrix,feature_names,true_values,target_value_name,bal_point,threshold,outfile,feature_highlight=None,subs_map={}):
-
-    highlight_pos = None
-    if feature_highlight != None:
-        for pos,feature_name in enumerate(feature_names):
-            if feature_name == feature_highlight:
-                highlight_pos = pos
-
-                print('Highlight feauture: ',feature_name)
-
-    if subs_map != {}:
-        subs_backmap = {int(y):int(x) for x,y in subs_map.items()}
-    else:
-        subs_backmap = None
-
-    if highlight_pos != None:
-
-        highlight_map = {}
-
-        for pos,predicted_value in enumerate(prediction_values):
-            highlight = feature_matrix[pos][highlight_pos]
-
-            if subs_backmap != None:
-                highlight = subs_backmap[highlight]
-            if feature_highlight.count('Acid') > 0:
-                highlight = aa_order[highlight]
-
-            true_value = true_values[pos]
-
-            if not highlight in highlight_map:
-                highlight_map[highlight] = {}
-                highlight_map[highlight]['TN'] = []
-                highlight_map[highlight]['FN'] = []
-                highlight_map[highlight]['FP'] = []
-                highlight_map[highlight]['TP'] = []
-
-            if true_value < threshold and predicted_value < bal_point:
-                highlight_map[highlight]['TP'].append([true_value,predicted_value])
-            elif true_value < threshold and predicted_value >= bal_point:
-                highlight_map[highlight]['FP'].append([true_value,predicted_value])
-            elif true_value >= threshold and predicted_value >= bal_point:
-                highlight_map[highlight]['TN'].append([true_value,predicted_value])
-            elif true_value >= threshold and predicted_value < bal_point:
-                highlight_map[highlight]['FN'].append([true_value,predicted_value])
+def protein_wise_scatter_plot(y_test, y_pred, sample_ids, scatter_folder, tv_values_name):
+    test_pred_pairs = {}
+    for sample_nr, yt_value in enumerate(y_test):
+        prot_id, _ = sample_ids[sample_nr]
+        if prot_id not in test_pred_pairs:
+            test_pred_pairs[prot_id] = [], []
+        test_pred_pairs[prot_id][0].append(yt_value)
+        test_pred_pairs[prot_id][1].append(y_pred[sample_nr])
 
 
+    for prot_id in test_pred_pairs:
 
-        ax = plt.subplot()
+        scatterfile = f"{scatter_folder}/predicted_value_scatterplot_{prot_id}.png"
 
-        for highlight in highlight_map:
-            TN = highlight_map[highlight]['TN']
-            FN = highlight_map[highlight]['FN']
-            FP = highlight_map[highlight]['FP']
-            TP = highlight_map[highlight]['TP']
+        scatterplot(
+            test_pred_pairs[prot_id][1],
+            test_pred_pairs[prot_id][0],
+            tv_values_name,
+            scatterfile,
+        )
+    return 
 
-            for x,y in TP:
-                plt.text(x,y,str(highlight),alpha=0.5,color='darkgreen')
-            for x,y in FP:
-                plt.text(x,y,str(highlight),alpha=0.5,color='navy')
-            for x,y in TN:
-                plt.text(x,y,str(highlight),alpha=0.5,color='green')
-            for x,y in FN:
-                plt.text(x,y,str(highlight),alpha=0.5,color='blue')
+def scatterplot(prediction_values,true_values,target_value_name,outfile):
 
-        #plt.scatter([],[],alpha=1,color='darkgreen',label='TP: %s' % str(len(TP[0])))
-        #plt.scatter([],[],alpha=1,color='navy',label='FP: %s' % str(len(FP[0])))
-        #plt.scatter([],[],alpha=1,color='green',label='TN: %s' % str(len(TN[0])))
-        #plt.scatter([],[],alpha=1,color='blue',label='FN: %s' % str(len(FN[0])))
+    bal_point = median(prediction_values)
+    threshold = median(true_values)
+    
+    TN = [[],[]]
+    FN = [[],[]]
+    FP = [[],[]]
+    TP = [[],[]]
 
-    else:
+    for pos,predicted_value in enumerate(prediction_values):
+        true_value = true_values[pos]
 
-        TN = [[],[]]
-        FN = [[],[]]
-        FP = [[],[]]
-        TP = [[],[]]
+        if true_value < threshold and predicted_value < bal_point:
+            TP[0].append(true_value)
+            TP[1].append(predicted_value)
+        elif true_value < threshold and predicted_value >= bal_point:
+            FP[0].append(true_value)
+            FP[1].append(predicted_value)
+        elif true_value >= threshold and predicted_value >= bal_point:
+            TN[0].append(true_value)
+            TN[1].append(predicted_value)
+        elif true_value >= threshold and predicted_value < bal_point:
+            FN[0].append(true_value)
+            FN[1].append(predicted_value)
 
-        for pos,predicted_value in enumerate(prediction_values):
-            true_value = true_values[pos]
+    ax = plt.subplot()
 
-            if true_value < threshold and predicted_value < bal_point:
-                TP[0].append(true_value)
-                TP[1].append(predicted_value)
-            elif true_value < threshold and predicted_value >= bal_point:
-                FP[0].append(true_value)
-                FP[1].append(predicted_value)
-            elif true_value >= threshold and predicted_value >= bal_point:
-                TN[0].append(true_value)
-                TN[1].append(predicted_value)
-            elif true_value >= threshold and predicted_value < bal_point:
-                FN[0].append(true_value)
-                FN[1].append(predicted_value)
+    plt.scatter(TP[0],TP[1],alpha=0.5,color='darkgreen')
+    plt.scatter(FP[0],FP[1],alpha=0.5,color='navy')
+    plt.scatter(TN[0],TN[1],alpha=0.5,color='green')
+    plt.scatter(FN[0],FN[1],alpha=0.5,color='blue')
 
+    plt.scatter([],[],alpha=1,color='darkgreen',label='TP: %s' % str(len(TP[0])))
+    plt.scatter([],[],alpha=1,color='navy',label='FP: %s' % str(len(FP[0])))
+    plt.scatter([],[],alpha=1,color='green',label='TN: %s' % str(len(TN[0])))
+    plt.scatter([],[],alpha=1,color='blue',label='FN: %s' % str(len(FN[0])))
 
-
-        ax = plt.subplot()
-
-        plt.scatter(TP[0],TP[1],alpha=0.5,color='darkgreen')
-        plt.scatter(FP[0],FP[1],alpha=0.5,color='navy')
-        plt.scatter(TN[0],TN[1],alpha=0.5,color='green')
-        plt.scatter(FN[0],FN[1],alpha=0.5,color='blue')
-
-        plt.scatter([],[],alpha=1,color='darkgreen',label='TP: %s' % str(len(TP[0])))
-        plt.scatter([],[],alpha=1,color='navy',label='FP: %s' % str(len(FP[0])))
-        plt.scatter([],[],alpha=1,color='green',label='TN: %s' % str(len(TN[0])))
-        plt.scatter([],[],alpha=1,color='blue',label='FN: %s' % str(len(FN[0])))
     plt.legend(loc="upper left",fontsize = 12,framealpha=1,fancybox=True)
     
     min_pred = min(prediction_values)
@@ -1703,8 +1658,6 @@ def scatterplot(prediction_values,feature_matrix,feature_names,true_values,targe
     plt.plot([threshold, threshold],[min_pred, max_pred] , color='red',lw=2)
     plt.plot([min_value, max_value], [ bal_point, bal_point], color='red',lw=2)
     
-
-
     plt.xlabel(target_value_name, fontsize=15)
 
     ax.yaxis.tick_left()
@@ -2020,11 +1973,36 @@ def printMean(score_list,name):
 def median(l):
     n = len(l)
     l = sorted(l)
+    if n == 1:
+        return l[0]
+    if n == 0:
+        return None
     if n % 2 == 0:
-        med = (l[(n//2)-1]+l[n//2])/2.0
+        med = (l[(n // 2) - 1] + l[n // 2]) / 2.0
     else:
-        med = l[(n-1)//2]
+        med = l[(n - 1) // 2]
     return med
+
+def quartered(value_list):
+    n = len(value_list)
+    value_list = sorted(value_list)
+    if n < 3:
+        return None
+
+    threshs = []
+
+    for k in [0.25, 0.5, 0.75]:
+        index = (n-1)*k
+        if index.is_integer():
+            thresh = value_list[int(index)]
+        else:
+            left = int(index)
+            right = left + 1
+            thresh = (value_list[left] + value_list[right]) / 2.0
+            threshs.append(thresh)
+
+    return threshs
+
 
 if __name__ == "__main__":
     disclaimer = 'Here comes the disclaimer'

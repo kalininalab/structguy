@@ -334,17 +334,11 @@ def learn(config, effectRegressor=None, test_config=None):
                     scatterfile = "%s_%s.png" % (base_name, str(cv_counter))
                     hexbinfile = "%s_%s_hexbin.png" % (base_name, str(cv_counter))
 
-                    y_pred_median = util.median(y_pred)
-                    tv_median = util.median(cv_slice.test_targets)
                     util.scatterplot(
                         y_pred,
-                        test_feature_matrix,
-                        cv_slice.feature_names,
                         cv_slice.test_targets,
                         config.target_values,
-                        y_pred_median,
-                        tv_median,
-                        scatterfile,
+                        scatterfile
                     )
                     util.hexbinplot(y_pred, cv_slice.test_targets, config.target_values, hexbinfile)
 
@@ -379,16 +373,11 @@ def learn(config, effectRegressor=None, test_config=None):
             # scatterplot(y_pred,test_feature_matrix,feature_names,test_targets,target_values,0.5,observed_value_threshold,scatterfile,feature_highlight='Class')
             # middle_value = (max(accum_y_pred) + min(accum_y_pred))/2.
             if len(accum_y_pred) > 0:
-                y_pred_median = util.median(accum_y_pred)
-                tv_median = util.median(accum_true_vals)
+
                 util.scatterplot(
                     accum_y_pred,
-                    cv_slice.get_test_feature_matrix(samples),
-                    cv_slice.feature_names,
                     accum_true_vals,
                     config.target_values,
-                    y_pred_median,
-                    tv_median,
                     scatterfile,
                 )
                 util.hexbinplot(accum_y_pred, accum_true_vals, config.target_values, hexbinfile)
@@ -562,12 +551,13 @@ def evaluate_dataset(config: Config):
                 config.logger.info(f"Shape of the feature matrix split: {split_size=}")
             left = i * split_size
             right = (i+1) * split_size
-            y_pred = forest.predict(test_feature_matrix[left:right])
+            y_pred = forest.predict(test_feature_matrix[left:right])99
             total_y_pred += y_pred
         y_pred = total_y_pred
     else:
     """
-    y_pred = forest.predict(test_feature_matrix)
+    dtest_feature_matrix = DMatrix(numpy.array(test_feature_matrix))
+    y_pred = forest.predict(dtest_feature_matrix)
 
     if config.path_to_multi_savs_table is not None:
         multi_savs = util.parse_multi_savs_table(config)
@@ -716,20 +706,19 @@ def evaluate_dataset(config: Config):
             prot_wise_spearmans,
             protein_info,
         )
-        booster_obj = forest.get_booster()
-        tree_df = booster_obj.trees_to_dataframe()
+        tree_df = forest.trees_to_dataframe()
 
         if config.trace_decisions:
             if isinstance(forest, RandomForestRegressor):
                 decisions, pred_std_vector = featureAnalysis.explain_decisions(config, forest, y_pred, test_feature_matrix, extern_feature_names_list, feat_stats)
             else:
                 # sample_wise_feature_influence, _ = trainForest.perturb_xgb(config, config.path_to_model, test_feature_matrix, extern_feature_names_list, y_pred, test_targets, get_sample_wise_data=True, get_feat_impacts=False)
-                forest.get_booster().feature_names = extern_feature_names_list
+                forest.feature_names = extern_feature_names_list
 
                 # explainer = shap.TreeExplainer(forest)
                 # explanation = explainer(test_feature_matrix)
                 dtest_feature_matrix = DMatrix(test_feature_matrix, feature_names=extern_feature_names_list)
-                explanation = forest.get_booster().predict(dtest_feature_matrix, pred_contribs=True)
+                explanation = forest.predict(dtest_feature_matrix, pred_contribs=True)
                 # config.logger.info(explanation[0])
 
                 # for pos, shap_val in enumerate(explanation[0][:-1]):
@@ -761,7 +750,7 @@ def evaluate_dataset(config: Config):
                         os.makedirs(super_tree_folder)
                     tree_id = 0
                     
-                    for tree in booster_obj:
+                    for tree in forest:
                         outfile = f"{super_tree_folder}/super_tree_{tree_id}.html"
                         st.save_html(which_tree=tree_id, filename=outfile)
                         tree_id += 1
@@ -837,6 +826,19 @@ def evaluate_dataset(config: Config):
             header += "\n"
             lines = [header]
 
+            if config.target_values is not None:
+                eval_header = "Protein ID\tSAV\tPredicted effect value\tTrue value"
+                for i in range(len(feature_categories)):
+                    eval_header += f"\tFeature category {i + 1}\tShap value\tTop feature of category {i + 1}\tFeature Shap value\tFeat value"
+                eval_header += "\n"
+                eval_lines = [eval_header]
+
+                full_eval_header = "Protein ID\tSAV\tPredicted effect value\tTrue value"
+                for feat_name in extern_feature_names_list:
+                    full_eval_header += f'\t{feat_name}'
+                full_eval_header += "\n"
+                full_eval_lines = [full_eval_header]
+
             if config.plot_sample_forces:
                 force_plot_folder = f"{config.outfolder}/force_plots"
                 if not os.path.isdir(force_plot_folder):
@@ -844,7 +846,7 @@ def evaluate_dataset(config: Config):
 
             if config.calc_sd:
                 ind_preds = []
-                for tree_id, tree in enumerate(booster_obj):
+                for tree_id, tree in enumerate(forest):
                     ind_pred = tree.predict(DMatrix(test_feature_matrix, feature_names = extern_feature_names_list))
                     ind_preds.append(ind_pred)
 
@@ -855,6 +857,11 @@ def evaluate_dataset(config: Config):
                 prot_id, aac = sample_id
 
                 words = [prot_id, aac, str(pred_value)]
+
+                if config.target_values is not None:
+                    eval_words = words[:]
+                    eval_words.append(str(test_targets[pos]))
+                    full_eval_words = eval_words[:]
 
                 if config.calc_sd:
                     pred_std = numpy.std(ind_preds[pos])
@@ -906,72 +913,60 @@ def evaluate_dataset(config: Config):
                         else:
                             val = None
                         words.append(f"{max_feat} (shap={max_feat_shap}, {val=})")
-                    """
-                    #count = 0
-                    if pos < len(sample_wise_feature_influence):
 
-                        categorized_impacts = {}
-                        for feat_name, feat_impact, feat_val in sample_wise_feature_influence[pos]:
-                            if feat_name[:3] == 'oh_' and feat_val == 0:
-                                continue
-                            try:
-                                feat_cat = feature_categories[util.catogrize_feat_by_name(feat_name)]
-                            except TypeError:
-                                config.logger.info(f'{feat_name} could not be categorized')
-                                continue
-                            if feat_cat not in categorized_impacts:
-                                categorized_impacts[feat_cat] = [[], 0., None, None]
-                            categorized_impacts[feat_cat][0].append(feat_impact)
-                            if abs(feat_impact) >= abs(categorized_impacts[feat_cat][1]):
-                                categorized_impacts[feat_cat][1] = feat_impact
-                                categorized_impacts[feat_cat][2] = feat_name
-                                categorized_impacts[feat_cat][3] = feat_val
+                        if config.target_values is not None:
+                            eval_words.append(feat_cat)
+                            eval_words.append(str(shap_val))
+                            eval_words.append(max_feat)
+                            eval_words.append(str(max_feat_shap))
+                            eval_words.append(str(val))
 
-                        categorized_impacts_list = []
-                        for feat_cat in categorized_impacts:
-                            feat_impacts, max_impact, max_feat, max_feat_val = categorized_impacts[feat_cat]
-                            impact_sum = sum(feat_impacts)
-                            mean_impact = impact_sum/len(feat_impacts)
-
-                            categorized_impacts_list.append((feat_cat, impact_sum, mean_impact, max_impact, max_feat, max_feat_val))
-
-                        categorized_impacts_list = sorted(categorized_impacts_list, key=lambda x:abs(x[1]), reverse=True)
-
-                        for (feat_cat, impact_sum, mean_impact, max_impact, max_feat, max_feat_val) in categorized_impacts_list:
-                            if impact_sum < 0:
-                                words.append(f'{feat_cat} features skews prediction towards functional consequence')
-                            else:
-                                words.append(f'{feat_cat} features skews prediction towards wiltype-like effect')
-                            words.append(str(impact_sum))
-                            words.append(str(mean_impact))
-                            words.append(f'{max_feat} (val={max_feat_val}) has impact {max_impact}')
-                    """
+                    for feat_pos, feat_name in enumerate(extern_feature_names_list):
+                        shap_val = explanation[pos][feat_pos]
+                        feat_val = test_feature_matrix[pos][feat_pos]
+                        full_eval_words.append(f'{shap_val},{feat_val}')
 
                 line = "\t".join(words) + "\n"
                 lines.append(line)
+                if config.target_values is not None:
+                    eval_line = "\t".join(eval_words) + "\n"
+                    eval_lines.append(eval_line)
+
+                    full_eval_line = "\t".join(full_eval_words) + "\n"
+                    full_eval_lines.append(full_eval_line)
+
 
         predictions_file = f"{config.outfolder}/predictions_by_{model_name}.tsv"
         f = open(predictions_file, "w")
         f.write("".join(lines))
         f.close()
+        if config.target_values is not None:
+            eval_predictions_file = f"{config.outfolder}/predictions_by_{model_name}_with_eval.tsv"
+            f = open(eval_predictions_file, "w")
+            f.write("".join(eval_lines))
+            f.close()
+
+            full_eval_predictions_file = f"{config.outfolder}/predictions_by_{model_name}_full_eval.tsv"
+            f = open(full_eval_predictions_file, "w")
+            f.write("".join(full_eval_lines))
+            f.close()
 
         if config.produce_scatterplot and config.target_values is not None:
             scatterfile = f"{config.outfolder}/predicted_value_scatterplot.png"
             hexbinfile = f"{config.outfolder}/predicted_value_hexbinplot.png"
 
-            y_pred_median = util.median(y_pred)
-            tv_median = util.median(test_targets)
             util.scatterplot(
                 y_pred,
-                test_feature_matrix,
-                extern_feature_names_list,
                 test_targets,
                 config.target_values,
-                y_pred_median,
-                tv_median,
                 scatterfile,
             )
             util.hexbinplot(y_pred, test_targets, config.target_values, hexbinfile)
+
+            scatter_folder = f"{config.outfolder}/scatter_plots"
+            if not os.path.isdir(scatter_folder):
+                os.makedirs(scatter_folder)
+            util.protein_wise_scatter_plot(test_targets, y_pred, combined_sample_id_list, scatter_folder, config.target_values)
 
         return mean_spearman, combined_test_targets, combined_y_pred
     elif model_config.regression:
