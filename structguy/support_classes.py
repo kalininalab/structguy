@@ -1027,6 +1027,10 @@ class CrossValidationSlice(Slotted_obj):
         self.sub_sampled_train_class_weight_vector = [self.train_class_weight_vector[pos] for pos in sub_sampled_ids]
 
     def get_train_feature_matrix(self, samples, sub_sampling = 1.0) -> list[list[int | float | None]]:
+        if len(self.train_sample_ids) == 0:
+            raise ValueError(f'No training samples in get_train_feature_matrix: {self.train_sample_ids=}')
+        if len(self.feature_names) == 0:
+            raise ValueError(f'No features in get_train_feature_matrix: {self.feature_names=}')
         if sub_sampling == 1.0:
             feat_matrix: list[list[int | float | None]] = samples.get_feat_matrix_from_ids(self.train_sample_ids, self.feature_names)
         else:

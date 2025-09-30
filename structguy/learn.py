@@ -156,7 +156,7 @@ def learn(config, effectRegressor=None, test_config=None):
 
         if config.verbosity >= 1:
             config.logger.info(f"{len(cv_slice.train_targets)=}")
-            config.logger.info("Testset length: ", len(cv_slice.test_targets))
+            config.logger.info(f"{len(cv_slice.test_targets)=}")
 
         debug = config.debug_mode
         if (
@@ -210,12 +210,11 @@ def learn(config, effectRegressor=None, test_config=None):
                 samples_store_id=samples_store_id,
                 slice_slices=initial_training_input.slice_slices,
                 samples=samples,
-                distance_map=distance_map,
                 repeat=config.repeat_training,
                 cv_repeat=config.cv_hpo,
                 print_out=True,
                 debug=debug,
-                remote=False,
+                remote=(config.multi_gpu >= len(initial_training_input.slices)),
                 get_first_scores=True,
             )
             hpo.threeDimHyperOptimization(

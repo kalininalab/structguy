@@ -5,6 +5,7 @@ import statistics
 import numpy as np
 from psutil import virtual_memory
 from scipy import stats
+import math
 
 import pickle
 import matplotlib
@@ -830,41 +831,41 @@ class Config:
         return sct
 
     def logParameter(self):
-        self.logger.info('Depth:',self.tree_depth)
-        self.logger.info('Min sample split:',self.min_sample_split)
-        self.logger.info('Min sample leaf:',self.tree_min_leaf_samples)
-        self.logger.info('Forest size:',self.num_of_trees)
-        self.logger.info('Class weight:',self.class_weight)
-        self.logger.info('Max features:',self.max_feature_parameter)
-        self.logger.info('Max features continuous:', self.max_feature_cont_parameter)
-        self.logger.info('Bootstrap:',self.bootstrap_parameter)
-        self.logger.info('Min impurity decrease exponent:',self.min_impurity_decrease_exp)
-        self.logger.info('Out of bag:',self.oob_score)
-        self.logger.info('CCP alpha exponent:',self.ccp_alpha_exp)
+        self.logger.info(f'Depth: {self.tree_depth}')
+        self.logger.info(f'Min sample split: {self.min_sample_split}')
+        self.logger.info(f'Min sample leaf: {self.tree_min_leaf_samples}')
+        self.logger.info(f'Forest size: {self.num_of_trees}')
+        self.logger.info(f'Class weight: {self.class_weight}')
+        self.logger.info(f'Max features: {self.max_feature_parameter}')
+        self.logger.info(f'Max features continuous: {self.max_feature_cont_parameter}')
+        self.logger.info(f'Bootstrap: {self.bootstrap_parameter}')
+        self.logger.info(f'Min impurity decrease exponent: {self.min_impurity_decrease_exp}')
+        self.logger.info(f'Out of bag: {self.oob_score}')
+        self.logger.info(f'CCP alpha exponent: {self.ccp_alpha_exp}')
         self.logger.info(f'Learning rate: {self.learning_rate}')
         self.logger.info(f'Min Child Weight: {self.min_child_weight}')
         self.logger.info(f'Early stopping: {self.early_stopping}')
-        self.logger.info('Max sample:',self.max_sample_parameter)
+        self.logger.info(f'Max sample: {self.max_sample_parameter}')
         self.logger.info(f'XGB gamma: {self.xgb_gamma}')
         self.logger.info(f'XGB alpha: {self.xgb_alpha}')
         self.logger.info(f'XGB lambda: {self.xgb_lambda}')
         self.logger.info(f'XGB colsample_bytree: {self.colsample_bytree}')
         self.logger.info(f'XGB max delta step: {self.max_delta_step}')
         self.logger.info(f'feat_impact_thresh: {self.feat_impact_thresh}')
-        self.logger.info('TVMB rank threshold:',self.tvmb_rank_threshold)
-        self.logger.info('TVPMB rank threshold:',self.tvpmb_rank_threshold)
-        self.logger.info('Confusion rank threshold:', self.confusion_rank_threshold)
-        self.logger.info('Sequential confusion rank threshold:', self.sequential_confusion_rank_threshold)
-        self.logger.info('Confusion error warping exponent:', self.err_warping_exp)
-        self.logger.info('Confusion normalization exponent:', self.confusion_normalization_exp)
-        self.logger.info('Criterion:',self.criterion)
-        self.logger.info('Number of bins:',self.number_of_bins)
-        self.logger.info('p-value threshold:',self.p_val_thresh)
-        self.logger.info('Sample weight parameter:',self.sample_weight_parameter)
-        self.logger.info('Regularization alpha exponent:', self.reg_alpha_exp)
-        self.logger.info('Regularization C exponent:', self.reg_c_exp)
-        self.logger.info('Regularization threshold exponent:', self.reg_thresh_exp)
-        self.logger.info('Geometric exponent:', self.geometric_exponent)
+        self.logger.info(f'TVMB rank threshold: {self.tvmb_rank_threshold}')
+        self.logger.info(f'TVPMB rank threshold: {self.tvpmb_rank_threshold}')
+        self.logger.info(f'Confusion rank threshold: {self.confusion_rank_threshold}')
+        self.logger.info(f'Sequential confusion rank threshold: {self.sequential_confusion_rank_threshold}')
+        self.logger.info(f'Confusion error warping exponent: {self.err_warping_exp}')
+        self.logger.info(f'Confusion normalization exponent: {self.confusion_normalization_exp}')
+        self.logger.info(f'Criterion: {self.criterion}')
+        self.logger.info(f'Number of bins: {self.number_of_bins}')
+        self.logger.info(f'p-value threshold: {self.p_val_thresh}')
+        self.logger.info(f'Sample weight parameter: {self.sample_weight_parameter}')
+        self.logger.info(f'Regularization alpha exponent: {self.reg_alpha_exp}')
+        self.logger.info(f'Regularization C exponent: {self.reg_c_exp}')
+        self.logger.info(f'Regularization threshold exponent: {self.reg_thresh_exp}')
+        self.logger.info(f'Geometric exponent: {self.geometric_exponent}')
         self.logger.info(f'Confusion goodwill: {self.confusion_goodwill}')
         self.logger.info(f'List ranking thresh: {self.list_ranking_thresh}')
         self.logger.info(f'FS tree depth: {self.fs_tree_depth}')
@@ -1128,13 +1129,13 @@ class Scores:
     __slots__ = [
                     'mse', 'wmse', 'r2', 'wr2', 'corr', 'acc', 'roc', 'precision', 'recall', 'f1',
                     'mcc', 'pearson_r', 'n_of_features', 'mean_spearman', 'mean_pearson', 'feature_penalty',
-                    'train_scores'
+                    'train_scores', 'runtime_penalty'
                 ]
     def __init__(
                     self, mse = None, r2 = None, corr = None, acc = None, roc = None, precision = None,
                     recall = None, f1 = None, mcc = None, pearson_r = None, zero = False, wmse = None,
                     wr2 = None, optimal = False, n_of_features = None, mean_spearman = None, 
-                    mean_pearson = None, feature_penalty = None
+                    mean_pearson = None, feature_penalty = None, runtime_penalty = 0.
                 ):
         self.n_of_features = n_of_features
         self.feature_penalty = feature_penalty
@@ -1154,6 +1155,7 @@ class Scores:
             self.pearson_r = 0.0
             self.mean_spearman = 0.0
             self.mean_pearson = 0.0
+            self.runtime_penalty = 999_999_999.
             return
         elif optimal:
             self.mse = 0.
@@ -1170,6 +1172,7 @@ class Scores:
             self.pearson_r = 1.0
             self.mean_spearman = 1.0
             self.mean_pearson = 1.0
+            self.runtime_penalty = 0.
             return
         self.mse = mse
         self.wmse = wmse
@@ -1185,6 +1188,7 @@ class Scores:
         self.pearson_r = pearson_r
         self.mean_spearman = mean_spearman
         self.mean_pearson = mean_pearson
+        self.runtime_penalty = runtime_penalty
         return
 
     def logger_print(self,config):
@@ -1363,7 +1367,7 @@ def objective_function_criterium(config, scores, best_scores, feature_penalty = 
 
     return better
 
-def get_objective_score(config, scores, feature_penalty = None):
+def get_objective_score(config: Config, scores: Scores, feature_penalty = None):
     if scores is None:
         return False
 
@@ -1395,10 +1399,13 @@ def get_objective_score(config, scores, feature_penalty = None):
 
     if feature_penalty is not None and scores.n_of_features is not None and score is not None:
         scores.feature_penalty = scores.n_of_features*feature_penalty
+        rp = math.log(max([1.0,(scores.runtime_penalty/3600.)]))*0.001
         if greater_is_better:
             score -= scores.feature_penalty
+            score -= rp
         else:
             score += scores.feature_penalty
+            score += rp
 
     return score
 

@@ -185,7 +185,7 @@ def para_prediction(forest_dump_file, feat_matrix):
     pred = forest.predict(feat_matrix)
     return pred
 
-@ray.remote(max_calls=1)
+@ray.remote(max_calls=1, num_gpus=1)
 def trainRegressionForestWrapper(
     config,
     cv_slice,
@@ -200,7 +200,9 @@ def trainRegressionForestWrapper(
     skip_feature_selection=False,
     force_confusion=False,
     score_train=True,
+    
 ):
+    gpu_id = ray.get_runtime_context().get_accelerator_ids()["GPU"][0]
     return trainRegressionForest(
         config,
         unpack(cv_slice),
@@ -216,6 +218,7 @@ def trainRegressionForestWrapper(
         overwrite_proc_n=overwrite_proc_n,
         force_confusion=force_confusion,
         score_train=score_train,
+        gpu_id=gpu_id
     )
 
 
@@ -507,51 +510,6 @@ def return_zero(zero_return, remote, cv_slice):
     return zero_return
 
 
-"""
-def using_dask_matrix(client: Client, X: da.Array, y: da.Array, config: util.Config, es_list, train_weights, data_tuple_list) -> da.Array:
-    # DaskDMatrix acts like normal DMatrix, works as a proxy for local DMatrix scatter
-    # around workers.
-    dtrain = DaskDMatrix(client, X, y)
-
-    # Use train method from xgboost.dask instead of xgboost.  This distributed version
-    # of train returns a dictionary containing the resulting booster and evaluation
-    # history obtained from evaluation metrics.
-
-    xgb_params = {
-        "tree_method": "hist",
-        "device": "cuda",
-        "sample_weight": "train_weights",
-        "n_estimators": "int(config.num_of_trees)",
-        "max_depth": "config.tree_depth",
-        "reg_alpha ": " config.xgb_alpha",
-        "reg_lambda ": " config.xgb_lambda",
-        "colsample_bytree ": " config.colsample_bytree",
-        "max_delta_step ": " config.max_delta_step",
-        "gamma": "config.xgb_gamma",
-        "learning_rate": "config.learning_rate",
-        "min_child_weight": "config.min_child_weight",
-        "early_stopping_rounds": "config.early_stopping",
-        "subsample": "config.max_sample_parameter",
-        "callbacks": "es_list",
-        "eval_metric": "util.rho_eval_for_xgboost",
-        }
-            
-    output = dxgb.train(
-        client,
-        # Make sure the device is set to CUDA.
-        xgb_params,
-        dtrain,
-        
-        evals=data_tuple_list,
-    )
-    bst = output["booster"]
-    #history = output["history"]
-
-    # you can pass output directly into `predict` too.
-    #prediction = dxgb.predict(client, bst, dtrain)
-    #config.logger.info("Evaluation history:", history)
-    return bst
-"""
 def rho_eval_for_xgboost_cb(predt: numpy.ndarray, dtest: xgb.DMatrix) -> tuple[str, float]:
     if isinstance(dtest, xgb.DMatrix):
         y = dtest.get_label()
@@ -560,72 +518,32 @@ def rho_eval_for_xgboost_cb(predt: numpy.ndarray, dtest: xgb.DMatrix) -> tuple[s
     corr, _ = stats.spearmanr(predt, y)
     return 'irho', (1.0-corr)
 
-def ray_xgb_train_func(packed_params):
-    dump_path = packed_params['dump_path']
-    f = open(dump_path, 'rb')
-    packed_par = f.read()
-    f.close()
-    params = unpack(packed_par)
-
-    train_ds_iter = ray.train.get_dataset_shard("train")
-    
-    train_df = train_ds_iter.materialize().to_pandas()
-
-    train_X, train_y = train_df.drop("y", axis=1).to_numpy(), train_df["y"].to_numpy()
-    train_X = numpy.concatenate([list(x) for x in train_X])
-
-    
-    dtrain = xgb.DMatrix(train_X, label=train_y)
-    #dtrain = xgb.DMatrix(params["train_feature_matrix"], params["train_targets"], weight = params["train_weights"])
-
-    es_list = []
-    es_list.append(RayTrainReportCallback(metrics = ['irho'], checkpoint_at_end=True))
-    data_tuple_list: list[tuple[list[list[int | float | None]], list[float]]] = []
-    for n, prot_id in enumerate(params["protwise_test_data_tuples"]):
-        es = xgb.callback.EarlyStopping(
-            rounds=params["early_stopping"],
-            min_delta=1e-3,
-            save_best=True,
-            maximize=False,
-            data_name=f"validation_{n}",
-            metric_name='irho'
-        )
-        es_list.append(es)
-        data_tuple_list.append((xgb.DMatrix(numpy.array(params["protwise_test_data_tuples"][prot_id][0]), numpy.array(params["protwise_test_data_tuples"][prot_id][1])), f"valid_{n}"))
-
-
-
-    xgb_params = {
-        "tree_method": "hist",
-        "device": "cuda",
-        "max_depth": params["max_depth"],
-        "reg_alpha": params["reg_alpha"],
-        "reg_lambda": params["reg_lambda"],
-        "colsample_bytree": params["colsample_bytree"],
-        "max_delta_step": params["max_delta_step"],
-        "gamma": params["gamma"],
-        "learning_rate": params["learning_rate"],
-        "min_child_weight": params["min_child_weight"],
-        "early_stopping_rounds": params["early_stopping"],
-        "subsample": params["subsample"],
-        "callbacks": es_list,
-        #"eval_metric": ['irho'],
-        }
-    
-    bst = xgb.train(xgb_params, dtrain, num_boost_round=int(params["num_of_trees"]), evals=data_tuple_list, maximize=False, custom_metric=rho_eval_for_xgboost_cb)
-
 def xgb_train_wrapper(
         config: util.Config,
         train_feature_matrix: list[list[int | float | None]],
         train_targets: list[float],
-        protwise_test_data_tuples: list[tuple[list[list[int | float | None]], list[float]]],
-        train_weights: list[float],
-        label: str = '',
+        dtest_feature_matrix: xgb.DMatrix,
         gpu_id = None):
         
-    params = {
-        "num_of_trees" : config.num_of_trees,
-        "early_stopping" : config.early_stopping,
+    dtrain = xgb.DMatrix(numpy.array(train_feature_matrix), label= numpy.array(train_targets))#, weight = params["train_weights"])
+
+    es_list = []
+    evals: list[tuple[xgb.DMatrix, str]] = []
+    eval_label = 'eval'
+    es = xgb.callback.EarlyStopping(
+        rounds=config.early_stopping,
+        min_delta=1e-3,
+        save_best=True,
+        maximize=False,
+        data_name='eval',
+        metric_name='irho',
+    )
+    es_list.append(es)
+    evals.append((dtest_feature_matrix, eval_label))
+
+    xgb_params = {
+        "tree_method": "hist",
+        "device": "cuda",
         "max_depth": config.tree_depth,
         "reg_alpha": config.xgb_alpha,
         "reg_lambda": config.xgb_lambda,
@@ -636,48 +554,13 @@ def xgb_train_wrapper(
         "min_child_weight": config.min_child_weight,
         "early_stopping_rounds": config.early_stopping,
         "subsample": config.max_sample_parameter,
-        "train_feature_matrix" : train_feature_matrix,
-        "train_targets" : train_targets,
-        "train_weights" : train_weights,
-        "protwise_test_data_tuples" : protwise_test_data_tuples,
-    }
-
-    dtrain = xgb.DMatrix(params["train_feature_matrix"], params["train_targets"], weight = params["train_weights"])
-
-    es_list = []
-    data_tuple_list: list[tuple[list[list[int | float | None]], list[float]]] = []
-    for n, prot_id in enumerate(params["protwise_test_data_tuples"]):
-        es = xgb.callback.EarlyStopping(
-            rounds=params["early_stopping"],
-            min_delta=1e-3,
-            save_best=True,
-            maximize=False,
-            data_name=f"validation_{n}",
-            metric_name='irho',
-        )
-        es_list.append(es)
-        data_tuple_list.append((xgb.DMatrix(numpy.array(params["protwise_test_data_tuples"][prot_id][0]), numpy.array(params["protwise_test_data_tuples"][prot_id][1])), f"valid_{n}"))
-
-    xgb_params = {
-        "tree_method": "hist",
-        "device": "cuda",
-        "max_depth": params["max_depth"],
-        "reg_alpha": params["reg_alpha"],
-        "reg_lambda": params["reg_lambda"],
-        "colsample_bytree": params["colsample_bytree"],
-        "max_delta_step": params["max_delta_step"],
-        "gamma": params["gamma"],
-        "learning_rate": params["learning_rate"],
-        "min_child_weight": params["min_child_weight"],
-        "early_stopping_rounds": params["early_stopping"],
-        "subsample": params["subsample"],
         "callbacks": es_list,
         #"eval_metric": ['irho'],
         "disable_default_eval_metric": True
         }
-    if gpu_id is not None:
-        xgb_params['gpu_id'] = gpu_id
-    forest = xgb.train(xgb_params, dtrain, num_boost_round=int(params["num_of_trees"]), evals=data_tuple_list, maximize=False, custom_metric=rho_eval_for_xgboost_cb)
+    #if gpu_id is not None:
+    #    xgb_params['gpu_id'] = gpu_id
+    forest = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees), early_stopping_rounds= config.early_stopping, evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
 
     return forest
 
@@ -700,7 +583,7 @@ def trainRegressionForest(
     gpu_id=None
 ):
     times = []
-    ta = time.time()
+    t_start = ta = time.time()
 
 
     depth = config.tree_depth
@@ -801,7 +684,7 @@ def trainRegressionForest(
 
     ta = add_to_times(times, ta) #0
     if config.verbosity >= 2:
-        config.logger.info(f"Train regression forest part 1, Threads: {proc}, Feature selection: {not skip_feature_selection} {samples is None=} {config.forest_type=} {config.gpu_mode=} {config.multi_gpu=}")
+        config.logger.info(f"Train regression forest part 1, Threads: {proc} {gpu_id=}, Feature selection: {not skip_feature_selection} {samples is None=} {config.forest_type=} {config.gpu_mode=} {config.multi_gpu=}")
 
     if not skip_feature_selection and not config.random_split:
         get_loss_map = False
@@ -868,7 +751,7 @@ def trainRegressionForest(
         if samples is None:
             samples = unpack(ray.get(samples_store_id))
 
-        protwise_test_data_tuples = slice_slice.get_prot_wise_test_data_tuples(samples)
+        #protwise_test_data_tuples = slice_slice.get_prot_wise_test_data_tuples(samples)
 
     elif skip_feature_selection:
         forest = RandomForestRegressor(
@@ -917,14 +800,15 @@ def trainRegressionForest(
         train_feature_matrix: list[list[int | float | None]] = slice_slice.get_train_feature_matrix(samples, sub_sampling=config.sub_sample_factor)
         if config.sub_sample_factor == 1.0:
             train_targets = slice_slice.train_targets
-            train_weights = slice_slice.train_class_weight_vector
         else:
             train_targets = slice_slice.sub_sampled_train_targets
-            train_weights = slice_slice.sub_sampled_train_class_weight_vector
+
+        test_feature_matrix = slice_slice.get_test_feature_matrix(samples)
+        dtest_feature_matrix = xgb.DMatrix(numpy.array(test_feature_matrix), label=numpy.array(slice_slice.test_targets))
 
         ta = add_to_times(times, ta) #6
 
-        forest = xgb_train_wrapper(config, train_feature_matrix, train_targets, protwise_test_data_tuples, train_weights, gpu_id)
+        forest = xgb_train_wrapper(config, train_feature_matrix, train_targets, dtest_feature_matrix, gpu_id)
         if forest is None:
             return return_zero(zero_return, remote, cv_slice)
 
@@ -977,9 +861,11 @@ def trainRegressionForest(
             
             #with FileLock("rf_regressor.lock"):
             
-            protwise_test_data_tuples = slice_slice.get_prot_wise_test_data_tuples(samples)
+            #protwise_test_data_tuples = slice_slice.get_prot_wise_test_data_tuples(samples)
+            test_feature_matrix = slice_slice.get_test_feature_matrix(samples)
+            dtest_feature_matrix = xgb.DMatrix(numpy.array(test_feature_matrix), label=numpy.array(slice_slice.test_targets))
 
-            forest = xgb_train_wrapper(config, train_feature_matrix, train_targets, protwise_test_data_tuples, train_weights, gpu_id)
+            forest = xgb_train_wrapper(config, train_feature_matrix, train_targets, dtest_feature_matrix, gpu_id)
             if forest is None:
                 return return_zero(zero_return, remote, cv_slice)
 
@@ -1064,9 +950,12 @@ def trainRegressionForest(
             datastructure_name=f"Predictions of {cv_slice.name}",
         )
 
-    scores_obj = calc_scores_obj(cv_slice.test_targets, y_pred, cv_slice.test_sample_ids, cv_slice.test_class_weight_vector, cv_slice.feature_names)
+    t_end  = time.time()
+    t_complete = t_end-t_start
+
+    scores_obj = calc_scores_obj(cv_slice.test_targets, y_pred, cv_slice.test_sample_ids, cv_slice.test_class_weight_vector, cv_slice.feature_names, runtime_penalty = t_complete)
     if score_train:
-        train_scores_obj = calc_scores_obj(train_targets, x_pred, train_sample_ids, train_weights, cv_slice.feature_names)
+        train_scores_obj = calc_scores_obj(train_targets, x_pred, train_sample_ids, train_weights, cv_slice.feature_names, runtime_penalty = t_complete)
         scores_obj.train_scores = train_scores_obj
         if print_out:
             config.logger.info('Train scores:')
@@ -1082,7 +971,7 @@ def trainRegressionForest(
     return forest, scores_obj, cv_counter, cv_slice, times, slice_slices
 
 
-def calc_scores_obj(target_vector, prediction_vector, sample_id_vector, weight_vector, feature_names):
+def calc_scores_obj(target_vector, prediction_vector, sample_id_vector, weight_vector, feature_names, runtime_penalty = 0.):
     weighted_r2 = r2_score(target_vector, prediction_vector, sample_weight=weight_vector)
     weighted_mse = mean_squared_error(target_vector, prediction_vector, sample_weight=weight_vector)
 
@@ -1121,6 +1010,7 @@ def calc_scores_obj(target_vector, prediction_vector, sample_id_vector, weight_v
         n_of_features=len(feature_names),
         mean_spearman=mean_spearman,
         mean_pearson=mean_pearson,
+        runtime_penalty=runtime_penalty
     )
     return scores_obj
 
@@ -1135,7 +1025,7 @@ def trainForest(
     print_out=False,
     cv_repeat=False,
     skip_scoring=False,
-    remote=True,
+    remote=False,
     debug=False,
     para_number=None,
     skip_feature_selection=False,
@@ -1150,7 +1040,6 @@ def trainForest(
     # if para_number == 1:
 
     if config.suppress_remote_forests or debug or config.gpu_mode:
-        remote = False
         para_number = None
 
     if not cv_repeat:
@@ -1244,14 +1133,14 @@ def trainForest(
         else:
             cv_slice_stores = None
 
-        for cv_counter in cv_counters:
+        for cv_id, cv_counter in enumerate(cv_counters):
             cv_slice: CrossValidationSlice = cross_val_object.slices[cv_counter]
             if remote:
                 t01 = time.time()
                 packed_cv_slice: bytes = pack(cv_slice)
                 cv_slice_stores[cv_counter] = packed_cv_slice
                 t02 = time.time()
-                if config.verbosity >= 3:
+                if config.verbosity >= 2:
                     config.logger.info(f"Time for packing cv_slice {cv_counter=} in trainForest: {t02 - t01} {slice_slices is None=} {para_number=} {(samples_store_id is None)=}")
 
             if slice_slices is not None and cv_counter in slice_slices:
@@ -1277,7 +1166,6 @@ def trainForest(
                         skip_scoring=skip_scoring,
                         force_confusion=force_confusion,
                         score_train=score_train,
-                        gpu_id = gpu_id
                     )
                 )
                 

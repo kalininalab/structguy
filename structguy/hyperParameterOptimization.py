@@ -140,6 +140,7 @@ def bayes_random_init(
     initial_values = [p.getValue(config) for p in parameters]
 
     integer_type_params = set()
+    fix_parameters_pos = []
 
     for parameter_number, parameter in enumerate(parameters):
         if parameter.param_type == "integer":
@@ -159,25 +160,24 @@ def bayes_random_init(
     if n_pre_samples is None:
         n_pre_samples = min([config.proc_n, (2*n_params) + 1])
 
+    if config.multi_gpu > 1:
+        n_pre_samples = max([n_pre_samples, config.multi_gpu])
+
     if debug:
         n_pre_samples = 2  # Just for testing
 
-    sample_size_threshold = config.gigs_of_ram * 3000
-    n_of_samples = len(initial_cv_obj.slices[0].train_targets) + len(initial_cv_obj.slices[0].test_targets)
-
-    number_of_sub_jobs = min([len(initial_cv_obj.slices) * (len(initial_cv_obj.slices) - 1), 1])
-
-    if config.multi_gpu > 1:
-        para_random_init = True
-    else:
-        para_random_init = False
-
-    para_random_init = False
-
-    config.logger.info(f"bayesian optimization: {param_names}, {n_pre_samples=}, {para_random_init=}")
+    config.logger.info(f"bayesian optimization: {param_names}, {n_pre_samples=}")
     config.logger.info("Current best scores:")
     best_scores.printOut(config=config)
     config.logger.info(f"Objective score: {best_scores.objective_value(config)}")
+
+    if config.multi_gpu > 1:
+        #para_random_init = True
+        store = ray.put((config, pack(initial_cv_obj), parameters, samples_store_id, pack(slice_slices), force_confusion, best_first_scores))
+        return x_list, y_list, bounds, n_params, best_scores, best_first_scores, best_params, initial_values, new_optimimum, len(fix_parameters_pos), param_names, integer_type_params, initial_cv_obj, slice_slices, store
+    else:
+        para_random_init = False
+
 
     t0 = time.time()
 
@@ -185,8 +185,6 @@ def bayes_random_init(
     if para_random_init:
         results = []
         randomized_parameters = np.random.uniform(bounds[:, 0], bounds[:, 1], (n_pre_samples, bounds.shape[0]))
-        max_packages = min([max([2, 4 * (sample_size_threshold // n_of_samples)]), len(randomized_parameters) - 1, 4])
-        packagesize = math.ceil((n_pre_samples - 1) / max_packages)
 
         # Always calculate one set of parameters unparalized to set the confusion maps (or other slice specific stuff that resets after each round of the HPO)
         init_params = randomized_parameters[0]
@@ -198,13 +196,9 @@ def bayes_random_init(
 
         store = ray.put((config, pack(initial_cv_obj), parameters, samples_store_id, pack(slice_slices), force_confusion, best_first_scores))
 
-        config.logger.info(f"after store init, samples is None: {samples is None}, max_packages: {max_packages}, package_size: {packagesize}")
+        config.logger.info(f"after store init, samples is None: {samples is None}")
 
-        para_number = config.proc_n // max_packages
-
-        if number_of_sub_jobs > 0:
-            if para_number % number_of_sub_jobs != 0:
-                para_number = ((para_number // number_of_sub_jobs) + 1) * number_of_sub_jobs
+        para_number = config.proc_n // config.multi_gpu
 
         current_params_id = 0
         remote_processes = []
@@ -216,7 +210,7 @@ def bayes_random_init(
             proc_id = para_eval.remote(com_queue, out_queue, store, para_number, gpu_id)
             remote_processes.append((com_queue, out_queue, proc_id))
 
-        config.logger.info(f"Para random init started: # of packages: {len(para_eval_ret_ids)} # of subthreads: {para_number}")
+        config.logger.info(f"Para random init started: # of packages: {len(para_eval_ret_ids)} # of subthreads: {para_number} {len(remote_processes)=}")
 
         dones = []
         for i in range(len(remote_processes)):
@@ -226,7 +220,10 @@ def bayes_random_init(
             for i, (com_queue, out_queue, proc_id) in enumerate(remote_processes):
                 if dones[i]:
                     continue
-                (scores, params, first_scores) = out_queue.get(timeout=1)
+                if not out_queue.empty():
+                    (scores, params, first_scores) = out_queue.get(timeout=5)
+                else:
+                    continue
                 results.append((scores, first_scores, params))
 
                 if current_params_id == len(randomized_parameters):
@@ -239,8 +236,11 @@ def bayes_random_init(
             for done in dones:
                 if not done:
                     all_done = False
+            if not all_done:
+                time.sleep(0.5)
 
     else:
+        store = None
         results = []
         try:
             cv_obj = initial_cv_obj
@@ -316,7 +316,7 @@ def bayes_random_init(
                 cat_param_map[parameter.name][val].append(obj_sc)
 
     config.logger.info("Random init finished")
-    fix_parameters_pos = []
+    
     if fix_cat:
         for p_pos, parameter in enumerate(parameters):
             if not parameter.param_type == "categorical":
@@ -345,7 +345,7 @@ def bayes_random_init(
 
         for p_pos in reversed(fix_parameters_pos):
             del parameters[p_pos]
-    return x_list, y_list, bounds, n_params, best_scores, best_first_scores, best_params, initial_values, new_optimimum, len(fix_parameters_pos), param_names, integer_type_params, cv_obj, slice_slices
+    return x_list, y_list, bounds, n_params, best_scores, best_first_scores, best_params, initial_values, new_optimimum, len(fix_parameters_pos), param_names, integer_type_params, initial_cv_obj, slice_slices, store
 
 
 # Taken from https://github.com/thuijskens/bayesian-optimization
@@ -402,7 +402,8 @@ def bayesian_optimisation(
     x_list: list[np.ndarray]
 
     # while n_fixed_params > 0:
-    x_list, y_list, bounds, n_params, best_scores, best_first_scores, best_params, initial_values, new_optimimum, n_fixed_params, param_names, integer_type_params, cv_obj, slice_slices = bayes_random_init(
+    
+    x_list, y_list, bounds, n_params, best_scores, best_first_scores, best_params, initial_values, new_optimimum, n_fixed_params, param_names, integer_type_params, cv_obj, slice_slices, store = bayes_random_init(
         config,
         parameters,
         score_matrix,
@@ -419,7 +420,8 @@ def bayesian_optimisation(
         force_confusion=force_confusion,
         store_params = store_params
     )
-
+    
+    
     min_max_samples = [[], []]
     for bound in bounds:
         min_max_samples[0].append(bound[0])
@@ -450,6 +452,9 @@ def bayesian_optimisation(
     if debug:
         n_iters = 4
 
+    if config.multi_gpu > 1:
+        n_iters = max([8,min([n_iters, config.multi_gpu])])
+
     return_cv_obj = cv_obj
     return_slice_slices = slice_slices
 
@@ -458,131 +463,270 @@ def bayesian_optimisation(
     if config.verbosity >= 1:
         config.logger.info(f"Number of bayesian optimization iterations: {n_iters}")
 
-    for n in range(n_iters):
-        if config.verbosity >= 2:
-            tl0 = time.time()
-        try:
-            model.fit(scaled_xp, yp)
-        except:
-            config.logger.info(f"{xp=}, {yp=}")
-            config.logger.info(f"{x_list=}, {y_list=}")
-            raise "None in Input"
+    if config.multi_gpu < 2:
 
-        if config.verbosity >= 2:
-            tl1 = time.time()
-            config.logger.info(f"Bayesian optimisation loop part 1: {tl1 - tl0}")
-
-        # Sample next hyperparameter
-        if random_search:
-            x_random = np.random.uniform(bounds[:, 0], bounds[:, 1], size=(random_search, n_params))
-            ei = -1 * expected_improvement(x_random, model, yp, greater_is_better=True, n_params=n_params)
-            next_sample: np.ndarray = x_random[np.argmax(ei), :]
-        else:
-            next_sample = sample_next_hyperparameter(expected_improvement, model, yp, greater_is_better=True, bounds=scaled_bounds, n_restarts=100)
-
-        if config.verbosity >= 2:
-            tl2 = time.time()
-            config.logger.info(f"Bayesian optimisation loop part 2: {tl2 - tl1}")
-
-        # Duplicates will break the GP. In case of a duplicate, we will randomly sample a next query point.
-        if np.any(np.sum(np.abs(next_sample - scaled_xp), axis = 1) <= epsilon):
+        for n in range(n_iters):
             if config.verbosity >= 2:
-                config.logger.info(f"Sampled a duplicate: {next_sample} {bounds}")
-            next_sample = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
-            count_dups += 1
-        else:
-            next_sample = scaler.inverse_transform([next_sample])[0]
+                tl0 = time.time()
+            try:
+                model.fit(scaled_xp, yp)
+            except:
+                config.logger.info(f"{xp=}, {yp=}")
+                config.logger.info(f"{x_list=}, {y_list=}")
+                raise "None in Input"
 
-        if config.verbosity >= 1:
-            config.logger.info(f"Try out next sampled HP: {next_sample}")
+            if config.verbosity >= 2:
+                tl1 = time.time()
+                config.logger.info(f"Bayesian optimisation loop part 1: {tl1 - tl0}")
 
-        if count_dups == 4:
-            config.logger.info("Break bayesian optimization, due to double dups")
-            break
+            # Sample next hyperparameter
+            if random_search:
+                x_random = np.random.uniform(bounds[:, 0], bounds[:, 1], size=(random_search, n_params))
+                ei = -1 * expected_improvement(x_random, model, yp, greater_is_better=True, n_params=n_params)
+                next_sample: np.ndarray = x_random[np.argmax(ei), :]
+            else:
+                next_sample = sample_next_hyperparameter(expected_improvement, model, yp, greater_is_better=True, bounds=scaled_bounds, n_restarts=100)
 
-        if config.verbosity >= 2:
-            tl3 = time.time()
-            config.logger.info(f"Bayesian optimisation loop part 3: {tl3 - tl2}")
+            if config.verbosity >= 2:
+                tl2 = time.time()
+                config.logger.info(f"Bayesian optimisation loop part 2: {tl2 - tl1}")
 
-        # Sample loss for new set of parameters
-        for pos, para_value in enumerate(next_sample):
-            parameters[pos].setValue(config, para_value)
+            # Duplicates will break the GP. In case of a duplicate, we will randomly sample a next query point.
+            if np.any(np.sum(np.abs(next_sample - scaled_xp), axis = 1) <= epsilon):
+                if config.verbosity >= 2:
+                    config.logger.info(f"Sampled a duplicate: {next_sample} {bounds}")
+                next_sample = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
+                count_dups += 1
+            else:
+                next_sample = scaler.inverse_transform([next_sample])[0]
 
-        if config.verbosity >= 2:
-            tl4 = time.time()
-            config.logger.info(f"Bayesian optimisation loop part 4: {tl4 - tl3}")
+            if config.verbosity >= 1:
+                config.logger.info(f"Try out next sampled HP: {next_sample}")
 
-        scores, cv_obj, slice_slices, first_scores = get_scores(
-            config,
-            score_matrix, cv_obj,
-            distance_map,
-            slice_slices,
-            samples=samples,
-            samples_store_id=samples_store_id,
-            force_confusion=force_confusion,
-            debug=debug,
-            get_first_scores=True,
-            cv_interuption=(0.95, best_first_scores)
-        )
+            if count_dups == 4:
+                config.logger.info("Break bayesian optimization, due to double dups")
+                break
 
-        if config.verbosity >= 2:
-            tl5 = time.time()
-            config.logger.info(f"Bayesian optimisation loop part 5: {tl5 - tl4}")
+            if config.verbosity >= 2:
+                tl3 = time.time()
+                config.logger.info(f"Bayesian optimisation loop part 3: {tl3 - tl2}")
 
-        cv_score = util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)
+            # Sample loss for new set of parameters
+            for pos, para_value in enumerate(next_sample):
+                parameters[pos].setValue(config, para_value)
 
-        if config.verbosity >= 2:
-            tl6 = time.time()
-            config.logger.info(f"Bayesian optimisation loop part 6: {tl6 - tl5}")
+            if config.verbosity >= 2:
+                tl4 = time.time()
+                config.logger.info(f"Bayesian optimisation loop part 4: {tl4 - tl3}")
 
-        if config.verbosity >= 1:
-            config.logger.info(f"Bayesian optimization, iteration: {n}")
-            config.logger.info(f"Objective score: {cv_score}, unpenalized: {scores.objective_value(config)}")
-
-        if util.objective_function_criterium(config, scores, best_scores, feature_penalty=config.feature_penalty):
-            best_scores = scores
-            best_first_scores = first_scores
-            best_params = next_sample
-            new_optimimum = True
-            config.logger.info("===========================\nFound new optimum\n===\n")
-            config.logParameter()
-            scores.printOut(config=config)
-            config.logger.info("===========================")
-            return_cv_obj = cv_obj
-            return_slice_slices = slice_slices
-            if store_params:
-                config.saveHyperParameter("hyperparameters_endless_HPO.conf")
-        elif config.verbosity >= 3:
-            config.logger.info(
-                f"No new optimun ({util.get_objective_score(config, best_scores, feature_penalty=config.feature_penalty)}): {util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)}"
+            scores, cv_obj, slice_slices, first_scores = get_scores(
+                config,
+                score_matrix, cv_obj,
+                distance_map,
+                slice_slices,
+                samples=samples,
+                samples_store_id=samples_store_id,
+                force_confusion=force_confusion,
+                debug=debug,
+                get_first_scores=True,
+                cv_interuption=(0.95, best_first_scores)
             )
 
-        if cv_score is None or cv_score != cv_score:
-            config.logger.info(f" === cv_score is None or Nan: {next_sample}")
-            scores = util.Scores(zero=True)
-            cv_score = scores.objective_value(config)
+            if config.verbosity >= 2:
+                tl5 = time.time()
+                config.logger.info(f"Bayesian optimisation loop part 5: {tl5 - tl4}")
 
-        if config.verbosity >= 2:
-            tl7 = time.time()
-            config.logger.info(f"Bayesian optimisation loop part 7: {tl7 - tl6}")
+            cv_score = util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)
 
-        # Update lists
-        x_list.append(next_sample)
-        y_list.append(cv_score)
+            if config.verbosity >= 2:
+                tl6 = time.time()
+                config.logger.info(f"Bayesian optimisation loop part 6: {tl6 - tl5}")
 
-        # projected_parameter_values = fill_plane(next_sample, integer_type_params)
-        # for projected_param in projected_parameter_values:
-        #    x_list.append(projected_param)
-        #    y_list.append(cv_score)
+            if config.verbosity >= 1:
+                config.logger.info(f"Bayesian optimization, iteration: {n}")
+                config.logger.info(f"Objective score: {cv_score}, unpenalized: {scores.objective_value(config)}")
 
-        # Update xp and yp
-        xp = np.array(x_list)
-        yp = np.array(y_list)
-        scaled_xp = scaler.transform(xp)
+            if util.objective_function_criterium(config, scores, best_scores, feature_penalty=config.feature_penalty):
+                best_scores = scores
+                best_first_scores = first_scores
+                best_params = next_sample
+                new_optimimum = True
+                config.logger.info("===========================\nFound new optimum\n===\n")
+                config.logParameter()
+                scores.printOut(config=config)
+                config.logger.info("===========================")
+                return_cv_obj = cv_obj
+                return_slice_slices = slice_slices
+                if store_params:
+                    config.saveHyperParameter("hyperparameters_endless_HPO.conf")
+            elif config.verbosity >= 3:
+                config.logger.info(
+                    f"No new optimun ({util.get_objective_score(config, best_scores, feature_penalty=config.feature_penalty)}): {util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)}"
+                )
 
-        if config.verbosity >= 3:
-            tl8 = time.time()
-            config.logger.info(f"Bayesian optimisation loop part 8: {tl8 - tl7}")
+            if cv_score is None or cv_score != cv_score:
+                config.logger.info(f" === cv_score is None or Nan: {next_sample}")
+                scores = util.Scores(zero=True)
+                cv_score = scores.objective_value(config)
+
+            if config.verbosity >= 2:
+                tl7 = time.time()
+                config.logger.info(f"Bayesian optimisation loop part 7: {tl7 - tl6}")
+
+            # Update lists
+            x_list.append(next_sample)
+            y_list.append(cv_score)
+
+            # projected_parameter_values = fill_plane(next_sample, integer_type_params)
+            # for projected_param in projected_parameter_values:
+            #    x_list.append(projected_param)
+            #    y_list.append(cv_score)
+
+            # Update xp and yp
+            xp = np.array(x_list)
+            yp = np.array(y_list)
+            scaled_xp = scaler.transform(xp)
+
+            if config.verbosity >= 3:
+                tl8 = time.time()
+                config.logger.info(f"Bayesian optimisation loop part 8: {tl8 - tl7}")
+
+    else:
+        remote_processes = []
+        para_number = config.proc_n // config.multi_gpu
+        current_params_id = 0
+        for gpu_id in range(config.multi_gpu):
+            if gpu_id == 0 and len(x_list) > 4:
+                try:
+                    model.fit(scaled_xp, yp)
+                except:
+                    config.logger.info(f"{xp=}, {yp=}")
+                    config.logger.info(f"{x_list=}, {y_list=}")
+                    raise "None in Input"
+
+                # Sample next hyperparameter
+                if random_search:
+                    x_random = np.random.uniform(bounds[:, 0], bounds[:, 1], size=(random_search, n_params))
+                    ei = -1 * expected_improvement(x_random, model, yp, greater_is_better=True, n_params=n_params)
+                    next_sample: np.ndarray = x_random[np.argmax(ei), :]
+                else:
+                    next_sample = sample_next_hyperparameter(expected_improvement, model, yp, greater_is_better=True, bounds=scaled_bounds, n_restarts=100)
+
+                # Duplicates will break the GP. In case of a duplicate, we will randomly sample a next query point.
+                if np.any(np.sum(np.abs(next_sample - scaled_xp), axis = 1) <= epsilon):
+                    if config.verbosity >= 2:
+                        config.logger.info(f"Sampled a duplicate: {next_sample} {bounds}")
+                    next_sample = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
+                    count_dups += 1
+                else:
+                    next_sample = scaler.inverse_transform([next_sample])[0]
+                current_params_id += 1
+            else:
+                next_sample = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
+
+            com_queue = Queue()
+            out_queue = Queue()
+            com_queue.put((next_sample))
+            
+            proc_id = para_eval.remote(com_queue, out_queue, store, para_number, gpu_id)
+            remote_processes.append((com_queue, out_queue, proc_id))
+
+        dones = []
+        counts = []
+        for i in range(len(remote_processes)):
+            dones.append(False)
+            counts.append(0)
+        all_done = False
+            
+        while not all_done:
+            for i, (com_queue, out_queue, proc_id) in enumerate(remote_processes):
+                if dones[i]:
+                    continue
+                if not out_queue.empty():
+                    (scores, next_sample, first_scores) = out_queue.get(timeout=5)
+                else:
+                    continue
+
+                cv_score = util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)
+
+                if config.verbosity >= 1:
+                    config.logger.info(f"Bayesian optimization, iteration: gpu_id: {i} {counts[i]} {current_params_id=}")
+                    counts[i] += 1
+                    config.logger.info(f"Objective score: {cv_score}, unpenalized: {scores.objective_value(config)}")
+
+                if util.objective_function_criterium(config, scores, best_scores, feature_penalty=config.feature_penalty):
+                    best_scores = scores
+                    best_first_scores = first_scores
+                    best_params = next_sample
+                    new_optimimum = True
+                    config.logger.info("===========================\nFound new optimum\n===\n")
+                    for pos, para_value in enumerate(best_params):
+                        parameters[pos].setValue(config, para_value)
+                    config.logParameter()
+                    scores.printOut(config=config)
+                    config.logger.info("===========================")
+                    return_cv_obj = cv_obj
+                    return_slice_slices = slice_slices
+                    if store_params:
+                        config.saveHyperParameter("hyperparameters_endless_HPO.conf")
+                elif config.verbosity >= 4:
+                    config.logger.info(
+                        f"No new optimun ({util.get_objective_score(config, best_scores, feature_penalty=config.feature_penalty)}): {util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)}"
+                    )
+
+                if cv_score is None or cv_score != cv_score:
+                    config.logger.info(f" === cv_score is None or Nan: {next_sample}")
+                    scores = util.Scores(zero=True)
+                    cv_score = scores.objective_value(config)
+
+                # Update lists
+                x_list.append(next_sample)
+                y_list.append(cv_score)
+
+                # Update xp and yp
+                xp = np.array(x_list)
+                yp = np.array(y_list)
+                scaled_xp = scaler.transform(xp)
+
+                if current_params_id >= n_iters:
+                    com_queue.put(None)
+                    dones[i] = True
+                else:
+                    if i == 0 and len(x_list) > 4:
+                        try:
+                            model.fit(scaled_xp, yp)
+                        except:
+                            config.logger.info(f"{xp=}, {yp=}")
+                            config.logger.info(f"{x_list=}, {y_list=}")
+                            raise "None in Input"
+
+                        # Sample next hyperparameter
+                        if random_search:
+                            x_random = np.random.uniform(bounds[:, 0], bounds[:, 1], size=(random_search, n_params))
+                            ei = -1 * expected_improvement(x_random, model, yp, greater_is_better=True, n_params=n_params)
+                            next_sample: np.ndarray = x_random[np.argmax(ei), :]
+                        else:
+                            next_sample = sample_next_hyperparameter(expected_improvement, model, yp, greater_is_better=True, bounds=scaled_bounds, n_restarts=100)
+
+                        # Duplicates will break the GP. In case of a duplicate, we will randomly sample a next query point.
+                        if np.any(np.sum(np.abs(next_sample - scaled_xp), axis = 1) <= epsilon):
+                            if config.verbosity >= 2:
+                                config.logger.info(f"Sampled a duplicate: {next_sample} {bounds}")
+                            next_sample = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
+                            count_dups += 1
+                        else:
+                            next_sample = scaler.inverse_transform([next_sample])[0]
+                        current_params_id += 1
+                    else:
+                        next_sample = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
+                    com_queue.put(next_sample)
+                    
+            all_done = True
+            for done in dones:
+                if not done:
+                    all_done = False
+            if not all_done:
+                time.sleep(0.5)
 
     if new_optimimum:
         for pos, para_value in enumerate(best_params):
@@ -941,14 +1085,19 @@ def get_scores(
     return scores, cv_obj, slice_slices
 
 
-@ray.remote(max_calls=1)
+@ray.remote(max_calls=1, num_gpus = 1)
 def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_id):
     (config, packed_cv_obj, parameters, samples_store_id, packed_slice_slices, force_confusion, best_first_scores) = store
     cv_obj = unpack(packed_cv_obj)
     slice_slices = unpack(packed_slice_slices)
 
+    gpu_id = ray.get_runtime_context().get_accelerator_ids()["GPU"][0]
+
     not_done = True
     while not_done:
+        if com_queue.empty():
+            time.sleep(0.5)
+            continue
         params = com_queue.get()
         if params is None:
             break
@@ -1135,7 +1284,7 @@ def threeDimHyperOptimization(
     debug=False
 ):
     
-
+    random.seed()
     fss_parameters, fs_parameters, parameters = initParameters(config, split_fs_parameters=True)
     converged = False
     n = 1

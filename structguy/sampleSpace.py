@@ -260,7 +260,7 @@ class SampleSpace(Slotted_obj):
     ]
 
     slot_mask = [
-        False, False, False,
+        True, False, False,
         True, True, True,
         True, True, False,
         False,
@@ -702,6 +702,8 @@ class SampleSpace(Slotted_obj):
         return self.get_feat_matrix(feat_id_vec, sample_pos_vec), feat_id_vec
     
     def get_feat_matrix_from_ids(self, sample_ids, feat_names)-> list[list[int | float | None]]:
+        if len(feat_names) == 0:
+            raise ValueError(f'{len(feat_names)=}')
         feat_id_vec = []
         for feat_name in feat_names:
             feat_id_vec.append(self.feat_pos_dict[feat_name])

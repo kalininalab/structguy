@@ -95,7 +95,7 @@ def parse_arguments(argument_start = 2, manual_args = None):
     penalize_train_test_gap = False
     skip_fshpo = False
 
-    multi_gpu = None
+    multi_gpu = 0
 
     for opt, arg in opts:
         if opt == '-i':
@@ -250,18 +250,18 @@ def parse_arguments(argument_start = 2, manual_args = None):
             try:
                 import torch
                 config.gpu_mode = torch.cuda.is_available()
+                config.multi_gpu = max([1, config.multi_gpu])
             except ModuleNotFoundError:
                 config.gpu_mode = False
 
-    if config.multi_gpu is not None:
-        if config.multi_gpu > 1:
-            #import dask
-            #from dask_cuda import LocalCUDACluster
-            #with LocalCUDACluster(n_workers=config.multi_gpu, threads_per_worker=config.proc_n) as cluster:
-            #    pass
-            config.gpu_mode = True
-            cpu_per_worker = max([1, (config.proc_n//config.multi_gpu) - 2])
-            config.scaling_config = ScalingConfig(num_workers=config.multi_gpu, use_gpu=True, resources_per_worker={"CPU": cpu_per_worker})
+    if config.multi_gpu > 1:
+        #import dask
+        #from dask_cuda import LocalCUDACluster
+        #with LocalCUDACluster(n_workers=config.multi_gpu, threads_per_worker=config.proc_n) as cluster:
+        #    pass
+        config.gpu_mode = True
+        cpu_per_worker = max([1, (config.proc_n//config.multi_gpu) - 2])
+        config.scaling_config = ScalingConfig(num_workers=config.multi_gpu, use_gpu=True, resources_per_worker={"CPU": cpu_per_worker})
 
     if test_config_path is not None:
         test_config = util.Config(test_config_path)
@@ -298,7 +298,7 @@ def build_model_main(manual_args = None):
     if config.verbosity >= 4:
         logging_level = 20
 
-    ray_utils.ray_init(config, overwrite_logging_level = logging_level, total_memory_quantile = 0.74)
+    ray_utils.ray_init(config, overwrite_logging_level = logging_level, total_memory_quantile = 0.74, num_gpus=config.multi_gpu)
 
     out_value = learn.learn(config, test_config=test_config)
 
