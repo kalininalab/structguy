@@ -200,7 +200,7 @@ class Config:
         self.optimize_mean = False
         self.repeat_training = 1
 
-        self.feature_penalty = 0.00001
+        self.feature_penalty = None#0.00001
 
         self.auto_weighting = True
         self.forest_type = 'random'
@@ -235,6 +235,18 @@ class Config:
         self.xgb_lambda = 1.
         self.colsample_bytree = 1.
         self.max_delta_step = 0.
+
+        self.tree_depth_1 = 194
+        self.num_of_trees_1 = 382
+        self.learning_rate_1 = 0.1
+        self.min_child_weight_1 = 1.5
+        self.early_stopping_1 = 30
+        self.xgb_gamma_1 = 0.1
+        self.xgb_alpha_1 = 0.
+        self.xgb_lambda_1 = 1.
+        self.colsample_bytree_1 = 1.
+        self.max_delta_step_1 = 0.
+        self.max_sample_parameter_1 = 0.9276380091150952
 
         self.feat_impact_thresh = 0.
         self.fs_tree_depth = 10
@@ -601,6 +613,65 @@ class Config:
         if overwrite_objective_function != None:
             self.objective_function = overwrite_objective_function
 
+
+        self.hyperparameters = [
+            "tree_depth", 
+            "min_sample_split", 
+            "tree_min_leaf_samples",
+            "num_of_trees", 
+            "max_leaf_nodes", 
+            "class_weight", 
+            "max_feature_parameter", 
+            "max_feature_cont_parameter", 
+            "bootstrap_parameter", 
+            "min_impurity_decrease_exp", 
+            "oob_score", 
+            "ccp_alpha_exp", 
+            'learning_rate',
+            'min_child_weight',
+            'early_stopping',
+            'xgb_gamma',
+            'xgb_alpha',
+            'xgb_lambda',
+            'colsample_bytree',
+            'max_delta_step',
+            'feat_impact_thresh',
+            "max_sample_parameter",
+            "number_of_bins",
+            "p_val_thresh",
+            "sample_weight_parameter",
+            "reg_alpha_exp",
+            "reg_c_exp",
+            "reg_thresh_exp",
+            "confusion_goodwill", 
+            "list_ranking_thresh", 
+            "sequential_confusion_rank_threshold", 
+            "confusion_rank_threshold", 
+            "err_warping_exp", 
+            "confusion_normalization_exp", 
+            'fs_tree_depth',
+            'fs_num_of_trees',
+            'fs_min_impurity_decrease_exp',
+            'fs_min_sample_split',
+            'fs_tree_min_leaf_samples',
+            'fs_ccp_alpha_exp',
+            'fs_max_sample_parameter',
+            'corr_thresh',
+            'tree_depth_1',
+            'num_of_trees_1',
+            'learning_rate_1',
+            'min_child_weight_1',
+            'early_stopping_1',
+            'xgb_gamma_1',
+            'xgb_alpha_1',
+            'xgb_lambda_1',
+            'colsample_bytree_1',
+            'max_delta_step_1',
+            'max_sample_parameter_1'
+        ]
+
+        self.hyperparameter_set = set(self.hyperparameters)
+
         #Hyperparameters setup if an HP file is provided
         self.hyperparameters_path = hyperparameters_path
         if hyperparameters_path is not None:
@@ -779,6 +850,10 @@ class Config:
                     self.corr_thresh = float(arg)
                     continue
 
+                if opt in self.hyperparameter_set:
+                    self.__setattr__(opt, float(arg))
+                    continue
+
         #self.blacklist = ['P28482']#set(['P28482','P42212','P38398','P06654','Q9UK59','P04386','P00552'])
     
         #self.prot_based_separation = True
@@ -816,206 +891,16 @@ class Config:
     def getByString(self, parameter_name):
         return getattr(self, parameter_name, None)
 
-    def getScoreTuple(self):
-        sct = (self.tree_depth,self.min_sample_split,self.num_of_trees,self.class_weight,
-                self.max_feature_parameter, self.max_feature_cont_parameter, self.bootstrap_parameter,self.min_impurity_decrease_exp,
-                self.oob_score,self.ccp_alpha_exp,self.max_sample_parameter, self.criterion,
-                self.tree_min_leaf_samples,self.tvmb_rank_threshold,self.tvpmb_rank_threshold, self.confusion_rank_threshold,
-                self.sequential_confusion_rank_threshold, self.err_warping_exp, self.confusion_normalization_exp,
-                self.number_of_bins, self.list_ranking_thresh, self.confusion_goodwill,
-                self.p_val_thresh,self.sample_weight_parameter,self.reg_alpha_exp, self.reg_c_exp, self.reg_thresh_exp, self.geometric_exponent,
-                self.learning_rate, self.min_child_weight, self.early_stopping, self.fs_tree_depth, self.fs_num_of_trees, self.fs_min_impurity_decrease_exp, self.fs_min_sample_split,
-                self.fs_tree_min_leaf_samples, self.fs_ccp_alpha_exp, self.fs_max_sample_parameter, self.corr_thresh, self.xgb_gamma, self.xgb_alpha,
-                self.xgb_lambda, self.colsample_bytree, self.max_delta_step, self.feat_impact_thresh
-                )
-        return sct
 
     def logParameter(self):
-        self.logger.info(f'Depth: {self.tree_depth}')
-        self.logger.info(f'Min sample split: {self.min_sample_split}')
-        self.logger.info(f'Min sample leaf: {self.tree_min_leaf_samples}')
-        self.logger.info(f'Forest size: {self.num_of_trees}')
-        self.logger.info(f'Class weight: {self.class_weight}')
-        self.logger.info(f'Max features: {self.max_feature_parameter}')
-        self.logger.info(f'Max features continuous: {self.max_feature_cont_parameter}')
-        self.logger.info(f'Bootstrap: {self.bootstrap_parameter}')
-        self.logger.info(f'Min impurity decrease exponent: {self.min_impurity_decrease_exp}')
-        self.logger.info(f'Out of bag: {self.oob_score}')
-        self.logger.info(f'CCP alpha exponent: {self.ccp_alpha_exp}')
-        self.logger.info(f'Learning rate: {self.learning_rate}')
-        self.logger.info(f'Min Child Weight: {self.min_child_weight}')
-        self.logger.info(f'Early stopping: {self.early_stopping}')
-        self.logger.info(f'Max sample: {self.max_sample_parameter}')
-        self.logger.info(f'XGB gamma: {self.xgb_gamma}')
-        self.logger.info(f'XGB alpha: {self.xgb_alpha}')
-        self.logger.info(f'XGB lambda: {self.xgb_lambda}')
-        self.logger.info(f'XGB colsample_bytree: {self.colsample_bytree}')
-        self.logger.info(f'XGB max delta step: {self.max_delta_step}')
-        self.logger.info(f'feat_impact_thresh: {self.feat_impact_thresh}')
-        self.logger.info(f'TVMB rank threshold: {self.tvmb_rank_threshold}')
-        self.logger.info(f'TVPMB rank threshold: {self.tvpmb_rank_threshold}')
-        self.logger.info(f'Confusion rank threshold: {self.confusion_rank_threshold}')
-        self.logger.info(f'Sequential confusion rank threshold: {self.sequential_confusion_rank_threshold}')
-        self.logger.info(f'Confusion error warping exponent: {self.err_warping_exp}')
-        self.logger.info(f'Confusion normalization exponent: {self.confusion_normalization_exp}')
-        self.logger.info(f'Criterion: {self.criterion}')
-        self.logger.info(f'Number of bins: {self.number_of_bins}')
-        self.logger.info(f'p-value threshold: {self.p_val_thresh}')
-        self.logger.info(f'Sample weight parameter: {self.sample_weight_parameter}')
-        self.logger.info(f'Regularization alpha exponent: {self.reg_alpha_exp}')
-        self.logger.info(f'Regularization C exponent: {self.reg_c_exp}')
-        self.logger.info(f'Regularization threshold exponent: {self.reg_thresh_exp}')
-        self.logger.info(f'Geometric exponent: {self.geometric_exponent}')
-        self.logger.info(f'Confusion goodwill: {self.confusion_goodwill}')
-        self.logger.info(f'List ranking thresh: {self.list_ranking_thresh}')
-        self.logger.info(f'FS tree depth: {self.fs_tree_depth}')
-        self.logger.info(f'FS # of trees: {self.fs_num_of_trees}')
-        self.logger.info(f'FS min impurity decrease: {self.fs_min_impurity_decrease_exp}')
-        self.logger.info(f'FS min sample split: {self.fs_min_sample_split}')
-        self.logger.info(f'FS min leaf samples: {self.fs_tree_min_leaf_samples}')
-        self.logger.info(f'FS CCP alpha exp: {self.fs_ccp_alpha_exp}')
-        self.logger.info(f'FS max sampes: {self.fs_max_sample_parameter}')
-        self.logger.info(f'Feature correlation threshold: {self.corr_thresh}')
-        return
-
-    def printParameter(self):
-        if self.logger is None:
-            print('Depth:',self.tree_depth)
-            print('Min sample split:',self.min_sample_split)
-            print('Min sample leaf:',self.tree_min_leaf_samples)
-            print('Forest size:',self.num_of_trees)
-            print('Class weight:',self.class_weight)
-            print('Max features:',self.max_feature_parameter)
-            print('Max features continuous:', self.max_feature_cont_parameter)
-            print('Bootstrap:',self.bootstrap_parameter)
-            print('Min impurity decrease exponent:',self.min_impurity_decrease_exp)
-            print('Out of bag:',self.oob_score)
-            print('CCP alpha exponent:',self.ccp_alpha_exp)
-            print(f'Learning rate: {self.learning_rate}')
-            print(f'Min Child Weight: {self.min_child_weight}')
-            print(f'Early stopping: {self.early_stopping}')
-            print('Max sample:',self.max_sample_parameter)
-            print(f'XGB gamma: {self.xgb_gamma}')
-            print(f'XGB alpha: {self.xgb_alpha}')
-            print(f'XGB lambda: {self.xgb_lambda}')
-            print(f'XGB colsample_bytree: {self.colsample_bytree}')
-            print(f'XGB max delta step: {self.max_delta_step}')
-            print(f'feat_impact_thresh: {self.feat_impact_thresh}')
-            print('TVMB rank threshold:',self.tvmb_rank_threshold)
-            print('TVPMB rank threshold:',self.tvpmb_rank_threshold)
-            print('Confusion rank threshold:', self.confusion_rank_threshold)
-            print('Sequential confusion rank threshold:', self.sequential_confusion_rank_threshold)
-            print('Confusion error warping exponent:', self.err_warping_exp)
-            print('Confusion normalization exponent:', self.confusion_normalization_exp)
-            print('Criterion:',self.criterion)
-            print('Number of bins:',self.number_of_bins)
-            print('p-value threshold:',self.p_val_thresh)
-            print('Sample weight parameter:',self.sample_weight_parameter)
-            print('Regularization alpha exponent:', self.reg_alpha_exp)
-            print('Regularization C exponent:', self.reg_c_exp)
-            print('Regularization threshold exponent:', self.reg_thresh_exp)
-            print('Geometric exponent:', self.geometric_exponent)
-            print(f'Confusion goodwill: {self.confusion_goodwill}')
-            print(f'List ranking thresh: {self.list_ranking_thresh}')
-            print(f'FS tree depth: {self.fs_tree_depth}')
-            print(f'FS # of trees: {self.fs_num_of_trees}')
-            print(f'FS min impurity decrease: {self.fs_min_impurity_decrease_exp}')
-            print(f'FS min sample split: {self.fs_min_sample_split}')
-            print(f'FS min leaf samples: {self.fs_tree_min_leaf_samples}')
-            print(f'FS CCP alpha exp: {self.fs_ccp_alpha_exp}')
-            print(f'FS max sampes: {self.fs_max_sample_parameter}')
-            print(f'Feature correlation threshold: {self.corr_thresh}')
-        else:
-            self.logger.info(f'Depth: {self.tree_depth}')
-            self.logger.info(f'Min sample split: {self.min_sample_split}')
-            self.logger.info(f'Min sample leaf: {self.tree_min_leaf_samples}')
-            self.logger.info(f'Forest size: {self.num_of_trees}')
-            self.logger.info(f'Class weight: {self.class_weight}')
-            self.logger.info(f'Max features: {self.max_feature_parameter}')
-            self.logger.info(f'Max features continuous: {self.max_feature_cont_parameter}')
-            self.logger.info(f'Bootstrap: {self.bootstrap_parameter}')
-            self.logger.info(f'Min impurity decrease exponent: {self.min_impurity_decrease_exp}')
-            self.logger.info(f'Out of bag: {self.oob_score}')
-            self.logger.info(f'CCP alpha exponent: {self.ccp_alpha_exp}')
-            self.logger.info(f'Learning rate: {self.learning_rate}')
-            self.logger.info(f'Min Child Weight: {self.min_child_weight}')
-            self.logger.info(f'Early stopping: {self.early_stopping}')
-            self.logger.info(f'Max sample: {self.max_sample_parameter}')
-            self.logger.info(f'XGB gamma: {self.xgb_gamma}')
-            self.logger.info(f'XGB alpha: {self.xgb_alpha}')
-            self.logger.info(f'XGB lambda: {self.xgb_lambda}')
-            self.logger.info(f'XGB colsample_bytree: {self.colsample_bytree}')
-            self.logger.info(f'XGB max delta step: {self.max_delta_step}')
-            self.logger.info(f'feat_impact_thresh: {self.feat_impact_thresh}')
-            self.logger.info(f'TVMB rank threshold: {self.tvmb_rank_threshold}')
-            self.logger.info(f'TVPMB rank threshold: {self.tvpmb_rank_threshold}')
-            self.logger.info(f'Confusion rank threshold: {self.confusion_rank_threshold}')
-            self.logger.info(f'Sequential confusion rank threshold: {self.sequential_confusion_rank_threshold}')
-            self.logger.info(f'Confusion error warping exponent: {self.err_warping_exp}')
-            self.logger.info(f'Confusion normalization exponent: {self.confusion_normalization_exp}')
-            self.logger.info(f'Criterion: {self.criterion}')
-            self.logger.info(f'Number of bins: {self.number_of_bins}')
-            self.logger.info(f'p-value threshold: {self.p_val_thresh}')
-            self.logger.info(f'Sample weight parameter: {self.sample_weight_parameter}')
-            self.logger.info(f'Regularization alpha exponent: {self.reg_alpha_exp}')
-            self.logger.info(f'Regularization C exponent: {self.reg_c_exp}')
-            self.logger.info(f'Regularization threshold exponent: {self.reg_thresh_exp}')
-            self.logger.info(f'Geometric exponent: {self.geometric_exponent}')
-            self.logger.info(f'Confusion goodwill: {self.confusion_goodwill}')
-            self.logger.info(f'List ranking thresh: {self.list_ranking_thresh}')
-            self.logger.info(f'FS tree depth: {self.fs_tree_depth}')
-            self.logger.info(f'FS # of trees: {self.fs_num_of_trees}')
-            self.logger.info(f'FS min impurity decrease: {self.fs_min_impurity_decrease_exp}')
-            self.logger.info(f'FS min sample split: {self.fs_min_sample_split}')
-            self.logger.info(f'FS min leaf samples: {self.fs_tree_min_leaf_samples}')
-            self.logger.info(f'FS CCP alpha exp: {self.fs_ccp_alpha_exp}')
-            self.logger.info(f'FS max sampes: {self.fs_max_sample_parameter}')
-            self.logger.info(f'Feature correlation threshold: {self.corr_thresh}')
+        for hp in self.hyperparameters:
+            self.logger.info(f'{hp}: {self.__getattribute__(hp)}')
+        
         return
 
     def printHyperParameter(self):
-        print("tree_depth", self.tree_depth)
-        print("min_sample_split", self.min_sample_split)
-        print("tree_min_leaf_samples", self.tree_min_leaf_samples)
-        print("num_of_trees", self.num_of_trees)
-        print("max_leaf_nodes", self.max_leaf_nodes)
-        print("class_weight", self.class_weight)
-        print("max_feature_parameter", self.max_feature_parameter)
-        print("max_feature_cont_parameter", self.max_feature_cont_parameter)
-        print("bootstrap_parameter", self.bootstrap_parameter)
-        print("min_impurity_decrease_exp", self.min_impurity_decrease_exp)
-        print("oob_score", self.oob_score)
-        print("ccp_alpha_exp", self.ccp_alpha_exp)
-        print(f'learning_rate {self.learning_rate}')
-        print(f'min_child_weight {self.min_child_weight}')
-        print(f'early_stopping {self.early_stopping}')
-        print(f'xgb_gamma {self.xgb_gamma}')
-        print(f'xgb_alpha {self.xgb_alpha}')
-        print(f'xgb_lambda {self.xgb_lambda}')
-        print(f'colsample_bytree {self.colsample_bytree}')
-        print(f'max_delta_step {self.max_delta_step}')
-        print(f'feat_impact_thresh {self.feat_impact_thresh}')
-        print("max_sample_parameter", self.max_sample_parameter)
-        print("number_of_bins", self.number_of_bins)
-        print("p_val_thresh", self.p_val_thresh)
-        print("sample_weight_parameter", self.sample_weight_parameter)
-        print("reg_alpha_exp", self.reg_alpha_exp)
-        print("reg_c_exp", self.reg_c_exp)
-        print("reg_thresh_exp", self.reg_thresh_exp)
-        print("confusion_goodwill", self.confusion_goodwill)
-        print("list_ranking_thresh", self.list_ranking_thresh)
-        print("sequential_confusion_rank_threshold", self.sequential_confusion_rank_threshold)
-        print("confusion_rank_threshold", self.confusion_rank_threshold)
-        print("err_warping_exp", self.err_warping_exp)
-        print("confusion_normalization_exp", self.confusion_normalization_exp)
-        print(f'fs_tree_depth {self.fs_tree_depth}')
-        print(f'fs_num_of_trees {self.fs_num_of_trees}')
-        print(f'fs_min_impurity_decrease_exp {self.fs_min_impurity_decrease_exp}')
-        print(f'fs_min_sample_split {self.fs_min_sample_split}')
-        print(f'fs_tree_min_leaf_samples {self.fs_tree_min_leaf_samples}')
-        print(f'fs_ccp_alpha_exp {self.fs_ccp_alpha_exp}')
-        print(f'fs_max_sample_parameter {self.fs_max_sample_parameter}')    
-        print(f'Feature correlation threshold {self.corr_thresh}')    
+        for hp in self.hyperparameters:
+            print(f'{hp} {self.__getattribute__(hp)}')  
         return
 
     def saveHyperParameter(self, outputFileName = None):
@@ -1057,6 +942,8 @@ class Config:
         f = open(self.path_to_project_file, 'w')
         f.write(''.join(new_lines))
         f.close()
+
+
 
 
 def tags_to_effect(config, tags):

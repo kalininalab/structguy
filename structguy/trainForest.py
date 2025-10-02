@@ -108,7 +108,7 @@ def trainClassificationForest(
         return zero_return
 
     if print_out:
-        config.printParameter()
+        config.logParameter()
 
     forest = RandomForestClassifier(
         n_estimators=n_of_trees,
@@ -523,7 +523,8 @@ def xgb_train_wrapper(
         train_feature_matrix: list[list[int | float | None]],
         train_targets: list[float],
         dtest_feature_matrix: xgb.DMatrix,
-        gpu_id = None):
+        second_round = False,
+        ):
         
     dtrain = xgb.DMatrix(numpy.array(train_feature_matrix), label= numpy.array(train_targets))#, weight = params["train_weights"])
 
@@ -541,26 +542,44 @@ def xgb_train_wrapper(
     es_list.append(es)
     evals.append((dtest_feature_matrix, eval_label))
 
-    xgb_params = {
-        "tree_method": "hist",
-        "device": "cuda",
-        "max_depth": config.tree_depth,
-        "reg_alpha": config.xgb_alpha,
-        "reg_lambda": config.xgb_lambda,
-        "colsample_bytree": config.colsample_bytree,
-        "max_delta_step": config.max_delta_step,
-        "gamma": config.xgb_gamma,
-        "learning_rate": config.learning_rate,
-        "min_child_weight": config.min_child_weight,
-        "early_stopping_rounds": config.early_stopping,
-        "subsample": config.max_sample_parameter,
-        "callbacks": es_list,
-        #"eval_metric": ['irho'],
-        "disable_default_eval_metric": True
-        }
-    #if gpu_id is not None:
-    #    xgb_params['gpu_id'] = gpu_id
-    forest = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees), early_stopping_rounds= config.early_stopping, evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
+    if not second_round:
+        xgb_params = {
+            "tree_method": "hist",
+            "device": "cuda",
+            "max_depth": config.tree_depth,
+            "reg_alpha": config.xgb_alpha,
+            "reg_lambda": config.xgb_lambda,
+            "colsample_bytree": config.colsample_bytree,
+            "max_delta_step": config.max_delta_step,
+            "gamma": config.xgb_gamma,
+            "learning_rate": config.learning_rate,
+            "min_child_weight": config.min_child_weight,
+            "early_stopping_rounds": config.early_stopping,
+            "subsample": config.max_sample_parameter,
+            "callbacks": es_list,
+            #"eval_metric": ['irho'],
+            "disable_default_eval_metric": True
+            }
+        forest = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees), early_stopping_rounds= config.early_stopping, evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
+    else:
+        xgb_params = {
+            "tree_method": "hist",
+            "device": "cuda",
+            "max_depth": config.tree_depth_1,
+            "reg_alpha": config.xgb_alpha_1,
+            "reg_lambda": config.xgb_lambda_1,
+            "colsample_bytree": config.colsample_bytree_1,
+            "max_delta_step": config.max_delta_step_1,
+            "gamma": config.xgb_gamma_1,
+            "learning_rate": config.learning_rate_1,
+            "min_child_weight": config.min_child_weight_1,
+            "early_stopping_rounds": config.early_stopping_1,
+            "subsample": config.max_sample_parameter_1,
+            "callbacks": es_list,
+            #"eval_metric": ['irho'],
+            "disable_default_eval_metric": True
+            }
+        forest = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees_1), early_stopping_rounds= config.early_stopping_1, evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
 
     return forest
 
@@ -717,21 +736,19 @@ def trainRegressionForest(
 
     if slice_updated is None:
         config.logger.error(f"ERROR =============== Feature selection failed: {cv_counter}")
-        config.printParameter()
+        config.logParameter()
         config.logger.error("==============================================")
         return return_zero(zero_return, remote, cv_slice)
 
     if len(cv_slice.feature_names) == 0:
         config.logger.warning(f"Warning =============== Feature vector has len 0 {cv_counter}")
-        # config.printParameter()
-        # config.logger.info('==============================================')
         return return_zero(zero_return, remote, cv_slice)
 
     if max_sample_parameter == 1.0:
         max_sample_parameter = None
 
     if print_out:
-        config.printParameter()
+        config.logParameter()
 
     ta = add_to_times(times, ta) #2
     if config.verbosity >= 2:
@@ -808,7 +825,7 @@ def trainRegressionForest(
 
         ta = add_to_times(times, ta) #6
 
-        forest = xgb_train_wrapper(config, train_feature_matrix, train_targets, dtest_feature_matrix, gpu_id)
+        forest = xgb_train_wrapper(config, train_feature_matrix, train_targets, dtest_feature_matrix)
         if forest is None:
             return return_zero(zero_return, remote, cv_slice)
 
@@ -865,7 +882,7 @@ def trainRegressionForest(
             test_feature_matrix = slice_slice.get_test_feature_matrix(samples)
             dtest_feature_matrix = xgb.DMatrix(numpy.array(test_feature_matrix), label=numpy.array(slice_slice.test_targets))
 
-            forest = xgb_train_wrapper(config, train_feature_matrix, train_targets, dtest_feature_matrix, gpu_id)
+            forest = xgb_train_wrapper(config, train_feature_matrix, train_targets, dtest_feature_matrix, second_round=True)
             if forest is None:
                 return return_zero(zero_return, remote, cv_slice)
 

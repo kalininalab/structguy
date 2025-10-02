@@ -859,7 +859,7 @@ def evaluate_dataset(config: Config):
 
                 if config.target_values is not None:
                     eval_words = words[:]
-                    eval_words.append(str(test_targets[pos]))
+                    eval_words.append(str(combined_test_targets[pos]))
                     full_eval_words = eval_words[:]
 
                 if config.calc_sd:

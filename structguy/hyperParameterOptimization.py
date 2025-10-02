@@ -119,7 +119,6 @@ def fill_plane(parameter_values, integer_type_params, density=20):
 def bayes_random_init(
     config,
     parameters,
-    score_matrix,
     initial_cv_obj: DataSAIL_cv,
     best_scores,
     best_first_scores,
@@ -249,7 +248,6 @@ def bayes_random_init(
                     parameters[pos].setValue(config, para_value)
                 scores, cv_obj, slice_slices, first_scores = get_scores(
                     config,
-                    score_matrix,
                     cv_obj,
                     distance_map,
                     slice_slices,
@@ -354,7 +352,6 @@ def bayesian_optimisation(
     n_iters,
     config,
     parameters,
-    score_matrix,
     cv_obj: DataSAIL_cv,
     best_scores,
     best_first_scores,
@@ -406,7 +403,6 @@ def bayesian_optimisation(
     x_list, y_list, bounds, n_params, best_scores, best_first_scores, best_params, initial_values, new_optimimum, n_fixed_params, param_names, integer_type_params, cv_obj, slice_slices, store = bayes_random_init(
         config,
         parameters,
-        score_matrix,
         cv_obj,
         best_scores,
         best_first_scores,
@@ -453,7 +449,7 @@ def bayesian_optimisation(
         n_iters = 4
 
     if config.multi_gpu > 1:
-        n_iters = max([8,min([n_iters, config.multi_gpu])])
+        n_iters = max([n_params*3,min([n_iters, config.multi_gpu])])
 
     return_cv_obj = cv_obj
     return_slice_slices = slice_slices
@@ -521,7 +517,7 @@ def bayesian_optimisation(
 
             scores, cv_obj, slice_slices, first_scores = get_scores(
                 config,
-                score_matrix, cv_obj,
+                cv_obj,
                 distance_map,
                 slice_slices,
                 samples=samples,
@@ -776,26 +772,6 @@ class Parameter:
             val = config.getByString(self.name)
         return val
 
-
-def parametersInScoreMatrix(config, score_matrix):
-    score_tuple = config.getScoreTuple()
-    if score_tuple in score_matrix:
-        return True
-    else:
-        return False
-
-
-def getFromScoreMatrix(config, score_matrix):
-    score_tuple = config.getScoreTuple()
-    return score_matrix[score_tuple]
-
-
-def addToScoreMatrix(scores_obj, config, score_matrix):
-    score_tuple = config.getScoreTuple()
-    score_matrix[score_tuple] = scores_obj
-    return
-
-
 def twoDim(
         parameter_1,
         parameter_2,
@@ -851,7 +827,7 @@ def twoDim(
         None,
         config,
         [parameter_1, parameter_2],
-        score_matrix, cv_obj,
+        cv_obj,
         best_scores,
         first_scores,
         distance_map,
@@ -958,7 +934,6 @@ def threeDim(
         None,
         config,
         [parameter_1, parameter_2, parameter_3],
-        score_matrix,
         cv_obj,
         best_scores,
         first_scores,
@@ -1002,7 +977,6 @@ def bayesianAndCat(
             None,
             config,
             parameters,
-            score_matrix,
             cv_obj,
             best_scores,
             first_scores,
@@ -1038,7 +1012,6 @@ def cat3D(parameter_1, parameter_2, parameter_3, best_scores, config, score_matr
 
 def get_scores(
         config,
-        score_matrix,
         cv_obj,
         distance_map,
         slice_slices,
@@ -1052,36 +1025,31 @@ def get_scores(
         cv_interuption=None,
         gpu_id = None
         ):
-    if (score_matrix is not None) and parametersInScoreMatrix(config, score_matrix):
-        scores = getFromScoreMatrix(config, score_matrix)
-        config.logger.info("Parameter set already known, skip scores calculation")
-    else:
-        t0 = time.time()
-        _, scores, cv_obj, slice_slices = trainForest.trainForest(
-            config,
-            cv_obj,
-            samples=samples,
-            samples_store_id=samples_store_id,
-            slice_slices=slice_slices,
-            distance_map=distance_map,
-            repeat=config.repeat_training,
-            cv_repeat=config.cv_hpo,
-            remote=remote,
-            para_number=para_number,
-            debug=debug,
-            force_confusion=force_confusion,
-            get_first_scores=get_first_scores,
-            cv_interuption=cv_interuption,
-            gpu_id = gpu_id
-        )
-        t1 = time.time()
-        config.logger.info(f"Time for training forest in get_scores: {t1 - t0}")
-        
-        if score_matrix is not None:
-            addToScoreMatrix(scores, config, score_matrix)
-        if get_first_scores:
-            first_scores, scores = scores
-            return scores, cv_obj, slice_slices, first_scores
+    
+    t0 = time.time()
+    _, scores, cv_obj, slice_slices = trainForest.trainForest(
+        config,
+        cv_obj,
+        samples=samples,
+        samples_store_id=samples_store_id,
+        slice_slices=slice_slices,
+        distance_map=distance_map,
+        repeat=config.repeat_training,
+        cv_repeat=config.cv_hpo,
+        remote=remote,
+        para_number=para_number,
+        debug=debug,
+        force_confusion=force_confusion,
+        get_first_scores=get_first_scores,
+        cv_interuption=cv_interuption,
+        gpu_id = gpu_id
+    )
+    t1 = time.time()
+    config.logger.info(f"Time for training forest in get_scores: {t1 - t0}")
+    
+    if get_first_scores:
+        first_scores, scores = scores
+        return scores, cv_obj, slice_slices, first_scores
     return scores, cv_obj, slice_slices
 
 
@@ -1106,7 +1074,6 @@ def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_id):
             parameters[pos].setValue(config, para_value)
         scores, cv_obj, slice_slices, first_scores = get_scores(
             config,
-            None,
             cv_obj,
             None,
             slice_slices,
@@ -1175,16 +1142,7 @@ def initParameters(
     fs_parameters = {}
     fss_parameters = {}
     if config.hpo_do_feat_selection and do_feat_selection:
-        if config.feature_selection == "meanCorrelation":
-            fs_parameters = initMeanCorrParameters(config, fs_parameters)
-        if config.feature_selection == "regularization":
-            fs_parameters = initReguParameters(config, fs_parameters)
-
-        if config.feature_selection == "double":
-            fs_parameters = initMeanCorrParameters(config, fs_parameters)
-            fs_parameters = initReguParameters(config, fs_parameters)
-
-        elif (
+        if (
             config.feature_selection == "confusion"
             or config.feature_selection == "sequential_confusion"
             or config.feature_selection == "sequential_confusion_and_regu"
@@ -1225,8 +1183,6 @@ def initParameters(
 
     if config.hpo_do_forest_param:
         
-        
-        
         parameters["max_sample_parameter"] = Parameter("max_sample_parameter", "real", half_step_limits=config.max_sample_half_step)
 
         if config.forest_type == "random" or config.forest_type == "gradient_boost":
@@ -1237,8 +1193,10 @@ def initParameters(
             parameters["ccp_alpha_exp"] = Parameter("ccp_alpha_exp", "real", half_step_limits=config.ccp_alpha_exp_half_step)
             parameters["min_impurity_decrease_exp"] = Parameter("min_impurity_decrease_exp", "real", half_step_limits=config.min_impurity_decrease_exp_half_step)
             parameters["tree_depth"] = Parameter("tree_depth", "integer", half_step_limits=config.tree_depth_half_step)
+
         if config.forest_type == "gradient_boost" or config.forest_type == "xgboost":
             parameters["learning_rate"] = Parameter("learning_rate", "real", half_step_limits=[0.0, 2.0])
+            parameters["learning_rate_1"] = Parameter("learning_rate_1", "real", half_step_limits=[0.0, 2.0])
         if config.forest_type == "xgboost":
             parameters["early_stopping"] = Parameter("early_stopping", "integer", half_step_limits=[1, 1000])
             parameters["min_child_weight"] = Parameter("min_child_weight", "real", half_step_limits=[0., 100.])
@@ -1250,6 +1208,16 @@ def initParameters(
             parameters["feat_impact_thresh"] = Parameter("feat_impact_thresh", "real", half_step_limits=[-0.01,0.01])
             parameters["tree_depth"] = Parameter("tree_depth", "integer", half_step_limits=[1,31])
             parameters["num_of_trees"] = Parameter("num_of_trees", "integer", half_step_limits=[10,10_000])
+
+            parameters["early_stopping_1"] = Parameter("early_stopping_1", "integer", half_step_limits=[1, 1000])
+            parameters["min_child_weight_1"] = Parameter("min_child_weight_1", "real", half_step_limits=[0., 100.])
+            parameters["xgb_gamma_1"] = Parameter("xgb_gamma_1", "real", half_step_limits=[0.,10.])
+            parameters["xgb_alpha_1"] = Parameter("xgb_alpha_1", "real", half_step_limits=[0.,5.])
+            parameters["xgb_lambda_1"] = Parameter("xgb_lambda_1", "real", half_step_limits=[0.,5.])
+            parameters["colsample_bytree_1"] = Parameter("colsample_bytree_1", "real", half_step_limits=[0.,1.])
+            parameters["max_delta_step_1"] = Parameter("max_delta_step_1", "real", half_step_limits=[0.,10.])
+            parameters["tree_depth_1"] = Parameter("tree_depth", "integer_1", half_step_limits=[1,31])
+            parameters["num_of_trees_1"] = Parameter("num_of_trees", "integer_1", half_step_limits=[10,10_000])
 
         if not config.regression:
             parameters["criterion"] = Parameter("criterion", "categorical", possible_values=config.criteria, classification_specific=True)
@@ -1328,7 +1296,6 @@ def threeDimHyperOptimization(
                     None,
                     config,
                     list(fs_parameters.values()),
-                    score_matrix,
                     cv_obj,
                     best_scores,
                     first_scores,
@@ -1410,8 +1377,9 @@ def threeDimHyperOptimization(
                     if new_opti:
                         converged = False
             else:
-                while len(param_names) > 3:
+                while len(param_names) > 4:
                     param_set = [
+                        parameters[param_names.pop()],
                         parameters[param_names.pop()],
                         parameters[param_names.pop()],
                         parameters[param_names.pop()],
@@ -1421,7 +1389,6 @@ def threeDimHyperOptimization(
                         None,
                         config,
                         param_set,
-                        score_matrix,
                         cv_obj,
                         best_scores,
                         first_scores,
@@ -1440,7 +1407,6 @@ def threeDimHyperOptimization(
                     None,
                     config,
                     param_set,
-                    score_matrix,
                     cv_obj,
                     best_scores,
                     first_scores,
@@ -1479,13 +1445,10 @@ def bayesianComplete(
 
     parameters = initParameters(config, do_feat_selection=False)
 
-    score_matrix = {}
-
     new_optimimum, best_scores, cv_obj, slice_slices = bayesian_optimisation(
         9_999_999,
         config,
         [parameters[p] for p in parameters],
-        score_matrix,
         cv_obj,
         best_scores,
         distance_map,
