@@ -340,7 +340,7 @@ def createTrainingSet(
         if config.filterStructuralFeatures:
             samples.removeFeaturesByType("structural", config)
 
-        samples.oneHotifyAll(config)
+        #samples.oneHotifyAll(config)
 
         if external_impute is None:
             if config.impute_missing_values:

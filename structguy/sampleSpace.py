@@ -260,7 +260,7 @@ class SampleSpace(Slotted_obj):
     ]
 
     slot_mask = [
-        True, False, False,
+        True, True, False,
         True, True, True,
         True, True, False,
         False,
@@ -701,19 +701,33 @@ class SampleSpace(Slotted_obj):
         sample_pos_vec = list(range(len(self.raw_feature_matrix)))
         return self.get_feat_matrix(feat_id_vec, sample_pos_vec), feat_id_vec
     
-    def get_feat_matrix_from_ids(self, sample_ids, feat_names)-> list[list[int | float | None]]:
+    def get_feat_matrix_from_ids(
+            self,
+            sample_ids: list[str],
+            feat_names: list[str],
+            get_cat_vec = False
+            )-> list[list[int | float | None]]:
         if len(feat_names) == 0:
             raise ValueError(f'{len(feat_names)=}')
+        if get_cat_vec:
+            cat_vec = []
         feat_id_vec = []
         for feat_name in feat_names:
             feat_id_vec.append(self.feat_pos_dict[feat_name])
-  
+            if get_cat_vec:
+                if self.features[feat_name].f_type == 'categorical':
+                    cat_vec.append('c')
+                else:
+                    cat_vec.append('q')
+
         sample_pos_vec = []
         for sample_id in sample_ids:
             try:
                 sample_pos_vec.append(self.sample_pos_dict[sample_id])
             except KeyError:
                 sample_pos_vec.append(None)
+        if get_cat_vec:
+            return self.get_feat_matrix(feat_id_vec, sample_pos_vec), cat_vec
         return self.get_feat_matrix(feat_id_vec, sample_pos_vec)
 
     def get_skewed_feat_matrices_from_ids(self, sample_ids, feat_names, thresh):

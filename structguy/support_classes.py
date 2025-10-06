@@ -3,7 +3,8 @@ import sys
 import traceback
 import time
 import random
-
+import numpy
+import xgboost as xgb
 from scipy import stats
 
 from structguy import dicts
@@ -1019,6 +1020,12 @@ class CrossValidationSlice(Slotted_obj):
         feat_matrix = samples.get_feat_matrix_from_ids(self.test_sample_ids, self.feature_names)
         return feat_matrix
     
+    def get_dtest(self, samples):
+        feat_matrix, cat_vec = samples.get_feat_matrix_from_ids(self.test_sample_ids, self.feature_names, get_cat_vec=True)
+        dtest_feature_matrix = xgb.DMatrix(numpy.array(feat_matrix), label=numpy.array(self.test_targets), feature_types=cat_vec, enable_categorical=True, feature_names = self.feature_names)
+        return dtest_feature_matrix
+
+
     def set_sub_sampled_train_ids(self, sub_sampling_factor: float):
         k = int(len(self.train_sample_ids)*sub_sampling_factor)
         sub_sampled_ids = random.sample(range(len(self.train_sample_ids)), k)
@@ -1026,19 +1033,38 @@ class CrossValidationSlice(Slotted_obj):
         self.sub_sampled_train_targets = [self.train_targets[pos] for pos in sub_sampled_ids]
         self.sub_sampled_train_class_weight_vector = [self.train_class_weight_vector[pos] for pos in sub_sampled_ids]
 
-    def get_train_feature_matrix(self, samples, sub_sampling = 1.0) -> list[list[int | float | None]]:
+    def get_train_feature_matrix(self, samples, sub_sampling = 1.0, get_cat_vec=False) -> list[list[int | float | None]]:
         if len(self.train_sample_ids) == 0:
             raise ValueError(f'No training samples in get_train_feature_matrix: {self.train_sample_ids=}')
         if len(self.feature_names) == 0:
             raise ValueError(f'No features in get_train_feature_matrix: {self.feature_names=}')
         if sub_sampling == 1.0:
-            feat_matrix: list[list[int | float | None]] = samples.get_feat_matrix_from_ids(self.train_sample_ids, self.feature_names)
+            if get_cat_vec:
+                feat_matrix, cat_vec = samples.get_feat_matrix_from_ids(self.train_sample_ids, self.feature_names, get_cat_vec=get_cat_vec)
+            else:
+                feat_matrix: list[list[int | float | None]] = samples.get_feat_matrix_from_ids(self.train_sample_ids, self.feature_names, get_cat_vec=get_cat_vec)
         else:
             if self.sub_sampled_train_ids is None:
                 self.set_sub_sampled_train_ids(sub_sampling)
-            feat_matrix: list[list[int | float | None]] = samples.get_feat_matrix_from_ids(self.sub_sampled_train_ids, self.feature_names)
+            if get_cat_vec:
+                feat_matrix, cat_vec = samples.get_feat_matrix_from_ids(self.sub_sampled_train_ids, self.feature_names, get_cat_vec=get_cat_vec)
+            else:
+                feat_matrix: list[list[int | float | None]] = samples.get_feat_matrix_from_ids(self.sub_sampled_train_ids, self.feature_names, get_cat_vec=get_cat_vec)
+        if get_cat_vec:
+            return feat_matrix, cat_vec
         return feat_matrix
     
+    def get_dtrain(self, samples, sub_sampling = 1.0) -> list[list[int | float | None]]:
+        train_feature_matrix: list[list[int | float | None]]
+        train_feature_matrix, cat_vec = self.get_train_feature_matrix(samples, sub_sampling=sub_sampling, get_cat_vec=True)
+        if sub_sampling == 1.0:
+            train_targets = self.train_targets
+        else:
+            train_targets = self.sub_sampled_train_targets
+
+        dtrain: xgb.DMatrix = xgb.DMatrix(numpy.array(train_feature_matrix), label= numpy.array(train_targets), feature_types=cat_vec, enable_categorical=True)
+        return dtrain
+
     def get_skewed_feat_matrices(self, samples, thresh):
         feat_matrices = samples.get_skewed_feat_matrices_from_ids(self.train_sample_ids, self.feature_names, thresh)
         return feat_matrices

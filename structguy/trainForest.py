@@ -18,15 +18,7 @@ import contextlib
 from scipy import stats
 import xgboost as xgb
 from ray.train.xgboost import XGBoostTrainer, RayTrainReportCallback
-#import dask
 
-#from dask import array as da
-#from dask import dataframe as dd
-#from dask.distributed import Client
-#from dask_cuda import LocalCUDACluster
-
-#from xgboost import dask as dxgb
-#from xgboost.dask import DaskDMatrix
 
 from filelock import FileLock
 from structguy import featureSelection, util
@@ -53,121 +45,6 @@ def makeBinaryClassifier(data, thresh, flip_sign=False):
             else:
                 binary.append(1)
     return binary
-
-
-@ray.remote(max_calls=1)
-def trainClassificationForest(
-    config,
-    samples,
-    cv_slice,
-    print_out=True,
-    skip_scoring=False,
-    remote=False,
-    cv_counter=None,
-):
-    depth = config.tree_depth
-    min_sample_split = config.min_sample_split
-    proc = config.proc_n
-    leaf_samples = config.tree_min_leaf_samples
-    n_of_trees = int(config.num_of_trees)
-    max_leaf_nodes = config.max_leaf_nodes
-    class_weight = config.class_weight
-    max_features = config.max_feature_parameter
-    bootstrap = config.bootstrap_parameter
-    min_impurity_decrease = 10 ** (-config.min_impurity_decrease_exp)
-    oob_score = config.oob_score
-    ccp_alpha = 10 ** (-config.ccp_alpha_exp)
-    max_sample_parameter = config.max_sample_parameter
-    criterion = config.criterion
-
-    zero_scores = util.Scores(zero=True, n_of_features=len(cv_slice.feature_names))
-
-    if remote:
-        zero_return = zero_scores, None, cv_counter
-    else:
-        zero_return = None, zero_scores, cv_counter
-
-    if depth < 1:
-        return zero_return
-    if leaf_samples < 1:
-        return zero_return
-    if min_sample_split < 2:
-        return zero_return
-    if n_of_trees < 1:
-        return zero_return
-    if min_impurity_decrease < 0.0 or min_impurity_decrease > 1.0:
-        return zero_return
-    if ccp_alpha < 0.0:
-        return zero_return
-    if max_sample_parameter <= 0.0 or max_sample_parameter > 1.0:
-        return zero_return
-
-    slice_updated = featureSelection.select_features(config, cv_slice, samples, print_out=print_out)
-
-    if slice_updated is None:
-        return zero_return
-
-    if print_out:
-        config.logParameter()
-
-    forest = RandomForestClassifier(
-        n_estimators=n_of_trees,
-        max_depth=depth,
-        min_samples_leaf=leaf_samples,
-        max_features=max_features,
-        n_jobs=proc,
-        min_samples_split=min_sample_split,
-        max_leaf_nodes=max_leaf_nodes,
-        class_weight=class_weight,
-        bootstrap=bootstrap,
-        criterion=criterion,
-        max_samples=max_sample_parameter,
-    )
-
-    if print_out:
-        config.logger.info(
-            f"Fit classification forest, {len(samples.raw_feature_matrix)=} {len(samples.raw_feature_matrix[0])=}"
-        )
-
-    forest.fit(cv_slice.train_feature_matrix, cv_slice.train_targets)
-
-    if skip_scoring:
-        return forest, None, cv_counter
-
-    y_pred = forest.predict(cv_slice.test_feature_matrix)
-
-    acc = accuracy_score(cv_slice.test_targets, y_pred)
-    int_targets = cv_slice.classToInt(cv_slice.test_targets)
-    int_preds = cv_slice.classToInt(y_pred)
-    roc = roc_auc_score(int_targets, int_preds)
-
-    f1 = f1_score(int_targets, int_preds)
-
-    precision = precision_score(int_targets, int_preds)
-    recall = recall_score(int_targets, int_preds)
-
-    mcc = matthews_corrcoef(int_targets, int_preds)
-
-    scores_obj = util.Scores(
-        acc=acc,
-        roc=roc,
-        precision=precision,
-        recall=recall,
-        f1=f1,
-        mcc=mcc,
-        n_of_features=len(cv_slice.feature_names),
-    )
-
-    if print_out:
-        scores_obj.printOut()
-
-    if not slice_updated:
-        cv_slice = None
-
-    if remote:
-        return scores_obj, pack(cv_slice), cv_counter
-    return forest, scores_obj, cv_counter
-
 
 def test_for_constant_array(a):
     if len(a) <= 1:
@@ -222,202 +99,6 @@ def trainRegressionForestWrapper(
     )
 
 
-
-@ray.remote
-def para_perturb(com_queue, store):
-    feat_names, feat_name_backmap, forest_dump_file, get_sample_wise_data, get_feat_impacts = store
-    
-    acc_feat_impacts = {}
-    sample_wise_feature_influence = {}
-    
-    
-    max_number_of_samples = 1_000
-    if not com_queue.empty():
-        feat_vecs, left, prediction_vector, target_vector = com_queue.get()
-    else:
-        return sample_wise_feature_influence, acc_feat_impacts
-    while True:
-        metadata_list = []
-        perturbed_feat_matrices = [[]]
-        matrix_id = 0
-        for sub_sample_id, feat_vec in enumerate(feat_vecs):
-            for feat_name in feat_names:
-                #config.logger.info(f'{feat_name=} {feat_name not in feat_name_backmap=}')
-                if feat_name not in feat_name_backmap:
-                    continue
-                    
-                #pred = xgb_forest.predict([feat_vec])[0]
-                feat_pos = feat_name_backmap[feat_name]
-                val = feat_vec[feat_pos]
-                #config.logger.info(f'{sample_id=} {feat_name=} {val=} {pred=}')
-
-                if feat_name[:3] == 'oh_':
-                    if val is not None:
-                        """
-                        alt_val = abs(val-1)
-                        perturbed_vec = feat_vec[:]
-                        perturbed_vec[feat_pos] = alt_val
-                        perturbed_feat_matrix.append(perturbed_vec)
-                        metadata_list.append((sample_id, feat_name, 'oh_alt'))
-                        """
-
-                        perturbed_vec = feat_vec[:]
-                        perturbed_vec[feat_pos] = None
-                        perturbed_feat_matrices[matrix_id].append(perturbed_vec)
-                        metadata_list.append((sub_sample_id, feat_name))
-                else:
-                    perturbed_vec = feat_vec[:]
-                    perturbed_vec[feat_pos] = None
-                    perturbed_feat_matrices[matrix_id].append(perturbed_vec)
-                    metadata_list.append((sub_sample_id, feat_name))
-                if len(perturbed_feat_matrices[matrix_id]) >= max_number_of_samples:
-                    perturbed_feat_matrices.append([])
-                    matrix_id += 1
-
-        forest = util.loadModel(forest_dump_file)[0]
-        perturbed_pred = numpy.array([])
-        for perturbed_feat_matrix in perturbed_feat_matrices:
-            if len(perturbed_feat_matrix) == 0:
-                continue
-            perturbed_pred = numpy.concatenate((perturbed_pred, forest.predict(perturbed_feat_matrix)))
-
-
-        pert_dicts: list[dict[str, float]] = [{}]
-        curr_sample_id = 0
-        for pert_id, (sub_sample_id, feat_name) in enumerate(metadata_list):
-
-            pred = prediction_vector[sub_sample_id]
-            pert_pred = perturbed_pred[pert_id]
-
-            d = pred - pert_pred
-
-            #config.logger.info(f'{sample_id=} {feat_name=} {d=} {alt_val_type=} {curr_sample_id}')
-
-            if sub_sample_id != curr_sample_id:
-                curr_sample_id = sub_sample_id
-                pert_dicts.append({})
-
-            if get_feat_impacts:
-                true_val = target_vector[sub_sample_id]
-                feature_impact = abs(true_val - pred) - abs(true_val - pert_pred)
-            else:
-                feature_impact = None
-            pert_dicts[sub_sample_id][feat_name] = [d, feature_impact]
-
-        for sub_sample_id, pert_dict in enumerate(pert_dicts):
-            sample_id = sub_sample_id + left
-
-            for feat_name in pert_dict:
-                d = pert_dict[feat_name]
-                if get_feat_impacts:
-                    if feat_name not in acc_feat_impacts:
-                        acc_feat_impacts[feat_name] = 0.
-
-                    acc_feat_impacts[feat_name] += d[1]
-                    
-            if get_sample_wise_data:
-                pert_list = [(k, pert_dict[k]) for k in pert_dict]
-                sorted_pert_list = sorted(pert_list, key=lambda x:abs(x[1][0]), reverse=True)
-                feat_data = []
-                
-                for feat_name, d in sorted_pert_list:
-                    feat_pos = feat_name_backmap[feat_name]
-                    val = feat_vecs[sub_sample_id][feat_pos]
-                    feat_data.append((feat_name, d[0], val))
-                sample_wise_feature_influence[sample_id] = feat_data
-
-        if not com_queue.empty():
-            try:
-                feat_vecs, left, prediction_vector, target_vector = com_queue.get(timeout = 120.)
-            except TimeoutError:
-                break
-            except ray.util.queue.Empty:
-                break
-        else:
-            break
-    return sample_wise_feature_influence, acc_feat_impacts
-
-
-
-def perturb_xgb(config, forest_dump_file, feat_vecs, feature_names, prediction_vector, target_vector, get_sample_wise_data = False, get_feat_impacts=True):
-    #total_ram = ray._private.utils.get_system_memory()
-    model_filesize = os.path.getsize(forest_dump_file)
-    #safe_memory_estimate_per_model = (model_filesize * 1_000) + 1024*1024*1024
-    #half_ram = total_ram/2
-
-    #max_proc_n_by_mem = int(half_ram // safe_memory_estimate_per_model)
-    max_proc_n_by_mem = config.proc_n
-    config.logger.info(f'{max_proc_n_by_mem=} {model_filesize=}')
-    n_jobs = max([2, min([config.proc_n, max_proc_n_by_mem])])
-
-    max_number_of_samples = len(feat_vecs) // n_jobs
-    if len(feat_vecs) % n_jobs != 0:
-        max_number_of_samples += 1
-
-    max_number_of_samples = 1_000
-
-    feat_name_backmap = {}
-    for feat_number, feat_name in enumerate(feature_names):
-        feat_name_backmap[feat_name] = feat_number
-
-    config.logger.info(f'{len(feature_names)=} {len(feat_vecs)=} {get_sample_wise_data=} {get_feat_impacts=}')
-
-    acc_feat_impacts = {}
-    if get_sample_wise_data:
-        sample_wise_feature_influence = [None] * len(feat_vecs)
-    else:
-        sample_wise_feature_influence = None
-
-    not_done = True
-    iter_number = 0
-    para_perturb_process_ids = []
-    store = ray.put((feature_names, feat_name_backmap, forest_dump_file, get_sample_wise_data, get_feat_impacts))
-
-    com_queue = Queue()
-    while not_done:
-        left = iter_number*max_number_of_samples
-        right = (iter_number+1)*max_number_of_samples
-        if right >= len(feat_vecs):
-            not_done = False
-
-        submatrix = feat_vecs[left:right]
-        com_queue.put((submatrix, left, prediction_vector[left:right], target_vector[left:right]))
-        #config.logger.info(f'{left=} {right=} {len(submatrix)=} {len(prediction_vector[left:right])=} {len(target_vector[left:right])=}')
-        iter_number += 1
-
-    n_jobs = min([n_jobs, iter_number])
-
-    for i in range(n_jobs):
-        para_perturb_process_ids.append(para_perturb.remote(com_queue, store))
-
-
-    config.logger.info(f'{len(para_perturb_process_ids)=}')
-
-    t0 = time.time()
-    results = ray.get(para_perturb_process_ids)
-    t1 = time.time()
-
-    config.logger.info(f'Time for the para processes: {t1-t0} {n_jobs=}')
-
-    for sub_sample_wise_feature_influence, sub_acc_feat_impacts in results:
-        if get_feat_impacts:
-            for feat_name in sub_acc_feat_impacts:
-                if feat_name not in acc_feat_impacts:
-                    acc_feat_impacts[feat_name] = 0.
-
-                acc_feat_impacts[feat_name] += sub_acc_feat_impacts[feat_name]
-
-        if get_sample_wise_data:
-            for sample_id in sub_sample_wise_feature_influence:
-                sample_wise_feature_influence[sample_id] = sub_sample_wise_feature_influence[sample_id]
-
-
-    if get_feat_impacts:
-        acc_feat_impacts = [(k, acc_feat_impacts[k]/len(feat_vecs)) for k in acc_feat_impacts]
-        acc_feat_impacts = sorted(acc_feat_impacts, key=lambda x:x[1], reverse=True)
-        #config.logger.info(acc_feat_impacts)
-    return sample_wise_feature_influence, acc_feat_impacts
-
 @njit
 def shap_internal_loop(
         N_feat_names: int,
@@ -438,47 +119,40 @@ def shap_internal_loop(
 
     return acc_feat_impacts
 
-def shap_analysis(config, forest, feat_vecs, feature_names, prediction_vector, target_vector):
+def shap_analysis(config, forest, d_feat_vecs: xgb.DMatrix, feature_names, prediction_vector, target_vector):
     if config.verbosity >= 2:
-        config.logger.info(f'Call of shap_analysis: {config.gpu_mode=} {len(feat_vecs)=}')
+        config.logger.info(f'Call of shap_analysis: {config.gpu_mode=}')
     
     times = []
     ta = time.time()
     
-    if config.gpu_mode:
-        #explainer = shap.explainers.GPUTree(forest, np_feat_vecs)
-        d_feat_vecs = xgb.DMatrix(feat_vecs, feature_names = feature_names)
-        done = False
-        n = 1
-        while not done:
-            try:
-                if n > 1:
-                    h = len(feat_vecs) // 2
-                    d_feat_vecs_1 = xgb.DMatrix(feat_vecs[:h], feature_names = feature_names)
-                    d_feat_vecs_2 = xgb.DMatrix(feat_vecs[h:], feature_names = feature_names)
-                    explanation_1 = forest.predict(d_feat_vecs_1, pred_contribs=True)
-                    explanation_2 = forest.predict(d_feat_vecs_2, pred_contribs=True)
+    explanation = forest.predict(d_feat_vecs, pred_contribs=True)
 
-                    explanation = numpy.concatenate(explanation_1, explanation_2)
-                else:
-                    explanation = forest.predict(d_feat_vecs, pred_contribs=True)
-                done = True
-            except xgb.core.XGBoostError:
-                done = False
-                
-                n+=1
-                if n == 4:
-                    return None, times
-                config.logger.info(f'Catched XGBoost Error, try again {n}')
-                time.sleep(n**2)
+    """
+    done = False
+    n = 1
+    while not done:
+        try:
+            if n > 1:
+                h = len(feat_vecs) // 2
+                d_feat_vecs_1 = xgb.DMatrix(feat_vecs[:h], feature_names = feature_names)
+                d_feat_vecs_2 = xgb.DMatrix(feat_vecs[h:], feature_names = feature_names)
+                explanation_1 = forest.predict(d_feat_vecs_1, pred_contribs=True)
+                explanation_2 = forest.predict(d_feat_vecs_2, pred_contribs=True)
 
-    else:
-        np_feat_vecs = numpy.array(feat_vecs)
-        explainer = shap.TreeExplainer(forest)
-        ta = add_to_times(times, ta)
-        explanation = explainer(np_feat_vecs)
-        explanation = numpy.array([x.values for x in explanation])
-    
+                explanation = numpy.concatenate(explanation_1, explanation_2)
+            else:
+                explanation = forest.predict(d_feat_vecs, pred_contribs=True)
+            done = True
+        except xgb.core.XGBoostError:
+            done = False
+            
+            n+=1
+            if n == 4:
+                return None, times
+            config.logger.info(f'Catched XGBoost Error, try again {n}')
+            time.sleep(n**2)
+    """
     ta = add_to_times(times, ta)
 
     acc_feat_impacts = shap_internal_loop(
@@ -490,7 +164,7 @@ def shap_analysis(config, forest, feat_vecs, feature_names, prediction_vector, t
     
     ta = add_to_times(times, ta)
 
-    acc_feat_impacts = sorted(zip(feature_names, [x/len(feat_vecs) for x in acc_feat_impacts]), key=lambda x:x[1], reverse=True)
+    acc_feat_impacts = sorted(zip(feature_names, [x/d_feat_vecs.num_row() for x in acc_feat_impacts]), key=lambda x:x[1], reverse=True)
     ta = add_to_times(times, ta)
     return acc_feat_impacts, times
 
@@ -520,14 +194,11 @@ def rho_eval_for_xgboost_cb(predt: numpy.ndarray, dtest: xgb.DMatrix) -> tuple[s
 
 def xgb_train_wrapper(
         config: util.Config,
-        train_feature_matrix: list[list[int | float | None]],
-        train_targets: list[float],
+        dtrain: xgb.DMatrix,
         dtest_feature_matrix: xgb.DMatrix,
         second_round = False,
         ):
         
-    dtrain = xgb.DMatrix(numpy.array(train_feature_matrix), label= numpy.array(train_targets))#, weight = params["train_weights"])
-
     es_list = []
     evals: list[tuple[xgb.DMatrix, str]] = []
     eval_label = 'eval'
@@ -559,7 +230,9 @@ def xgb_train_wrapper(
             "subsample": config.max_sample_parameter,
             "callbacks": es_list,
             #"eval_metric": ['irho'],
-            "disable_default_eval_metric": True
+            "disable_default_eval_metric": True,
+            "max_cat_to_onehot": 50,
+            "max_cat_threshold": 5
             }
         forest = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees), early_stopping_rounds= config.early_stopping, evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
     else:
@@ -588,7 +261,9 @@ def xgb_train_wrapper(
             "subsample": config.max_sample_parameter_1,
             "callbacks": es_list,
             #"eval_metric": ['irho'],
-            "disable_default_eval_metric": True
+            "disable_default_eval_metric": True,
+            "max_cat_to_onehot": 50,
+            "max_cat_threshold": 5
             }
         forest = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees_1), early_stopping_rounds=int(config.early_stopping_1), evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
 
@@ -825,18 +500,14 @@ def trainRegressionForest(
             slice_slice.calcSampleWeights(config, distance_map)
         elif config.weighting == "subsample_distance":
             weights_updated = slice_slice.calcSubsampleDistanceWeights(config, para_number=proc)
-        train_feature_matrix: list[list[int | float | None]] = slice_slice.get_train_feature_matrix(samples, sub_sampling=config.sub_sample_factor)
-        if config.sub_sample_factor == 1.0:
-            train_targets = slice_slice.train_targets
-        else:
-            train_targets = slice_slice.sub_sampled_train_targets
 
-        test_feature_matrix = slice_slice.get_test_feature_matrix(samples)
-        dtest_feature_matrix = xgb.DMatrix(numpy.array(test_feature_matrix), label=numpy.array(slice_slice.test_targets))
+        dtrain = slice_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor)  
+        
+        dtest_feature_matrix = slice_slice.get_dtest(samples)
 
         ta = add_to_times(times, ta) #6
 
-        forest = xgb_train_wrapper(config, train_feature_matrix, train_targets, dtest_feature_matrix)
+        forest = xgb_train_wrapper(config, dtrain, dtest_feature_matrix)
         if forest is None:
             return return_zero(zero_return, remote, cv_slice)
 
@@ -845,19 +516,14 @@ def trainRegressionForest(
     ta = add_to_times(times, ta) #7
 
     if config.forest_type == 'xgboost' and not skip_feature_selection:
-        #path_to_model = f'tmp_model_{cv_counter}.dump'
-        #util.storeModel(forest, None, config, path_to_model, None)
 
         ta = add_to_times(times, ta) #8
 
-        test_feature_matrix = slice_slice.get_test_feature_matrix(samples)
-        dtest_feature_matrix = xgb.DMatrix(numpy.array(test_feature_matrix))
         y_pred = forest.predict(dtest_feature_matrix)
 
         ta = add_to_times(times, ta) #9
 
-        #_, acc_feat_impacts = perturb_xgb(config, path_to_model, test_feature_matrix, cv_slice.feature_names, y_pred, slice_slice.test_targets)
-        acc_feat_impacts, shap_times = shap_analysis(config, forest, test_feature_matrix, slice_slice.feature_names, y_pred, slice_slice.test_targets)
+        acc_feat_impacts, shap_times = shap_analysis(config, forest, dtest_feature_matrix, slice_slice.feature_names, y_pred, slice_slice.test_targets)
         times.append(shap_times)
 
         ta = add_to_times(times, ta) #10
@@ -881,19 +547,11 @@ def trainRegressionForest(
             slice_slice.filterFeatures(feats_to_remove)      
             ta = add_to_times(times, ta) #11
 
-            if config.weighting == "geometric":
-                slice_slice.calcSampleWeights(config, distance_map)
-            elif config.weighting == "subsample_distance":
-                weights_updated = slice_slice.calcSubsampleDistanceWeights(config, para_number=proc)
-            train_feature_matrix: list[list[int | float | None]] = slice_slice.get_train_feature_matrix(samples, sub_sampling=config.sub_sample_factor)
-            
-            #with FileLock("rf_regressor.lock"):
-            
-            #protwise_test_data_tuples = slice_slice.get_prot_wise_test_data_tuples(samples)
-            test_feature_matrix = slice_slice.get_test_feature_matrix(samples)
-            dtest_feature_matrix = xgb.DMatrix(numpy.array(test_feature_matrix), label=numpy.array(slice_slice.test_targets))
+            dtrain = slice_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor)
 
-            forest = xgb_train_wrapper(config, train_feature_matrix, train_targets, dtest_feature_matrix, second_round=True)
+            dtest_feature_matrix = slice_slice.get_dtest(samples)
+
+            forest = xgb_train_wrapper(config, dtrain, dtest_feature_matrix, second_round=True)
             if forest is None:
                 return return_zero(zero_return, remote, cv_slice)
 
@@ -911,8 +569,8 @@ def trainRegressionForest(
     if debug:
         cv_slice.printBalance(config)
 
-    test_feature_matrix = cv_slice.get_test_feature_matrix(samples)
-    dtest_feature_matrix = xgb.DMatrix(numpy.array(test_feature_matrix))
+    dtest_feature_matrix = cv_slice.get_dtest(samples)
+
     try:
         y_pred = forest.predict(dtest_feature_matrix)
     except ValueError:
@@ -921,17 +579,7 @@ def trainRegressionForest(
         config.logger.info(f'Catched error {config.forest_type=} {skip_feature_selection=}: {e}\n{f}\n{g}\n')
         return return_zero(zero_return, remote, cv_slice)
     if score_train:
-        if config.forest_type == "xgboost" and not skip_feature_selection:
-            train_feature_matrix = cv_slice.get_train_feature_matrix(samples, sub_sampling=config.sub_sample_factor)
-            dtrain_feature_matrix = xgb.DMatrix(numpy.array(train_feature_matrix))
-        if config.sub_sample_factor == 1.0:
-            train_sample_ids = cv_slice.train_sample_ids
-            train_targets = cv_slice.train_targets
-            train_weights = cv_slice.train_class_weight_vector
-        else:
-            train_sample_ids = cv_slice.sub_sampled_train_ids
-            train_targets = cv_slice.sub_sampled_train_targets
-            train_weights = cv_slice.sub_sampled_train_class_weight_vector
+        dtrain_feature_matrix = cv_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor)
         done = False
         n = 1
         while not done:
@@ -983,7 +631,7 @@ def trainRegressionForest(
 
     scores_obj = calc_scores_obj(cv_slice.test_targets, y_pred, cv_slice.test_sample_ids, cv_slice.test_class_weight_vector, cv_slice.feature_names, runtime_penalty = t_complete)
     if score_train:
-        train_scores_obj = calc_scores_obj(train_targets, x_pred, train_sample_ids, train_weights, cv_slice.feature_names, runtime_penalty = t_complete)
+        train_scores_obj = calc_scores_obj(cv_slice.train_targets, x_pred, cv_slice.train_sample_ids, cv_slice.train_weights, cv_slice.feature_names, runtime_penalty = t_complete)
         scores_obj.train_scores = train_scores_obj
         if print_out:
             config.logger.info('Train scores:')
