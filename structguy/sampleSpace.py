@@ -817,7 +817,7 @@ class SampleSpace(Slotted_obj):
             if len(bins[bin_lower]) <= min_bin_size:
                 for sample_id in bins[bin_lower]:
                     deletion_list.append(sample_id)
-                    config.logger.info('Outlier detection:',sample_id,self.samples[sample_id].targetValue)
+                    config.logger.info(f'Outlier detection: {sample_id=} {self.samples[sample_id].targetValue=}')
         self.removeSamples(deletion_list)
 
     def printPureMixedProportion(self,config):
@@ -874,7 +874,15 @@ class SampleSpace(Slotted_obj):
         for sample_id in self.samples:
             sample_id_list.append(sample_id)
             test_targets.append(self.samples[sample_id].targetValue)
-        return test_feature_matrix, test_targets, sample_id_list, feat_id_vec
+
+        cat_vec = []
+        for feat_name in extern_feature_list:
+            if self.features[feat_name].f_type == 'categorical':
+                cat_vec.append('c')
+            else:
+                cat_vec.append('q')
+
+        return test_feature_matrix, test_targets, sample_id_list, feat_id_vec, cat_vec
 
     def filterSamplesByMappedStructures(self,config):
         del_list = []

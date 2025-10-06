@@ -454,9 +454,9 @@ def load_data_for_pred(
     for sample_id in samples.samples:
         samples.samples[sample_id].testtrain = "test"
 
-    test_feature_matrix, test_targets, sample_id_list, feat_id_vec = samples.get_test_data_for_feature_list(feature_names, config)
+    test_feature_matrix, test_targets, sample_id_list, feat_id_vec, cat_vec = samples.get_test_data_for_feature_list(feature_names, config)
 
-    return samples, test_feature_matrix, test_targets, sample_id_list, feat_id_vec
+    return samples, test_feature_matrix, test_targets, sample_id_list, feat_id_vec, cat_vec
 
 
 def val_to_str(val):
@@ -517,7 +517,7 @@ def evaluate_dataset(config: Config):
     if config.verbosity >= 5:
         config.logger.info(f'{extern_feature_names_list=}')
 
-    samples, test_feature_matrix, test_targets, sample_id_list, feat_id_vec = load_data_for_pred(config, impute_map, extern_feature_names_list)
+    samples, test_feature_matrix, test_targets, sample_id_list, feat_id_vec, cat_vec = load_data_for_pred(config, impute_map, extern_feature_names_list)
 
     external_feat_pos_dict = dict(zip(extern_feature_names_list, range(len(extern_feature_names_list))))
 
@@ -555,7 +555,11 @@ def evaluate_dataset(config: Config):
         y_pred = total_y_pred
     else:
     """
-    dtest_feature_matrix = DMatrix(numpy.array(test_feature_matrix))
+    dtest_feature_matrix = DMatrix(
+        numpy.array(test_feature_matrix),
+        feature_types=cat_vec,
+        enable_categorical=True,
+        feature_names = extern_feature_names_list)
     y_pred = forest.predict(dtest_feature_matrix)
 
     if config.path_to_multi_savs_table is not None:
@@ -716,8 +720,10 @@ def evaluate_dataset(config: Config):
 
                 # explainer = shap.TreeExplainer(forest)
                 # explanation = explainer(test_feature_matrix)
-                dtest_feature_matrix = DMatrix(test_feature_matrix, feature_names=extern_feature_names_list)
+                #dtest_feature_matrix = DMatrix(test_feature_matrix, feature_names=extern_feature_names_list)
+                
                 explanation = forest.predict(dtest_feature_matrix, pred_contribs=True)
+                
                 # config.logger.info(explanation[0])
 
                 # for pos, shap_val in enumerate(explanation[0][:-1]):
@@ -846,7 +852,7 @@ def evaluate_dataset(config: Config):
             if config.calc_sd:
                 ind_preds = []
                 for tree_id, tree in enumerate(forest):
-                    ind_pred = tree.predict(DMatrix(test_feature_matrix, feature_names = extern_feature_names_list))
+                    ind_pred = tree.predict(dtest_feature_matrix)
                     ind_preds.append(ind_pred)
 
                 ind_preds = numpy.array(ind_preds).transpose()
@@ -923,7 +929,8 @@ def evaluate_dataset(config: Config):
                     for feat_pos, feat_name in enumerate(extern_feature_names_list):
                         shap_val = explanation[pos][feat_pos]
                         feat_val = test_feature_matrix[pos][feat_pos]
-                        full_eval_words.append(f'{shap_val},{feat_val}')
+                        if config.target_values is not None:
+                            full_eval_words.append(f'{shap_val},{feat_val}')
 
                 line = "\t".join(words) + "\n"
                 lines.append(line)

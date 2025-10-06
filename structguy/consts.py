@@ -20,7 +20,8 @@ feature_categories = [
     'non-PPI contacts',
     'flexibility',
     'function type',
-    'protein attributes'
+    'protein attributes',
+    'structural classification'
 ]
 
 feat_name_category_dict = {
@@ -38,5 +39,10 @@ feat_name_category_dict = {
     'Protein Size' : 11,
     'Relative Sequence Position' : 4,
     'Sequence Position Number' : 11,
-    'Volume mean' : 4
+    'Volume mean' : 4,
+    'Mutant AA' : 4,
+    'Wildtype AA' : 4,
+    'simple_class' : 12,
+    'structural_classification' : 12,
+    'ssa' : 7
 }

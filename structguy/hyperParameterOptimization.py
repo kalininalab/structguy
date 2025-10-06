@@ -1208,6 +1208,8 @@ def initParameters(
             #parameters["feat_impact_thresh"] = Parameter("feat_impact_thresh", "real", half_step_limits=[-0.01,0.01])
             parameters["tree_depth"] = Parameter("tree_depth", "integer", half_step_limits=[1,31])
             parameters["num_of_trees"] = Parameter("num_of_trees", "integer", half_step_limits=[10,10_000])
+            parameters["max_cat_to_onehot"] = Parameter("max_cat_to_onehot", "integer", half_step_limits=[1,500])
+            parameters["max_cat_threshold"] = Parameter("max_cat_threshold", "integer", half_step_limits=[1,100])
 
             parameters["early_stopping_1"] = Parameter("early_stopping_1", "integer", half_step_limits=[1, 1000])
             parameters["min_child_weight_1"] = Parameter("min_child_weight_1", "real", half_step_limits=[0., 100.])
@@ -1218,6 +1220,8 @@ def initParameters(
             parameters["max_delta_step_1"] = Parameter("max_delta_step_1", "real", half_step_limits=[0.,10.])
             parameters["tree_depth_1"] = Parameter("tree_depth_1", "integer_1", half_step_limits=[1,31])
             parameters["num_of_trees_1"] = Parameter("num_of_trees_1", "integer_1", half_step_limits=[10,10_000])
+            parameters["max_cat_to_onehot_1"] = Parameter("max_cat_to_onehot_1", "integer", half_step_limits=[1,500])
+            parameters["max_cat_threshold_1"] = Parameter("max_cat_threshold_1", "integer", half_step_limits=[1,100])
 
         if not config.regression:
             parameters["criterion"] = Parameter("criterion", "categorical", possible_values=config.criteria, classification_specific=True)

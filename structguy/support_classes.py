@@ -1022,7 +1022,12 @@ class CrossValidationSlice(Slotted_obj):
     
     def get_dtest(self, samples):
         feat_matrix, cat_vec = samples.get_feat_matrix_from_ids(self.test_sample_ids, self.feature_names, get_cat_vec=True)
-        dtest_feature_matrix = xgb.DMatrix(numpy.array(feat_matrix), label=numpy.array(self.test_targets), feature_types=cat_vec, enable_categorical=True, feature_names = self.feature_names)
+        dtest_feature_matrix = xgb.DMatrix(
+            numpy.array(feat_matrix),
+            label=numpy.array(self.test_targets),
+            feature_types=cat_vec,
+            enable_categorical=True,
+            feature_names = self.feature_names)
         return dtest_feature_matrix
 
 
@@ -1062,7 +1067,12 @@ class CrossValidationSlice(Slotted_obj):
         else:
             train_targets = self.sub_sampled_train_targets
 
-        dtrain: xgb.DMatrix = xgb.DMatrix(numpy.array(train_feature_matrix), label= numpy.array(train_targets), feature_types=cat_vec, enable_categorical=True)
+        dtrain: xgb.DMatrix = xgb.DMatrix(
+            numpy.array(train_feature_matrix),
+            label= numpy.array(train_targets),
+            feature_names = self.feature_names,
+            feature_types=cat_vec,
+            enable_categorical=True)
         return dtrain
 
     def get_skewed_feat_matrices(self, samples, thresh):

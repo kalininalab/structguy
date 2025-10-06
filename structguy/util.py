@@ -235,6 +235,8 @@ class Config:
         self.xgb_lambda = 1.
         self.colsample_bytree = 1.
         self.max_delta_step = 0.
+        self.max_cat_to_onehot = 410
+        self.max_cat_threshold = 50
 
         self.tree_depth_1 = 194
         self.num_of_trees_1 = 382
@@ -247,6 +249,8 @@ class Config:
         self.colsample_bytree_1 = 1.
         self.max_delta_step_1 = 0.
         self.max_sample_parameter_1 = 0.9276380091150952
+        self.max_cat_to_onehot_1 = 410
+        self.max_cat_threshold_1 = 50
 
         self.feat_impact_thresh = 0.
         self.fs_tree_depth = 10
@@ -657,6 +661,8 @@ class Config:
             'fs_ccp_alpha_exp',
             'fs_max_sample_parameter',
             'corr_thresh',
+            "max_cat_to_onehot",
+            "max_cat_threshold",
             'tree_depth_1',
             'num_of_trees_1',
             'learning_rate_1',
@@ -667,7 +673,9 @@ class Config:
             'xgb_lambda_1',
             'colsample_bytree_1',
             'max_delta_step_1',
-            'max_sample_parameter_1'
+            'max_sample_parameter_1',
+            "max_cat_to_onehot_1",
+            "max_cat_threshold_1",
         ]
 
         self.hyperparameter_set = set(self.hyperparameters)
@@ -2022,7 +2030,7 @@ def catogrize_feat_by_name(featname):
     
     if featname.count(' AA_') > 0 or featname[:6] == 'oh_AA ':
         return 4
-    
+
     if featname[:5] == 'Site_' or featname[:9] == 'Backbone_' or featname[:9] == 'nof_site_' or featname[:8] == 'All_atom':
         return 6
     
@@ -2032,7 +2040,7 @@ def catogrize_feat_by_name(featname):
     if featname[:12] == 'intra_chain_':
         return 1
     
-    if featname[:16] == 'oh_Function Type':
+    if featname[:16] == 'oh_Function Type' or featname == 'Function Type':
         return 10
     
     if featname[:4] == 'cis_' or featname[:7] == 'ssbond_' or featname[-6:] == 'ssbond':

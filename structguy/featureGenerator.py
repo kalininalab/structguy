@@ -41,7 +41,7 @@ def parseLines_remote_wrapper(store, left, right):
 def parseLines(config, left, right, features, lines, primary_protein_id_col, amount_of_struct_col, effect_col, aac_col_s, tags_col, non_feature_cols, feature_names):
     output = []
     if config.verbosity >= 1:
-        print(
+        config.logger.info(
             f"parseLines: non_feature_cols: {non_feature_cols}, primary_protein_id_col: {primary_protein_id_col}, aac_col_s: {aac_col_s}, effect_col: {effect_col}, tags_col: {tags_col}, config.target_values: {config.target_values}, lines: {left}-{right} of {len(lines)}"
         )
 
@@ -54,7 +54,7 @@ def parseLines(config, left, right, features, lines, primary_protein_id_col, amo
         force_filter = False
         words = line.split("\t")
         if len(words) == 1:
-            print(list(line))
+            config.logger.info(f'{list(line)}')
             words = line.split("    ")
         # if effectRegressor != None:
         #    words = words[:-1]
@@ -62,7 +62,7 @@ def parseLines(config, left, right, features, lines, primary_protein_id_col, amo
         """
         if (len(words) - len(non_feature_cols)) < len(feature_names):
             if config.verbosity >= 4:
-                print(f'Line reject, count incorrect: {len(words)}, {len(non_feature_cols)}, {len(feature_names)}')
+                config.logger.info(f'Line reject, count incorrect: {len(words)}, {len(non_feature_cols)}, {len(feature_names)}')
             continue
         """
 
@@ -85,11 +85,11 @@ def parseLines(config, left, right, features, lines, primary_protein_id_col, amo
         sample_id = (primary_protein_id, aac)
 
         if config.verbosity >= 6:
-            print(f"Parsing sample: {sample_id}")
+            config.logger.info(f"Parsing sample: {sample_id}")
 
         if primary_protein_id in config.blacklist:
             if config.verbosity >= 4:
-                print(f"Sample was blacklisted {sample_id}")
+                config.logger.info(f"Sample was blacklisted {sample_id}")
 
             continue
 
@@ -112,7 +112,7 @@ def parseLines(config, left, right, features, lines, primary_protein_id_col, amo
                 try:
                     tag_value = float(tag_value)
                 except:
-                    print(f"Given effect tag had non-float tag value: {tag_value} for {sample_id}")
+                    config.logger.info(f"Given effect tag had non-float tag value: {tag_value} for {sample_id}")
                     continue
                 target_values.append(tag_value)
             if len(target_values) == 0:
@@ -123,7 +123,7 @@ def parseLines(config, left, right, features, lines, primary_protein_id_col, amo
             if effect_col is not None:
                 if words[effect_col] == "None" and config.target_values is not None:
                     if config.verbosity >= 4:
-                        print(f"Sample rejected: effect is None, while effect_col is not")
+                        config.logger.info(f"Sample rejected: {config.target_values=}, while {words[effect_col]=}")
 
                     continue
 
@@ -168,14 +168,14 @@ def parseLines(config, left, right, features, lines, primary_protein_id_col, amo
             except:
                 [e, f, g] = sys.exc_info()
                 g = traceback.format_exc()
-                print(f"Feature parse error, sample will be filtered: {primary_protein_id} {aac} {tags} {feat_name} {x}\n{e}\n{f}\n{g}")
+                config.logger.info(f"Feature parse error, sample will be filtered: {primary_protein_id} {aac} {tags} {feat_name} {x}\n{e}\n{f}\n{g}")
                 # force_filter = True
                 continue
 
             feat_out.append((value, feat_name))
 
         if target_value is None and print_n < max_print and config.verbosity >= 1:
-            print(f"In parseLines - Target value is None for {sample_id}")
+            config.logger.info(f"In parseLines - Target value is None for {sample_id}")
             print_n += 1
         if force_filter:
             continue
@@ -205,7 +205,7 @@ def parse_structural_features(
 
 def parse_feature_table(file_path, samples, config, filter_none_tv, non_feature_cols=[0, 1, 2, 3, 4], primary_protein_id_col=0, aac_col_s=[1], tags_col=3, amount_of_struct_col=4, effect_col=2):
     if config.verbosity >= 1:
-        print(
+        config.logger.info(
             f"Reading feature file: {file_path}, non_feature_cols: {non_feature_cols}, primary_protein_id_col: {primary_protein_id_col}, aac_col_s: {aac_col_s}, effect_col: {effect_col}, tags_col: {tags_col}, filter none TV: {filter_none_tv}"
         )
 
@@ -229,14 +229,14 @@ def parse_feature_table(file_path, samples, config, filter_none_tv, non_feature_
 
     if config.verbosity >= 1:
         t1 = time.time()
-        print(f"parse_feature_table, part 1: {t1 - t0}")
+        config.logger.info(f"parse_feature_table, part 1: {t1 - t0}")
 
     headless_lines = lines[1:]
     random.shuffle(headless_lines)
 
     if config.verbosity >= 1:
         t2 = time.time()
-        print(f"parse_feature_table, part 2: {t2 - t1}")
+        config.logger.info(f"parse_feature_table, part 2: {t2 - t1}")
 
     if config.verbosity >= 4:
         samples.print_feat_types(config)
@@ -247,7 +247,7 @@ def parse_feature_table(file_path, samples, config, filter_none_tv, non_feature_
 
     if config.verbosity >= 1:
         t5 = time.time()
-        print(f"parse_feature_table, part 5: {t5 - t2}, {len(output)}")
+        config.logger.info(f"parse_feature_table, part 5: {t5 - t2}, {len(output)}")
 
     n_f = 0
     n_s = 0
@@ -261,7 +261,7 @@ def parse_feature_table(file_path, samples, config, filter_none_tv, non_feature_
             n_f += 1
         samples.addTargetValue(sample_id, target_value)
         if target_value is None and n_print < max_print:
-            print(f"TV is None for {sample_id}")
+            config.logger.info(f"TV is None for {sample_id}")
             n_print += 1
         samples.samples[sample_id].amount_of_structures = amount_of_structures
         samples.samples[sample_id].tags = tags
@@ -275,10 +275,10 @@ def parse_feature_table(file_path, samples, config, filter_none_tv, non_feature_
 
     if config.verbosity >= 1:
         t6 = time.time()
-        print(f"parse_feature_table, part 6: {t6 - t5}")
-        print(f"Total samples: {n_s}, total feature values: {n_f}")
+        config.logger.info(f"parse_feature_table, part 6: {t6 - t5}")
+        config.logger.info(f"Total samples: {n_s}, total feature values: {n_f}")
     if config.verbosity >= 1:
-        print("Finished parsing of feature file")
+        config.logger.info("Finished parsing of feature file")
 
 
 def createTrainingSet(
@@ -291,7 +291,7 @@ def createTrainingSet(
         filter_synon=False
         ):
     if config.verbosity >= 2:
-        print(f"Call of createTrainingSet: {external_impute is None=} {for_prediction=} {config.path_to_processed_features_file=}")
+        config.logger.info(f"Call of createTrainingSet: {external_impute is None=} {for_prediction=} {config.path_to_processed_features_file=}")
 
     samples = sampleSpace.SampleSpace(config)
 
@@ -317,9 +317,9 @@ def createTrainingSet(
 
         if config.fusePositions:
             config.regression = False
-            # print(samples.samples.keys())
+            # config.logger.info(samples.samples.keys())
             samples.fusePositions()
-            # print(samples.samples.keys())
+            # config.logger.info(samples.samples.keys())
             config.target_values = ["all neutral", "possibly damaging"]
 
         samples.standardFilter(config, filter_synon=filter_synon)
@@ -357,7 +357,7 @@ def createTrainingSet(
                 samples.transform_matrix_dict()
                 samples.calc_subsamples_feat_corr_matrix(config)
                 t_1 = time.time()
-                print(f'Time for calculating feat_corr_matrix: {t_1-t_0}')
+                config.logger.info(f'Time for calculating feat_corr_matrix: {t_1-t_0}')
                 stop_matrix_transformation = True
             samples.dump(config.path_to_processed_features_file)
 
@@ -380,7 +380,7 @@ def createTrainingSet(
                     samples.transform_matrix_dict()
                     samples.calc_subsamples_feat_corr_matrix(config)
                     t_1 = time.time()
-                    print(f'Time for calculating feat_corr_matrix: {t_1-t_0}')
+                    config.logger.info(f'Time for calculating feat_corr_matrix: {t_1-t_0}')
                     stop_matrix_transformation = True
                 samples.dump(config.path_to_processed_features_file)
 
@@ -402,5 +402,5 @@ def createTrainingSet(
         samples.transform_matrix_dict()
         samples.calc_subsamples_feat_corr_matrix(config)
         t_1 = time.time()
-        print(f'Time for calculating feat_corr_matrix: {t_1-t_0}')
+        config.logger.info(f'Time for calculating feat_corr_matrix: {t_1-t_0}')
     return samples
