@@ -1205,7 +1205,7 @@ def initParameters(
             parameters["xgb_lambda"] = Parameter("xgb_lambda", "real", half_step_limits=[0.,5.])
             parameters["colsample_bytree"] = Parameter("colsample_bytree", "real", half_step_limits=[0.,1.])
             parameters["max_delta_step"] = Parameter("max_delta_step", "real", half_step_limits=[0.,10.])
-            parameters["feat_impact_thresh"] = Parameter("feat_impact_thresh", "real", half_step_limits=[-0.01,0.01])
+            #parameters["feat_impact_thresh"] = Parameter("feat_impact_thresh", "real", half_step_limits=[-0.01,0.01])
             parameters["tree_depth"] = Parameter("tree_depth", "integer", half_step_limits=[1,31])
             parameters["num_of_trees"] = Parameter("num_of_trees", "integer", half_step_limits=[10,10_000])
 
@@ -1216,8 +1216,8 @@ def initParameters(
             parameters["xgb_lambda_1"] = Parameter("xgb_lambda_1", "real", half_step_limits=[0.,5.])
             parameters["colsample_bytree_1"] = Parameter("colsample_bytree_1", "real", half_step_limits=[0.,1.])
             parameters["max_delta_step_1"] = Parameter("max_delta_step_1", "real", half_step_limits=[0.,10.])
-            parameters["tree_depth_1"] = Parameter("tree_depth", "integer_1", half_step_limits=[1,31])
-            parameters["num_of_trees_1"] = Parameter("num_of_trees", "integer_1", half_step_limits=[10,10_000])
+            parameters["tree_depth_1"] = Parameter("tree_depth_1", "integer_1", half_step_limits=[1,31])
+            parameters["num_of_trees_1"] = Parameter("num_of_trees_1", "integer_1", half_step_limits=[10,10_000])
 
         if not config.regression:
             parameters["criterion"] = Parameter("criterion", "categorical", possible_values=config.criteria, classification_specific=True)

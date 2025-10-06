@@ -531,18 +531,19 @@ def xgb_train_wrapper(
     es_list = []
     evals: list[tuple[xgb.DMatrix, str]] = []
     eval_label = 'eval'
-    es = xgb.callback.EarlyStopping(
-        rounds=config.early_stopping,
-        min_delta=1e-3,
-        save_best=True,
-        maximize=False,
-        data_name='eval',
-        metric_name='irho',
-    )
-    es_list.append(es)
-    evals.append((dtest_feature_matrix, eval_label))
+    
 
     if not second_round:
+        es = xgb.callback.EarlyStopping(
+            rounds=config.early_stopping,
+            min_delta=1e-3,
+            save_best=True,
+            maximize=False,
+            data_name='eval',
+            metric_name='irho',
+        )
+        es_list.append(es)
+        evals.append((dtest_feature_matrix, eval_label))
         xgb_params = {
             "tree_method": "hist",
             "device": "cuda",
@@ -562,10 +563,20 @@ def xgb_train_wrapper(
             }
         forest = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees), early_stopping_rounds= config.early_stopping, evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
     else:
+        es = xgb.callback.EarlyStopping(
+            rounds=config.early_stopping_1,
+            min_delta=1e-3,
+            save_best=True,
+            maximize=False,
+            data_name='eval',
+            metric_name='irho',
+        )
+        es_list.append(es)
+        evals.append((dtest_feature_matrix, eval_label))
         xgb_params = {
             "tree_method": "hist",
             "device": "cuda",
-            "max_depth": config.tree_depth_1,
+            "max_depth": int(config.tree_depth_1),
             "reg_alpha": config.xgb_alpha_1,
             "reg_lambda": config.xgb_lambda_1,
             "colsample_bytree": config.colsample_bytree_1,
@@ -573,13 +584,13 @@ def xgb_train_wrapper(
             "gamma": config.xgb_gamma_1,
             "learning_rate": config.learning_rate_1,
             "min_child_weight": config.min_child_weight_1,
-            "early_stopping_rounds": config.early_stopping_1,
+            "early_stopping_rounds": int(config.early_stopping_1),
             "subsample": config.max_sample_parameter_1,
             "callbacks": es_list,
             #"eval_metric": ['irho'],
             "disable_default_eval_metric": True
             }
-        forest = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees_1), early_stopping_rounds= config.early_stopping_1, evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
+        forest = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees_1), early_stopping_rounds=int(config.early_stopping_1), evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
 
     return forest
 
