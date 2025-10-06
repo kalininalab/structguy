@@ -207,7 +207,7 @@ def xgb_train_wrapper(
     if not second_round:
         es = xgb.callback.EarlyStopping(
             rounds=config.early_stopping,
-            min_delta=1e-3,
+            min_delta=1e-4,
             save_best=True,
             maximize=False,
             data_name='eval',
@@ -231,14 +231,14 @@ def xgb_train_wrapper(
             "callbacks": es_list,
             #"eval_metric": ['irho'],
             "disable_default_eval_metric": True,
-            "max_cat_to_onehot": 50,
-            "max_cat_threshold": 5
+            "max_cat_to_onehot": int(config.max_cat_to_onehot),
+            "max_cat_threshold": int(config.max_cat_threshold)
             }
         forest = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees), early_stopping_rounds= config.early_stopping, evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
     else:
         es = xgb.callback.EarlyStopping(
             rounds=config.early_stopping_1,
-            min_delta=1e-3,
+            min_delta=1e-4,
             save_best=True,
             maximize=False,
             data_name='eval',
@@ -262,8 +262,8 @@ def xgb_train_wrapper(
             "callbacks": es_list,
             #"eval_metric": ['irho'],
             "disable_default_eval_metric": True,
-            "max_cat_to_onehot": 50,
-            "max_cat_threshold": 5
+            "max_cat_to_onehot": int(config.max_cat_to_onehot_1),
+            "max_cat_threshold": int(config.max_cat_threshold_1)
             }
         forest = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees_1), early_stopping_rounds=int(config.early_stopping_1), evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
 
