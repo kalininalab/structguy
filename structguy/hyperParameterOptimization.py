@@ -366,7 +366,9 @@ def bayesian_optimisation(
     epsilon=1e-9,
     debug=False,
     force_confusion=False,
-    store_params = False
+    store_params = False,
+    get_bayes_tuple = False,
+    bayes_tuple = None
 ):
     """bayesian_optimisation
     Uses Gaussian Processes to optimise the loss function `sample_loss`.
@@ -416,6 +418,9 @@ def bayesian_optimisation(
         force_confusion=force_confusion,
         store_params = store_params
     )
+
+    if bayes_tuple is not None:
+        x_list, y_list = bayes_tuple
     
     
     min_max_samples = [[], []]
@@ -426,7 +431,7 @@ def bayesian_optimisation(
     scaled_bounds = np.array([[0.0, 1.0]] * len(bounds))
 
     if config.verbosity >= 2:
-        config.logger.info(f"In bayesian_optimization, bounds: {bounds}")
+        config.logger.info(f"In bayesian_optimization {bounds=} {len(x_list)=}")
 
     scaler = MinMaxScaler()
     scaler.fit(min_max_samples)
@@ -449,7 +454,7 @@ def bayesian_optimisation(
         n_iters = 4
 
     if config.multi_gpu > 1:
-        n_iters = max([n_params*3,min([n_iters, config.multi_gpu])])
+        n_iters = max([n_params*2, 4])
 
     return_cv_obj = cv_obj
     return_slice_slices = slice_slices
@@ -731,6 +736,8 @@ def bayesian_optimisation(
     else:
         for pos, para_value in enumerate(initial_values):
             parameters[pos].setValue(config, para_value)
+    if get_bayes_tuple:
+        return new_optimimum, best_scores, best_first_scores, return_cv_obj, return_slice_slices, x_list, y_list
 
     return new_optimimum, best_scores, best_first_scores, return_cv_obj, return_slice_slices
 
@@ -1204,8 +1211,8 @@ def initParameters(
             parameters["xgb_alpha"] = Parameter("xgb_alpha", "real", half_step_limits=[0.,5.])
             parameters["xgb_lambda"] = Parameter("xgb_lambda", "real", half_step_limits=[0.,5.])
             parameters["colsample_bytree"] = Parameter("colsample_bytree", "real", half_step_limits=[0.,1.])
-            parameters["max_delta_step"] = Parameter("max_delta_step", "real", half_step_limits=[0.,10.])
-            #parameters["feat_impact_thresh"] = Parameter("feat_impact_thresh", "real", half_step_limits=[-0.01,0.01])
+            parameters["max_delta_step"] = Parameter("max_delta_step", "real", half_step_limits=[0.,50.])
+            parameters["feat_impact_thresh"] = Parameter("feat_impact_thresh", "real", half_step_limits=[-0.01,0.01])
             parameters["tree_depth"] = Parameter("tree_depth", "integer", half_step_limits=[1,31])
             parameters["num_of_trees"] = Parameter("num_of_trees", "integer", half_step_limits=[10,10_000])
             parameters["max_cat_to_onehot"] = Parameter("max_cat_to_onehot", "integer", half_step_limits=[1,500])
@@ -1217,7 +1224,7 @@ def initParameters(
             parameters["xgb_alpha_1"] = Parameter("xgb_alpha_1", "real", half_step_limits=[0.,5.])
             parameters["xgb_lambda_1"] = Parameter("xgb_lambda_1", "real", half_step_limits=[0.,5.])
             parameters["colsample_bytree_1"] = Parameter("colsample_bytree_1", "real", half_step_limits=[0.,1.])
-            parameters["max_delta_step_1"] = Parameter("max_delta_step_1", "real", half_step_limits=[0.,10.])
+            parameters["max_delta_step_1"] = Parameter("max_delta_step_1", "real", half_step_limits=[0.,50.])
             parameters["tree_depth_1"] = Parameter("tree_depth_1", "integer_1", half_step_limits=[1,31])
             parameters["num_of_trees_1"] = Parameter("num_of_trees_1", "integer_1", half_step_limits=[10,10_000])
             parameters["max_cat_to_onehot_1"] = Parameter("max_cat_to_onehot_1", "integer", half_step_limits=[1,500])
@@ -1381,6 +1388,7 @@ def threeDimHyperOptimization(
                     if new_opti:
                         converged = False
             else:
+                """
                 while len(param_names) > 4:
                     param_set = [
                         parameters[param_names.pop()],
@@ -1423,6 +1431,20 @@ def threeDimHyperOptimization(
                 )
                 if new_opti:
                     converged = False
+                """
+                SDTree = SubdimensionTree(
+                    param_names,
+                    parameters,
+                    config,
+                    cv_obj,
+                    best_scores,
+                    first_scores,
+                    slice_slices,
+                    samples,
+                    samples_store_id,
+                    distance_map = distance_map)
+
+                converged, best_scores, first_scores, cv_obj, slice_slices = SDTree.ascend()
 
         config.logger.info(f"Iteration: {n}")
         config.logParameter()
@@ -1469,3 +1491,114 @@ def bayesianComplete(
     best_scores.printOut()
 
     return
+
+class SubdimensionNode:
+    def __init__(self, param_names: list[str], parent, tree):
+        self.parent = parent
+        self.tree = tree
+        self.param_names = param_names
+        if len(param_names) > 2:
+            h = len(param_names) // 2
+            self.left_params = param_names[:h]
+            self.right_params = param_names[h:]
+            self.left_child = SubdimensionNode(self.left_params, self, tree)
+            self.right_child = SubdimensionNode(self.right_params, self, tree)
+            self.is_leaf = False
+        else:
+            self.is_leaf = True
+        
+    def optimize(self):
+        if self.is_leaf:
+            param_set = [self.tree.parameters[param] for param in self.param_names]
+            new_opti, self.tree.best_scores, self.tree.first_scores, self.tree.cv_obj, self.tree.slice_slices, x_list, y_list = bayesian_optimisation(
+                None,
+                self.tree.config,
+                param_set,
+                self.tree.cv_obj,
+                self.tree.best_scores,
+                self.tree.first_scores,
+                self.tree.distance_map,
+                self.tree.slice_slices,
+                samples=self.tree.samples,
+                samples_store_id=self.tree.samples_store_id,
+                n_pre_samples=None,
+                get_bayes_tuple=True
+            )
+
+            if new_opti:
+                self.tree.converged = False
+
+            return x_list, y_list
+
+        else:
+            static_right_param_values: np.ndarray = np.array([self.tree.parameters[param_name].getValue(self.tree.config) for param_name in self.right_params])
+            left_x, left_y = self.left_child.optimize()
+            static_left_param_values = np.array([self.tree.parameters[param_name].getValue(self.tree.config) for param_name in self.left_params])
+            right_x, right_y = self.right_child.optimize()
+
+            combined_x = []
+            combined_y = []
+
+            for pos, param_values in enumerate(left_x):
+                completed_param_values = np.concatenate([param_values, static_right_param_values])
+                combined_x.append(completed_param_values)
+                combined_y.append(left_y[pos])
+
+            for pos, param_values in enumerate(right_x):
+                completed_param_values = np.concatenate([static_left_param_values, param_values])
+                combined_x.append(completed_param_values)
+                combined_y.append(right_y[pos])
+
+            param_set = [self.tree.parameters[param] for param in self.param_names]
+            new_opti, self.tree.best_scores, self.tree.first_scores, self.tree.cv_obj, self.tree.slice_slices, x_list, y_list = bayesian_optimisation(
+                None,
+                self.tree.config,
+                param_set,
+                self.tree.cv_obj,
+                self.tree.best_scores,
+                self.tree.first_scores,
+                self.tree.distance_map,
+                self.tree.slice_slices,
+                samples=self.tree.samples,
+                samples_store_id=self.tree.samples_store_id,
+                n_pre_samples=None,
+                get_bayes_tuple=True,
+                bayes_tuple = (combined_x, combined_y)
+            )
+
+            if new_opti:
+                self.tree.converged = False
+
+            return x_list, y_list
+
+
+class SubdimensionTree:
+    def __init__(
+            self,
+            param_names: list[str],
+            parameters: dict[str, Parameter],
+            config: util.Config,
+            cv_obj: DataSAIL_cv,
+            best_scores: util.Scores,
+            first_scores: util.Scores,
+            slice_slices: dict[int, list[CrossValidationSlice]],
+            samples,
+            samples_store_id,
+            distance_map = None
+            ):
+        self.parameters = parameters
+        self.config = config
+        self.cv_obj = cv_obj
+        self.best_scores = best_scores
+        self.first_scores = first_scores
+        self.slice_slices = slice_slices
+        self.samples = samples
+        self.samples_store_id = samples_store_id
+        self.distance_map = distance_map
+        random.shuffle(param_names)
+        self.root = SubdimensionNode(param_names, None, self)
+        self.converged = True
+        
+    def ascend(self):
+        self.root.optimize()
+        return self.converged, self.best_scores, self.first_scores, self.cv_obj, self.slice_slices

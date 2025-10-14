@@ -631,7 +631,7 @@ def trainRegressionForest(
 
     scores_obj = calc_scores_obj(cv_slice.test_targets, y_pred, cv_slice.test_sample_ids, cv_slice.test_class_weight_vector, cv_slice.feature_names, runtime_penalty = t_complete)
     if score_train:
-        train_scores_obj = calc_scores_obj(cv_slice.train_targets, x_pred, cv_slice.train_sample_ids, cv_slice.train_weights, cv_slice.feature_names, runtime_penalty = t_complete)
+        train_scores_obj = calc_scores_obj(cv_slice.train_targets, x_pred, cv_slice.train_sample_ids, cv_slice.train_class_weight_vector, cv_slice.feature_names, runtime_penalty = t_complete)
         scores_obj.train_scores = train_scores_obj
         if print_out:
             config.logger.info('Train scores:')
