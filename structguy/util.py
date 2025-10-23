@@ -14,7 +14,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import xgboost as xgb
 from structguy.scripts import radarplot
-from structman.base_utils.base_utils import Errorlog, resolve_path
+from structman.base_utils.base_utils import Errorlog, resolve_path, pack, unpack
 from structguy.consts import feat_name_category_dict, feature_categories
 
 class OutputCapture:
@@ -234,6 +234,8 @@ class Config:
         self.xgb_alpha = 0.
         self.xgb_lambda = 1.
         self.colsample_bytree = 1.
+        self.colsample_bylevel = 1.
+        self.colsample_bynode = 1.
         self.max_delta_step = 0.
         self.max_cat_to_onehot = 410
         self.max_cat_threshold = 50
@@ -247,6 +249,8 @@ class Config:
         self.xgb_alpha_1 = 0.
         self.xgb_lambda_1 = 1.
         self.colsample_bytree_1 = 1.
+        self.colsample_bylevel_1 = 1.
+        self.colsample_bynode_1 = 1.
         self.max_delta_step_1 = 0.
         self.max_sample_parameter_1 = 0.9276380091150952
         self.max_cat_to_onehot_1 = 410
@@ -597,6 +601,9 @@ class Config:
             elif opt == 'Path_to_multi_savs_table':
                 self.path_to_multi_savs_table = arg
 
+            elif opt == 'msa_folder_path':
+                self.msa_folder_path = arg
+
         if self.mmseqs_search_db_ref50 != '':
             self.search_dbs.append('ref50')
         if self.mmseqs_search_db_ref90 != '':
@@ -638,6 +645,8 @@ class Config:
             'xgb_alpha',
             'xgb_lambda',
             'colsample_bytree',
+            'colsample_bylevel',
+            'colsample_bynode',
             'max_delta_step',
             'feat_impact_thresh',
             "max_sample_parameter",
@@ -672,6 +681,8 @@ class Config:
             'xgb_alpha_1',
             'xgb_lambda_1',
             'colsample_bytree_1',
+            'colsample_bylevel_1',
+            'colsample_bynode_1',
             'max_delta_step_1',
             'max_sample_parameter_1',
             "max_cat_to_onehot_1",
@@ -1957,9 +1968,9 @@ if __name__ == "__main__":
         plotMPP(config,indatafile,outfile)
 
 
-def storeModel(model, feature_names, config, fn, feat_stats):
+def storeModel(model, feature_names, config, fn, feat_stats, features):
     with open(fn, "wb") as output:
-        pickle.dump((model, feature_names, config, feat_stats), output, pickle.HIGHEST_PROTOCOL)
+        pickle.dump((model, feature_names, config, feat_stats, pack(features)), output, pickle.HIGHEST_PROTOCOL)
     if config.verbosity >= 1:
         print("\n============\nStored model in %s\n============\n" % fn)
 
@@ -1967,12 +1978,8 @@ def storeModel(model, feature_names, config, fn, feat_stats):
 def loadModel(fn):
     with open(fn, "rb") as inp:
         data_tuple = pickle.load(inp)
-        if len(data_tuple) == 3:
-            model, feature_names, config = data_tuple
-            feat_stats = None
-        elif len(data_tuple) == 4:
-            model, feature_names, config, feat_stats = data_tuple
-
+        model, feature_names, config, feat_stats, packed_features = data_tuple
+    features = unpack(packed_features)
     try:
         path_to_impute_map = config.path_to_impute_map
         with open(path_to_impute_map, "rb") as inp:
@@ -1982,7 +1989,7 @@ def loadModel(fn):
 
     if config.verbosity >= 1:
         print("\n============\nLoaded model from %s\n============\n" % fn)
-    return model, feature_names, impute_map, config, feat_stats
+    return model, feature_names, impute_map, config, feat_stats, features
 
 def catogrize_feat_by_name(featname):
     if featname in feat_name_category_dict:

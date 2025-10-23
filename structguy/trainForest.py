@@ -222,6 +222,8 @@ def xgb_train_wrapper(
             "reg_alpha": config.xgb_alpha,
             "reg_lambda": config.xgb_lambda,
             "colsample_bytree": config.colsample_bytree,
+            "colsample_bylevel": config.colsample_bylevel,
+            "colsample_bynode": config.colsample_bynode,
             "max_delta_step": config.max_delta_step,
             "gamma": config.xgb_gamma,
             "learning_rate": config.learning_rate,
@@ -253,6 +255,8 @@ def xgb_train_wrapper(
             "reg_alpha": config.xgb_alpha_1,
             "reg_lambda": config.xgb_lambda_1,
             "colsample_bytree": config.colsample_bytree_1,
+            "colsample_bylevel": config.colsample_bylevel_1,
+            "colsample_bynode": config.colsample_bynode_1,
             "max_delta_step": config.max_delta_step_1,
             "gamma": config.xgb_gamma_1,
             "learning_rate": config.learning_rate_1,
@@ -501,7 +505,7 @@ def trainRegressionForest(
         elif config.weighting == "subsample_distance":
             weights_updated = slice_slice.calcSubsampleDistanceWeights(config, para_number=proc)
 
-        dtrain = slice_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor)  
+        dtrain = slice_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor)
         
         dtest_feature_matrix = slice_slice.get_dtest(samples)
 

@@ -14,12 +14,12 @@ def fastaToClustal(aln_fasta):
         if line[0:1] == '>':
             entry_id = line[1:].split()[0]
             seq_map[entry_id] = ''
-            if seed_id == None:
+            if seed_id is None:
                 seed_id = entry_id
         else:
             seq_map[entry_id] += line
 
-    if seed_id == None:
+    if seed_id is None:
         return None
 
     seed_seq = seq_map[seed_id]
@@ -139,7 +139,7 @@ def psicFromFasta(fasta_page,outfile,config):
     cl_page = fastaToClustal(fasta_page)
 
     if cl_page is None:
-        print('Error in psicFromFasta: could not convert from fasta to clustal')
+        print(f'Error in psicFromFasta: could not convert from fasta to clustal:\n{fasta_page=}')
         return
 
     clustal_file = '%s.clustal' % outfile
@@ -157,7 +157,7 @@ def psicFromFasta(fasta_page,outfile,config):
     return
 
 def psicFromGPW(gpw,outfile,config,debug=0):
-    if gpw == None:
+    if gpw is None:
         if debug >= 1:
             print('psicFromGPW called with None')
         return

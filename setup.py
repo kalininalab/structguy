@@ -40,7 +40,7 @@ setup(
     install_requires=[
         "scikit-learn==1.5.0",
         "numpy==1.26.4",
-        "xgboost==3.0.5",
+        "xgboost==3.1.1",
         "torch==2.8.0",
         "fgclustering==2.0.2",
         "shap==0.48.0",
@@ -67,6 +67,9 @@ setup(
     python_requires=">=3.8, <4",
     keywords="bioinformatics",
     entry_points={
-        "console_scripts": ["structguy = structguy.structguy_main:main"],
+        "console_scripts": [
+            "structguy = structguy.structguy_main:main",
+            "split_fasta_db = structguy.sequence_util:split_fasta_db"
+            ],
     },
 )

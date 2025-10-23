@@ -414,6 +414,11 @@ def learn(config, effectRegressor=None, test_config=None):
         name_add = ""
         if config.random_split:
             name_add = "_random_split"
+        elif config.penalize_train_test_gap:
+            name_add = '_ptt'
+        else:
+            name_add = '_ot'
+
 
         modelfile = f"{config.outfolder}/StructGuy_trained_on_{config.dataset_name}{name_add}.dump"
 
@@ -444,6 +449,7 @@ def load_data_for_pred(
     config: Config,
     impute_map,
     feature_names: list[str],
+    extern_features
 ):
     t0 = time.time()
     samples = featureGenerator.createTrainingSet(config, external_impute=impute_map, for_prediction=True, filter_synon=config.trace_decisions)
@@ -454,7 +460,7 @@ def load_data_for_pred(
     for sample_id in samples.samples:
         samples.samples[sample_id].testtrain = "test"
 
-    test_feature_matrix, test_targets, sample_id_list, feat_id_vec, cat_vec = samples.get_test_data_for_feature_list(feature_names, config)
+    test_feature_matrix, test_targets, sample_id_list, feat_id_vec, cat_vec = samples.get_test_data_for_feature_list(feature_names, config, extern_features)
 
     return samples, test_feature_matrix, test_targets, sample_id_list, feat_id_vec, cat_vec
 
@@ -497,7 +503,7 @@ def val_to_str(val):
 def evaluate_dataset(config: Config):
     t0 = time.time()
     extern_feature_names_list: list[str]
-    forest, extern_feature_names_list, impute_map, model_config, feat_stats = loadModel(config.path_to_model)
+    forest, extern_feature_names_list, impute_map, model_config, feat_stats, extern_features = loadModel(config.path_to_model)
     t1 = time.time()
 
     config.logger.info(f"Time for loading model: {t1 - t0}")
@@ -517,7 +523,7 @@ def evaluate_dataset(config: Config):
     if config.verbosity >= 5:
         config.logger.info(f'{extern_feature_names_list=}')
 
-    samples, test_feature_matrix, test_targets, sample_id_list, feat_id_vec, cat_vec = load_data_for_pred(config, impute_map, extern_feature_names_list)
+    samples, test_feature_matrix, test_targets, sample_id_list, feat_id_vec, cat_vec = load_data_for_pred(config, impute_map, extern_feature_names_list, extern_features)
 
     external_feat_pos_dict = dict(zip(extern_feature_names_list, range(len(extern_feature_names_list))))
 
@@ -1143,7 +1149,7 @@ def buildFinalModel(samples, samples_store_id, config, internal_cv=None, outfile
     feat_importance_map = calcFeatureImportances(forest, samples, full_slice, config, print_them=print_out)
 
     if outfile is not None:
-        storeModel(forest, full_slice.feature_names, config, outfile, samples.feat_stats)
+        storeModel(forest, full_slice.feature_names, config, outfile, samples.feat_stats, samples.features)
 
     if filtered_features_file is not None:
         save_feature_importances(filtered_features_file, feat_importance_map)

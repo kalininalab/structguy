@@ -255,6 +255,7 @@ def computeMSA(
     search_db_sequences={},
     sequence_map=None,
     sub_threads=1,
+    target_file=None
 ):
     mafft_exe = config.mafft_path
     print("Compute MSA: ", u_ac, search_db)
@@ -269,7 +270,7 @@ def computeMSA(
             search_db_sequences=search_db_sequences,
         )
 
-        if fasta_page == None:
+        if fasta_page is None:
             return None, None
 
         # Write the Blast results into a fasta file
@@ -284,7 +285,7 @@ def computeMSA(
 
         temp_fasta = "%s/temp_fasta_%s_%s.fasta" % (
             cwd,
-            u_ac.replace("(", "").replace(")", ""),
+            u_ac.replace("(", "").replace(")", "").replace('/','_'),
             search_db,
         )
         sequence_map[u_ac] = seq
@@ -293,14 +294,40 @@ def computeMSA(
     stderr = None
     # Run mafft
     try:
+
+        cmds = ' '.join([
+            'mafft',
+            '--thread',
+            str(sub_threads),
+            f'"{temp_fasta}"'
+            ])
+
+        if target_file is not None:
+            with open(target_file, 'w') as target:
+                p = subprocess.Popen(cmds, shell=True, stdout=target)
+                p.wait()
+            f = open(target_file, 'r')
+            stdout = f.read()
+            f.close()
+
+        else:
+            p = subprocess.Popen(cmds, shell=True, stdout=subprocess.PIPE)
+            p.wait()
+            stdout, stderr = p.communicate()
+
+        """
+        stdout = None
+        stderr = None
         mafft_cline = MafftCommandline(
             mafft_exe, input=temp_fasta, thread=sub_threads, amino=True
         )
         stdout, stderr = mafft_cline()
+        """
+        
     except:
         [e, f, g] = sys.exc_info()
         g = traceback.format_exc()
-        print(u_ac, search_db, e, f, g, stderr)
+        print(f'MAFFT failed: {u_ac=}, {search_db=} {temp_fasta=}\n{e}\n{f}\n{g}\n{stdout=}\n{stderr=}')
         return None, None, None
 
     # delete temporary files
@@ -612,7 +639,10 @@ def parsePsicFile(infile, debug=0):
             print("Did not found psic-file: ", infile)
         return {}
 
-    f = gzip.open(infile, "r")
+    if infile[-3:] == '.gz':
+        f = gzip.open(infile, "r")
+    else:
+        f = open(infile, 'rb')
     lines = f.read().decode("ascii").split("\n")
     f.close()
 
@@ -632,10 +662,11 @@ def parsePsicFile(infile, debug=0):
 
 
 # called by sequence_feature_generation
-def calcPsicProfiles(config, prot_id, aacs, seq, ref_db_id, gpw=False, debug=0):
+def calcPsicProfiles(config, prot_id, aacs, seq, ref_db_id, gpw=False, debug=0, psic_name = None):
     out_directory = get_out_directory(prot_id, config)
 
-    psic_name = util.get_msa_path(out_directory, prot_id, ref_db_id, gpw=gpw, psic=True)
+    if psic_name is None:
+        psic_name = util.get_msa_path(out_directory, prot_id, ref_db_id, gpw=gpw, psic=True)
 
     psic_profiles = parsePsicFile(psic_name, debug=debug)
 
@@ -651,11 +682,11 @@ def calcPsicProfiles(config, prot_id, aacs, seq, ref_db_id, gpw=False, debug=0):
 
     positional_median_dpsics = []
     for pos, wt in enumerate(seq):
-        if not pos in psic_profiles:
+        if pos not in psic_profiles:
             if debug >= 1:
                 print("pos not in psic_profiles:", prot_id, pos)
             continue
-        if not wt in psic_profiles[pos]:
+        if wt not in psic_profiles[pos]:
             if debug >= 1:
                 print(
                     f"wt not in psic_profiles[pos]: {prot_id} {pos} {wt}\n{psic_profiles[pos]}"
@@ -694,7 +725,7 @@ def calcPsicProfiles(config, prot_id, aacs, seq, ref_db_id, gpw=False, debug=0):
             if window_a < 0:
                 window_a = 0
 
-        if not pos in psic_profiles:
+        if pos not in psic_profiles:
             if debug >= 1:
                 print("psic error ", prot_id, aac, ref_db_id, gpw)
             positional_dpsic_map[aac] = 0.0
@@ -703,7 +734,7 @@ def calcPsicProfiles(config, prot_id, aacs, seq, ref_db_id, gpw=False, debug=0):
             dpsic_map[aac] = 0.0
             continue
 
-        if not aa_wt in psic_profiles[pos]:
+        if aa_wt not in psic_profiles[pos]:
             if debug >= 1:
                 print("psic error 2", prot_id, aac, ref_db_id, gpw)
             positional_dpsic_map[aac] = 0.0
@@ -1035,13 +1066,15 @@ def parseMsaFasta(page):
     lines = page.split(b"\n")
 
     seq_map = {}
+    seed = None
     for line in lines:
         if len(line) == 0:
             continue
         if line[0:1] == b">":
             entry_id = line[1:].split()[0].decode("ascii")
             seq_map[entry_id] = ""
-
+            if seed is None:
+                seed = entry_id
         else:
             seq_map[entry_id] += line.decode("ascii")
-    return seq_map
+    return seq_map, seed

@@ -110,9 +110,14 @@ def para_calc_feat_corr(data_store, left, right):
                     
                 except ZeroDivisionError:
                     mean_val = None
+                except TypeError:
+                    mean_val = None
+
                 try:
                     median_val = median(vec_a)
                 except IndexError:
+                    median_val = None
+                except TypeError:
                     median_val = None
 
                 feat_stats[feat_nr_a] = (min_val, max_val, mean_val, median_val)
@@ -131,14 +136,19 @@ def para_calc_feat_corr(data_store, left, right):
                     except ValueError:
                         min_val = None
                         max_val = None
+
                     try:
                         mean_val = sum(vec_b) / len(vec_b)
-                        
                     except ZeroDivisionError:
                         mean_val = None
+                    except TypeError:
+                        mean_val = None
+
                     try:
                         median_val = median(vec_b)
                     except IndexError:
+                        median_val = None
+                    except TypeError:
                         median_val = None
 
                     feat_stats[feat_nr_b] = (min_val, max_val, mean_val, median_val)
@@ -271,7 +281,7 @@ class SampleSpace(Slotted_obj):
         for att in self.__slots__:
             self.__setattr__(att, None)
         self.samples = {}
-        self.features = {}
+        self.features: dict[str, Feature] = {}
         self.feature_matrix_dict = {}
         self.raw_feature_matrix = []
         self.sample_nr = 0
@@ -362,6 +372,14 @@ class SampleSpace(Slotted_obj):
 
         self.feature_names = list(self.features.keys())
         self.fillDefaultValues()
+
+    def encode_cat_feats(self):
+        for feat_name in self.features:
+            if self.features[feat_name].f_type == 'categorical':
+                feat = self.features[feat_name]
+                for sample_id in self.feature_matrix_dict:
+                    cat_value = self.feature_matrix_dict[sample_id][feat_name]
+                    category = feat.category_backmap[cat_value]
 
     def draw_subsamples(self, n_of_subsamples: int = 50_000):
         sample_list: list[tuple[str, str]] = list(self.samples.keys())
@@ -554,7 +572,7 @@ class SampleSpace(Slotted_obj):
                 self.features[feat_name].category_backmap[self.features[feat_name].category_counter] = value
                 self.features[feat_name].category_counter += 1
             self.feature_matrix_dict[sample_id][feat_name] = self.features[feat_name].category_map[value]
-        
+
 
     def addTargetValue(self,sample_id,value):
         self.samples[sample_id].addTargetValue(value)
@@ -610,7 +628,7 @@ class SampleSpace(Slotted_obj):
 
             if class_name is None:
                 continue
-            if not class_name in class_out_lines:
+            if class_name not in class_out_lines:
                 class_out_lines[class_name] = [header]
             class_out_lines[class_name].append('%s\t%s\t%s\t%s' % (u_ac,aac,target_value_str,'\t'.join(feature_vector)))
 
@@ -683,9 +701,13 @@ class SampleSpace(Slotted_obj):
             feat_matrix.append(feat_vec)
         return feat_matrix
 
-    def get_feat_matrix_from_feat_names(self, feat_names : list[str], config):
+    def get_feat_matrix_from_feat_names(self, feat_names : list[str], config, get_feat_id_dict = False):
         feat_id_vec = []
-        for feat_name in feat_names:
+        if get_feat_id_dict:
+            feat_id_dict = {}
+        for feat_id, feat_name in enumerate(feat_names):
+            if get_feat_id_dict:
+                feat_id_dict[feat_name] = feat_id
             try:
                 feat_id_vec.append(self.feat_pos_dict[feat_name])
             except KeyError:
@@ -699,6 +721,8 @@ class SampleSpace(Slotted_obj):
                 config.logger.warning(f'{self.feat_pos_dict[:100]=}')
 
         sample_pos_vec = list(range(len(self.raw_feature_matrix)))
+        if get_feat_id_dict:
+            return self.get_feat_matrix(feat_id_vec, sample_pos_vec), feat_id_vec, feat_id_dict
         return self.get_feat_matrix(feat_id_vec, sample_pos_vec), feat_id_vec
     
     def get_feat_matrix_from_ids(
@@ -867,8 +891,8 @@ class SampleSpace(Slotted_obj):
             self.calcVectors(config)
         return self.test_feature_matrix,self.test_targets,self.train_feature_matrix,self.train_targets
 
-    def get_test_data_for_feature_list(self, extern_feature_list: list[str], config):
-        test_feature_matrix, feat_id_vec = self.get_feat_matrix_from_feat_names(extern_feature_list, config)
+    def get_test_data_for_feature_list(self, extern_feature_list: list[str], config, extern_features: dict[str, Feature]):
+        test_feature_matrix, feat_id_vec, feat_id_dict = self.get_feat_matrix_from_feat_names(extern_feature_list, config, get_feat_id_dict=True)
         test_targets = []
         sample_id_list = []
         for sample_id in self.samples:
@@ -879,6 +903,16 @@ class SampleSpace(Slotted_obj):
         for feat_name in extern_feature_list:
             if self.features[feat_name].f_type == 'categorical':
                 cat_vec.append('c')
+                for sample_id, _ in enumerate(test_feature_matrix):
+                    feat_id = feat_id_dict[feat_name]
+                    old_encoded_value = test_feature_matrix[sample_id][feat_id]
+                    decoded_value = self.features[feat_name].category_backmap[old_encoded_value]
+                    if decoded_value not in extern_features[feat_name].category_map:
+                        extern_features[feat_name].category_map[decoded_value] = extern_features[feat_name].category_counter
+                        extern_features[feat_name].category_backmap[extern_features[feat_name].category_counter] = decoded_value
+                        extern_features[feat_name].category_counter += 1
+                    new_encoded_value = extern_features[feat_name].category_map[decoded_value]
+                    test_feature_matrix[sample_id][feat_id] = new_encoded_value
             else:
                 cat_vec.append('q')
 

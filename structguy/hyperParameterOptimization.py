@@ -1211,6 +1211,8 @@ def initParameters(
             parameters["xgb_alpha"] = Parameter("xgb_alpha", "real", half_step_limits=[0.,5.])
             parameters["xgb_lambda"] = Parameter("xgb_lambda", "real", half_step_limits=[0.,5.])
             parameters["colsample_bytree"] = Parameter("colsample_bytree", "real", half_step_limits=[0.,1.])
+            parameters["colsample_bylevel"] = Parameter("colsample_bylevel", "real", half_step_limits=[0.,1.])
+            parameters["colsample_bynode"] = Parameter("colsample_bynode", "real", half_step_limits=[0.,1.])
             parameters["max_delta_step"] = Parameter("max_delta_step", "real", half_step_limits=[0.,50.])
             parameters["feat_impact_thresh"] = Parameter("feat_impact_thresh", "real", half_step_limits=[-0.01,0.01])
             parameters["tree_depth"] = Parameter("tree_depth", "integer", half_step_limits=[1,31])
@@ -1224,6 +1226,8 @@ def initParameters(
             parameters["xgb_alpha_1"] = Parameter("xgb_alpha_1", "real", half_step_limits=[0.,5.])
             parameters["xgb_lambda_1"] = Parameter("xgb_lambda_1", "real", half_step_limits=[0.,5.])
             parameters["colsample_bytree_1"] = Parameter("colsample_bytree_1", "real", half_step_limits=[0.,1.])
+            parameters["colsample_bylevel_1"] = Parameter("colsample_bylevel_1", "real", half_step_limits=[0.,1.])
+            parameters["colsample_bynode_1"] = Parameter("colsample_bynode_1", "real", half_step_limits=[0.,1.])
             parameters["max_delta_step_1"] = Parameter("max_delta_step_1", "real", half_step_limits=[0.,50.])
             parameters["tree_depth_1"] = Parameter("tree_depth_1", "integer_1", half_step_limits=[1,31])
             parameters["num_of_trees_1"] = Parameter("num_of_trees_1", "integer_1", half_step_limits=[10,10_000])
@@ -1548,6 +1552,9 @@ class SubdimensionNode:
                 completed_param_values = np.concatenate([static_left_param_values, param_values])
                 combined_x.append(completed_param_values)
                 combined_y.append(right_y[pos])
+
+            if len(self.param_names) > 8:
+                return combined_x, combined_y
 
             param_set = [self.tree.parameters[param] for param in self.param_names]
             new_opti, self.tree.best_scores, self.tree.first_scores, self.tree.cv_obj, self.tree.slice_slices, x_list, y_list = bayesian_optimisation(

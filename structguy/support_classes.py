@@ -35,7 +35,7 @@ def distance_weighting_subroutine(store, package):
         outputs.append((pos_1, d_sum/subsamplesize))
     return outputs
 
-possible_na_values = set(['-', 'None'])
+possible_na_values = set(['-', 'None', 'inf'])
 class Feature(Slotted_obj):
     __slots__ = ['name', 'f_type', 'group', 'default', 'mutation_specific', 'category_map', 'category_counter', 'category_backmap']
     def __init__(self, name = None, f_type = None,group=None,default_value=None,mutation_specific=False):
@@ -53,13 +53,16 @@ class Feature(Slotted_obj):
 
     def value_from_string(self, string):
         value = None
+        if string in possible_na_values:
+            return None
+
         if self.name == 'Blosum62':
             try:
                 value = float(string)
-            except:
+            except ValueError:
                 try:
                     value = dicts.BLOSUM62[(string[0],string[-1])]
-                except:
+                except KeyError:
                     value = dicts.BLOSUM62[(string[-1],string[0])]
             return value
 
@@ -71,7 +74,7 @@ class Feature(Slotted_obj):
             elif self.f_type == 'integer' or self.f_type == 'binary':
                 try:
                     value = int(string)
-                except:
+                except ValueError:
                     value = float(string)
                     self.f_type = 'real'
             elif self.f_type == 'unknown':
@@ -85,31 +88,28 @@ class Feature(Slotted_obj):
                         if value != self.default:
                             self.f_type = 'real'
                     except:
-                        if string in possible_na_values:
-                            value = None
-                        else:
-                            self.f_type = 'categorical'
-                            self.category_map = {}
-                            self.category_counter = 0
-                            self.category_backmap = {}
+                        self.f_type = 'categorical'
+                        self.category_map = {}
+                        self.category_counter = 0
+                        self.category_backmap = {}
 
-                            value = string
+                        value = string
             else:
                 print(f'Error in value_from_string: {self.f_type=} {self.name=} {string=}')
                 value = None
         except:
-            if string in possible_na_values:
-                value = None
-            else:
-                print(f'Error in value_from_string: {self.f_type=} {self.name=} {string=}')
-                value = None
+            print(f'Error in value_from_string: {self.f_type=} {self.name=} {string=}')
+            value = None
         return value
 
     def string_convert(self,value):
         if not self.f_type == 'categorical':
             return str(value)
+        elif value is None:
+            return 'None'
         else:
             return str(self.category_backmap[value])
+            #return str(value)
 
 class CrossValidationSlice(Slotted_obj):
     __slots__ = [
@@ -1066,6 +1066,9 @@ class CrossValidationSlice(Slotted_obj):
             train_targets = self.train_targets
         else:
             train_targets = self.sub_sampled_train_targets
+
+        for pos, feat_name in enumerate(self.feature_names):
+            print(f'{feat_name=}, {cat_vec[pos]=}')
 
         dtrain: xgb.DMatrix = xgb.DMatrix(
             numpy.array(train_feature_matrix),

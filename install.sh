@@ -15,19 +15,21 @@ storage_folder=""
 
 verbose=false
 overwrite=false
+rewrite=false
 
 installer_temp_folder=$(mktemp -d -t structguy.XXXXXXX)
 trap 'rm -rf -- "$installer_temp_folder"' EXIT
 
 
 #Parse arguments
-while getopts s:e:vo flag
+while getopts s:e:vor flag
 do
     case "${flag}" in
         e) env_name=${OPTARG};;
         s) storage_folder=${OPTARG};;
         v) verbose=true;;
         o) overwrite=true;;
+        r) rewrite=true;;
     esac
 done
 
@@ -101,7 +103,6 @@ fi
     echo "Installing package DataSAIL ..."
     mamba install -y -c conda-forge -c kalininalab -c bioconda -c mosek datasail==1.2.1
     pip install grakel
-    mamba install -y -c rapidsai -c conda-forge rapids
 } >&$verbose_stdout
 
 #install the main package
@@ -154,17 +155,47 @@ pushd $storage_folder
 if [ "$overwrite" = true ]; then
     rm -rf *.gz
 fi
-if ! [ -f uniref50.fasta.gz ]
+
+do_ref50=false
+if [ "$rewrite" = true ]
 then
-    wget ftp://ftp.ebi.ac.uk/pub/databases/uniprot/uniref/uniref50/uniref50.fasta.gz
-    mmseqs createdb uniref50.fasta.gz uniref50_search_db
-    mmseqs createindex uniref50_search_db "$tmp_folder_path" -s 7.5
+    do_ref50=true
 fi
-if ! [ -f uniref90.fasta.gz ]
+if ! [ -f uniref50.fasta.gz ] 
 then
-    wget ftp://ftp.ebi.ac.uk/pub/databases/uniprot/uniref/uniref90/uniref90.fasta.gz
-    mmseqs createdb uniref90.fasta.gz uniref90_search_db
-    mmseqs createindex uniref90_search_db "$tmp_folder_path" -s 7.5
+    do_ref50=true
+fi
+
+if [ $do_ref50 = true ]
+then
+    if ! [ -f uniref50.fasta.gz ]
+    then
+        wget ftp://ftp.ebi.ac.uk/pub/databases/uniprot/uniref/uniref50/uniref50.fasta.gz
+    fi
+    split_fasta_db uniref50.fasta.gz "$tmp_folder_path"
+    #mmseqs createdb uniref50.fasta.gz uniref50_search_db
+    #mmseqs createindex uniref50_search_db "$tmp_folder_path" -s 7.5
+fi
+
+do_ref90=false
+if [ "$rewrite" = true ]
+then
+    do_ref90=true
+fi
+if ! [ -f uniref90.fasta.gz ] 
+then
+    do_ref90=true
+fi
+
+if [ $do_ref90 = true ]
+then
+    if ! [ -f uniref90.fasta.gz ]
+    then
+        wget ftp://ftp.ebi.ac.uk/pub/databases/uniprot/uniref/uniref90/uniref90.fasta.gz
+    fi
+    split_fasta_db uniref90.fasta.gz "$tmp_folder_path"
+    #mmseqs createdb uniref90.fasta.gz uniref90_search_db
+    #mmseqs createindex uniref90_search_db "$tmp_folder_path" -s 7.5
 fi
 
 echo "search_db_folder=$storage_folder" > "$resources_folder_path"search_db_settings.conf

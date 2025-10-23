@@ -6,6 +6,8 @@ FEAT_NAME_SYNONYMS = {
     'Sidechain Location' : 'Sidechain location'
 }
 
+n_of_unifref_splits = 240
+
 refseq_datasets = ['ref50','ref90']
 
 feature_categories = [

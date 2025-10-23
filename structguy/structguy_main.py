@@ -7,6 +7,7 @@ import logging
 from datetime import datetime
 
 from structguy import featureGenerator, util, learn, featureAnalysis
+from structguy.sequence_feature_generation import prepare_gemme
 from ray.train import ScalingConfig
 
 
@@ -312,6 +313,12 @@ def predict_main(manual_args = None):
     score, y_true, y_pred = learn.evaluate_dataset(config)
     return score, y_true, y_pred
 
+def prep_gemme():
+    config: util.Config
+    config, _ = parse_arguments()
+    prepare_gemme(config)
+
+
 def generate_info():
     config: util.Config
     config, _ = parse_arguments()
@@ -371,7 +378,7 @@ def generate_info():
 def main():
 
     start_time = time.time()
-    possible_key_words = set(['generate_features', 'build_model', 'predict', 'info', 'violins'])
+    possible_key_words = set(['generate_features', 'build_model', 'predict', 'info', 'violins', 'prep_gemme'])
 
     if len(sys.argv) < 2:
         print(disclaimer)
@@ -397,6 +404,9 @@ def main():
 
     if key_word == 'violins':
         generate_violins()
+
+    if key_word == 'prep_gemme':
+        prep_gemme()
 
     print("--- %s seconds ---" % (time.time() - start_time))
 
