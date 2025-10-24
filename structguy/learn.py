@@ -34,12 +34,28 @@ from xgboost import plot_tree, DMatrix
 import matplotlib.pyplot as plt
 
 
+def xgbFeatureImportances(bst, config):
+    feat_importance_map = bst.get_score(importance_type='gain')
+    feat_score_tuples = []
+    for feature_name in feat_importance_map:
+        score = feat_importance_map[feature_name]
+        feat_score_tuples.append((feature_name, score))
+    feat_score_tuples.sort(key=lambda x: x[1], reverse=True)
+
+    for feature_name, score in feat_score_tuples:
+        if score == 0.0:
+            continue
+        if score < config.print_scores_greater_than:
+            continue
+        config.logger.info(f"{feature_name}: {score}")
+    return feat_importance_map
+
 def calcFeatureImportances(forest, samples, cv_slice, config, print_them=False):
     try:
         feature_scores = forest.feature_importances_
     except AttributeError:
         config.logger.error(f'ERROR: forest was {forest} in calcFeatureImportances')
-        return {}
+        return xgbFeatureImportances(forest,config)
     
     feat_score_tuples = []
     feature_importance_map = {}
@@ -271,14 +287,23 @@ def learn(config, effectRegressor=None, test_config=None):
             cv_slice: CrossValidationSlice = cross_val_obj.slices[cv_counter]
 
             if config.verbosity >= 1:
-                config.logger.info(cv_counter, len(cv_slice.train_targets))
-                config.logger.info("Testset length: ", len(cv_slice.test_targets))
+                config.logger.info(f"{cv_counter=}, {len(cv_slice.train_targets)=}")
+                config.logger.info(f"Testset length: {len(cv_slice.test_targets)}")
 
                 cv_slice.printBalance(config)
 
             print_out = config.verbosity >= 2
             forest, scores, cv_slice, slice_slices = trainForest.trainForest(
-                config, cv_slice, samples=samples, samples_store_id=samples_store_id, slice_slices=cv_slice.slice_slices, distance_map=distance_map, print_out=print_out, debug=debug, remote=False
+                config,
+                cv_slice,
+                samples=samples,
+                samples_store_id=samples_store_id,
+                slice_slices=cv_slice.slice_slices,
+                distance_map=distance_map,
+                repeat=config.repeat_training,
+                print_out=print_out,
+                debug=debug,
+                remote=False
             )
 
             if forest is None:
@@ -289,7 +314,7 @@ def learn(config, effectRegressor=None, test_config=None):
             if config.crossValidation == "LOPO":
                 lopo_scores[tuple(cv_counter)] = scores
 
-            test_feature_matrix = cv_slice.get_test_feature_matrix(samples)
+            test_feature_matrix = cv_slice.get_dtest(samples)
 
             y_pred = forest.predict(test_feature_matrix)
 
@@ -307,6 +332,8 @@ def learn(config, effectRegressor=None, test_config=None):
                 if config.verbosity >= 1:
                     config.logger.info(f"Prot-wise RHO: {mean_spearman}")
                     config.logger.info(prot_wise_spearmans)
+                    if scores.mean_spear_repeat_std is not None:
+                        config.logger.info(f'{scores.mean_spear_repeat_std=}')
                     for prot_id, spear_ in raw_corrs:
                         if spear_ < 0.3:
                             config.logger.info(f"Low prot-wise rho: {prot_id} - {spear_}")

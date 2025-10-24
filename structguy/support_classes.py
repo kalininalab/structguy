@@ -127,7 +127,8 @@ class CrossValidationSlice(Slotted_obj):
         'active_reg',                   'alpha_map',                    'c_map',
         'confusion_map',                'train_class_weight_vector',    'test_class_weight_vector',
         'fused_confusion_map',          'raw_confusion_map',            'loss_map',
-        'sub_sampled_train_ids',        'sub_sampled_train_targets',    'sub_sampled_train_class_weight_vector'
+        'sub_sampled_train_ids',        'sub_sampled_train_targets',    'sub_sampled_train_class_weight_vector',
+        'test_prot_vec'
         ]
     
     def __init__(self, test_ids = None, train_ids = None, raw_feature_names = None, sample_dict = None, geometric_distance_map = None, config = None, name = '', train_prots = None, test_prots = None, train_equal_test = False, para_number = None, feature_names = None, raw_init = False):
@@ -184,6 +185,7 @@ class CrossValidationSlice(Slotted_obj):
             self.train_prots = train_prots
 
         self.test_prots = test_prots
+        self.test_prot_vec = None
 
         self.train_equal_test = train_equal_test
 
@@ -1020,14 +1022,31 @@ class CrossValidationSlice(Slotted_obj):
         feat_matrix = samples.get_feat_matrix_from_ids(self.test_sample_ids, self.feature_names)
         return feat_matrix
     
+    def get_encoded_test_prot_vec(self):
+        if self.test_prot_vec is None:
+            code_map = {}
+            code_vec = []
+            for prot_id, _ in self.test_sample_ids:
+                if prot_id not in code_map:
+                    code_map[prot_id] = len(code_map)
+                code = code_map[prot_id]
+                code_vec.append(code)
+            code_vec = numpy.array(code_vec)
+            self.test_prot_vec = code_vec
+
+        return self.test_prot_vec
+
     def get_dtest(self, samples):
         feat_matrix, cat_vec = samples.get_feat_matrix_from_ids(self.test_sample_ids, self.feature_names, get_cat_vec=True)
+        encoded_prot_vec = self.get_encoded_test_prot_vec()
+        print(f'{len(self.test_sample_ids)=} {len(self.test_targets)=} {len(encoded_prot_vec)=} {numpy.array(feat_matrix).shape=} {len(self.feature_names)=}')
         dtest_feature_matrix = xgb.DMatrix(
             numpy.array(feat_matrix),
             label=numpy.array(self.test_targets),
             feature_types=cat_vec,
             enable_categorical=True,
             feature_names = self.feature_names)
+        dtest_feature_matrix.encoded_prot_vec = encoded_prot_vec
         return dtest_feature_matrix
 
 
@@ -1067,8 +1086,8 @@ class CrossValidationSlice(Slotted_obj):
         else:
             train_targets = self.sub_sampled_train_targets
 
-        for pos, feat_name in enumerate(self.feature_names):
-            print(f'{feat_name=}, {cat_vec[pos]=}')
+        #for pos, feat_name in enumerate(self.feature_names):
+        #    print(f'{feat_name=}, {cat_vec[pos]=}')
 
         dtrain: xgb.DMatrix = xgb.DMatrix(
             numpy.array(train_feature_matrix),

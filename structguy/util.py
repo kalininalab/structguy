@@ -197,7 +197,7 @@ class Config:
         self.cv_hpo = False
         self.cv_hpo_limiter = None
         self.cv_counters = None
-        self.optimize_mean = False
+        self.optimize_mean = True
         self.repeat_training = 1
 
         self.feature_penalty = None#0.00001
@@ -621,7 +621,7 @@ class Config:
             self.criterion = 'friedman_mse'
             self.criteria = ['friedman_mse']#,'mae']
 
-        if overwrite_objective_function != None:
+        if overwrite_objective_function is not None:
             self.objective_function = overwrite_objective_function
 
 
@@ -1034,18 +1034,19 @@ def combine_individual_effects(individual_effects, multiply = True):
 class Scores:
     __slots__ = [
                     'mse', 'wmse', 'r2', 'wr2', 'corr', 'acc', 'roc', 'precision', 'recall', 'f1',
-                    'mcc', 'pearson_r', 'n_of_features', 'mean_spearman', 'mean_pearson', 'feature_penalty',
+                    'mcc', 'pearson_r', 'n_of_features', 'mean_spearman', 'mean_spear_repeat_std', 'mean_pearson', 'feature_penalty',
                     'train_scores', 'runtime_penalty'
                 ]
     def __init__(
                     self, mse = None, r2 = None, corr = None, acc = None, roc = None, precision = None,
                     recall = None, f1 = None, mcc = None, pearson_r = None, zero = False, wmse = None,
                     wr2 = None, optimal = False, n_of_features = None, mean_spearman = None, 
-                    mean_pearson = None, feature_penalty = None, runtime_penalty = 0.
+                    mean_pearson = None, feature_penalty = None, runtime_penalty = 0., mean_spear_repeat_std= None
                 ):
         self.n_of_features = n_of_features
         self.feature_penalty = feature_penalty
         self.train_scores = None
+        self.mean_spear_repeat_std = mean_spear_repeat_std
         if zero:
             self.mse = float('inf')
             self.wmse = float('inf')
@@ -1403,10 +1404,12 @@ def mean_scores(scores_list):
     else:
         n_of_features = mean(n_of_features_s)
 
+    mean_spear_repeat_std = statistics.stdev(mean_spearmans)
+
     scores_obj = Scores(mse = mean(mses), r2 = mean(r2s), corr = mean(corrs), acc = mean(accs), roc = mean(rocs),
                         precision = mean(precisions), recall = mean(recalls), f1 = mean(f1s), mcc = mean(mccs),
                         pearson_r = mean(pearson_rs), mean_pearson = mean(mean_pearsons), mean_spearman = mean(mean_spearmans),
-                        n_of_features = n_of_features)
+                        n_of_features = n_of_features, mean_spear_repeat_std = mean_spear_repeat_std)
     if len(train_scores_list) > 0:
         mean_train_scores = mean_scores(train_scores_list)
         scores_obj.train_scores = mean_train_scores

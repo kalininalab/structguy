@@ -184,13 +184,89 @@ def return_zero(zero_return, remote, cv_slice):
     return zero_return
 
 
+
+@njit
+def jit_spear(arr1: numpy.ndarray, arr2: numpy.ndarray) -> float:
+    rarr1: numpy.ndarray = arr1.argsort().argsort()
+    rarr2: numpy.ndarray = arr2.argsort().argsort()
+
+    corr: float = numpy.corrcoef(rarr1, rarr2)[0][1]
+    return corr
+
+@njit 
+def get_pred_true_tuples(predt: numpy.ndarray, true_labels: numpy.ndarray, code_vec: numpy.ndarray):
+    a: int = max(code_vec) + 1
+    b: int = len(code_vec)
+    pred_lists: numpy.ndarray = numpy.empty((a,b,))
+    pred_lists[:] = numpy.nan
+    true_lists: numpy.ndarray = numpy.empty((a,b,))
+    true_lists[:] = numpy.nan
+    for pos, code in enumerate(code_vec):
+        lab: float = true_labels[pos]
+        pred: float = predt[pos]
+        true_lists[code][pos] = lab
+        pred_lists[code][pos] = pred
+    return true_lists, pred_lists
+
+@njit
+def jit_mean_spear(predt: numpy.ndarray, true_labels: numpy.ndarray, code_vec: numpy.ndarray) -> float:
+    pred_true_tuples: list[tuple[list[float], list[float]]] = []
+    for pos, code in enumerate(code_vec):
+        if len(pred_true_tuples) == code:
+            pred_true_tuples.append(([],[]))
+        pred_true_tuples[code][0].append(true_labels[pos])
+        pred_true_tuples[code][1].append(predt[pos])
+    
+    corrs: list[float] = []
+    trues: list[float]
+    preds: list[float]
+    for trues, preds in pred_true_tuples:
+        sorted_trues: list[float] = sorted(trues)
+        sorted_preds: list[float] = sorted(preds)
+        x:float
+        rarr1: list[int] = []
+        for x in trues:
+            index: int = sorted_trues.index(x)
+            rarr1.append(index)
+        rarr2: list[int] = [sorted_preds.index(x) for x in preds]
+
+        corr: float = numpy.corrcoef(numpy.array(rarr1), numpy.array(rarr2))[0][1]
+        #corr: float = jit_spear(numpy.array(trues), numpy.array(preds))
+        corrs.append(corr)
+    if len(corrs) == 0:
+        mean_corr: float = 0.
+    else:
+        mean_corr: float = sum(corrs)/len(corrs)
+    return mean_corr
+
 def rho_eval_for_xgboost_cb(predt: numpy.ndarray, dtest: xgb.DMatrix) -> tuple[str, float]:
     if isinstance(dtest, xgb.DMatrix):
         y = dtest.get_label()
+
+        true_lists, pred_lists = get_pred_true_tuples(predt, y, dtest.encoded_prot_vec)
+        
+        corrs = []
+        for index, trues in enumerate(true_lists):
+            #print(f'before {len(trues)=}')
+            trues = trues[~numpy.isnan(trues)]
+            #print(f'after {len(trues)=}')
+            preds = pred_lists[index]
+            preds = preds[~numpy.isnan(preds)]
+            corr, _ = stats.spearmanr(trues, preds)
+            corrs.append(corr)
+        if len(corrs) == 0:
+            mean_corr = 0.
+        else:
+            mean_corr = sum(corrs)/len(corrs)
+
+        #mean_corr = jit_mean_spear(predt, y, dtest.encoded_prot_vec)
+            
+        return 'irho', (1.0-mean_corr)
+
     else:
         y = dtest
-    corr, _ = stats.spearmanr(predt, y)
-    return 'irho', (1.0-corr)
+        corr, _ = stats.spearmanr(predt, y)
+        return 'irho', (1.0-corr)
 
 def xgb_train_wrapper(
         config: util.Config,
@@ -234,7 +310,8 @@ def xgb_train_wrapper(
             #"eval_metric": ['irho'],
             "disable_default_eval_metric": True,
             "max_cat_to_onehot": int(config.max_cat_to_onehot),
-            "max_cat_threshold": int(config.max_cat_threshold)
+            "max_cat_threshold": int(config.max_cat_threshold),
+            'random_state' : int(time.time())
             }
         forest = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees), early_stopping_rounds= config.early_stopping, evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
     else:
@@ -267,7 +344,8 @@ def xgb_train_wrapper(
             #"eval_metric": ['irho'],
             "disable_default_eval_metric": True,
             "max_cat_to_onehot": int(config.max_cat_to_onehot_1),
-            "max_cat_threshold": int(config.max_cat_threshold_1)
+            "max_cat_threshold": int(config.max_cat_threshold_1),
+            'random_state' : int(time.time())
             }
         forest = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees_1), early_stopping_rounds=int(config.early_stopping_1), evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
 
@@ -774,11 +852,11 @@ def trainForest(
                 elif util.objective_function_criterium(config, worst_scores, scores_obj):  # if worst_scores ar better than scores_obj
                     worst_scores = scores_obj
                     worst_forest = forest
-            if config.optimize_mean:
-                scores_list.append(scores_obj)
+                if config.optimize_mean:
+                    scores_list.append(scores_obj)
         if repeat > 1:
             scores_obj = worst_scores
-            forest = worst_forest
+            #forest = worst_forest
             if config.optimize_mean:
                 scores_obj = util.mean_scores(scores_list)
 
@@ -813,63 +891,101 @@ def trainForest(
         else:
             cv_slice_stores = None
 
-        for cv_id, cv_counter in enumerate(cv_counters):
-            cv_slice: CrossValidationSlice = cross_val_object.slices[cv_counter]
-            if remote:
-                t01 = time.time()
-                packed_cv_slice: bytes = pack(cv_slice)
-                cv_slice_stores[cv_counter] = packed_cv_slice
-                t02 = time.time()
-                if config.verbosity >= 2:
-                    config.logger.info(f"Time for packing cv_slice {cv_counter=} in trainForest: {t02 - t01} {slice_slices is None=} {para_number=} {(samples_store_id is None)=}")
+        cv_repeat_scores = []
 
-            if slice_slices is not None and cv_counter in slice_slices:
-                s_slice_slices = slice_slices[cv_counter]
-            else:
-                s_slice_slices = None
+        for i in range(0, repeat):
 
-            if remote:
-                if samples_store_id is None:
-                    samples_store_id = ray.put(pack(samples))
-                slice_result_ids.append(
-                    trainRegressionForestWrapper.remote(
-                        config,
-                        packed_cv_slice,
-                        samples_store_id=[samples_store_id],
-                        slice_slices=s_slice_slices,
-                        distance_map=distance_map,
-                        print_out=print_out,
-                        cv_counter=cv_counter,
-                        debug=debug,
-                        skip_feature_selection=skip_feature_selection,
-                        overwrite_proc_n=para_number,
-                        skip_scoring=skip_scoring,
-                        force_confusion=force_confusion,
-                        score_train=score_train,
-                    )
-                )
+            for cv_id, cv_counter in enumerate(cv_counters):
                 
-            else:
-                slice_result_ids.append(
-                    trainRegressionForest(
-                        config,
-                        cv_slice,
-                        samples=samples,
-                        samples_store_id=samples_store_id,
-                        slice_slices=s_slice_slices,
-                        distance_map=distance_map,
-                        print_out=print_out,
-                        cv_counter=cv_counter,
-                        overwrite_proc_n=para_number,
-                        debug=debug,
-                        skip_feature_selection=skip_feature_selection,
-                        skip_scoring=skip_scoring,
-                        force_confusion=force_confusion,
-                        score_train=score_train,
-                        gpu_id=gpu_id
+                cv_slice: CrossValidationSlice = cross_val_object.slices[cv_counter]
+                if remote:
+                    t01 = time.time()
+                    packed_cv_slice: bytes = pack(cv_slice)
+                    cv_slice_stores[cv_counter] = packed_cv_slice
+                    t02 = time.time()
+                    if config.verbosity >= 2:
+                        config.logger.info(f"Time for packing cv_slice {cv_counter=} in trainForest: {t02 - t01} {slice_slices is None=} {para_number=} {(samples_store_id is None)=}")
+
+                if slice_slices is not None and cv_counter in slice_slices:
+                    s_slice_slices = slice_slices[cv_counter]
+                else:
+                    s_slice_slices = None
+
+                if remote:
+                    if samples_store_id is None:
+                        samples_store_id = ray.put(pack(samples))
+                    slice_result_ids.append(
+                        trainRegressionForestWrapper.remote(
+                            config,
+                            packed_cv_slice,
+                            samples_store_id=[samples_store_id],
+                            slice_slices=s_slice_slices,
+                            distance_map=distance_map,
+                            print_out=print_out,
+                            cv_counter=cv_counter,
+                            debug=debug,
+                            skip_feature_selection=skip_feature_selection,
+                            overwrite_proc_n=para_number,
+                            skip_scoring=skip_scoring,
+                            force_confusion=force_confusion,
+                            score_train=score_train,
+                        )
                     )
-                )
-                if cv_interuption is not None and len(slice_result_ids) == 1:
+                    
+                else:
+                    slice_result_ids.append(
+                        trainRegressionForest(
+                            config,
+                            cv_slice,
+                            samples=samples,
+                            samples_store_id=samples_store_id,
+                            slice_slices=s_slice_slices,
+                            distance_map=distance_map,
+                            print_out=print_out,
+                            cv_counter=cv_counter,
+                            overwrite_proc_n=para_number,
+                            debug=debug,
+                            skip_feature_selection=skip_feature_selection,
+                            skip_scoring=skip_scoring,
+                            force_confusion=force_confusion,
+                            score_train=score_train,
+                            gpu_id=gpu_id
+                        )
+                    )
+                    if cv_interuption is not None and len(slice_result_ids) == 1:
+                        (
+                            forest,
+                            scores_obj,
+                            cv_counter,
+                            cv_slice,
+                            reg_forest_times,
+                            _slice_slices,
+                        ) = slice_result_ids[0]
+                        margin, best_first_scores = cv_interuption
+                        if not util.objective_function_criterium(config, scores_obj, best_first_scores, feature_penalty=config.feature_penalty, margin=margin):
+                            return forest, (scores_obj, scores_obj), cross_val_object, slice_slices
+                    
+
+            if remote:
+                results = ray.get(slice_result_ids)
+            else:
+                results = slice_result_ids
+
+            ret_slice_slices: dict[int, list[CrossValidationSlice]] = slice_slices
+            if ret_slice_slices is None:
+                ret_slice_slices = {}
+
+            for res in results:
+                if remote:
+                    (
+                        scores_obj,
+                        packed_cv_slice,
+                        cv_counter,
+                        reg_forest_times,
+                        _slice_slices,
+                    ) = res
+                    cv_slice = unpack(packed_cv_slice)
+                else:
                     (
                         forest,
                         scores_obj,
@@ -877,76 +993,49 @@ def trainForest(
                         cv_slice,
                         reg_forest_times,
                         _slice_slices,
-                    ) = slice_result_ids[0]
-                    margin, best_first_scores = cv_interuption
-                    if not util.objective_function_criterium(config, scores_obj, best_first_scores, feature_penalty=config.feature_penalty, margin=margin):
-                        return forest, (scores_obj, scores_obj), cross_val_object, slice_slices
-                
+                    ) = res
 
-        if remote:
-            results = ray.get(slice_result_ids)
-        else:
-            results = slice_result_ids
+                total_times = aggregate_times(total_times, reg_forest_times)
 
-        ret_slice_slices: dict[int, list[CrossValidationSlice]] = slice_slices
-        if ret_slice_slices is None:
-            ret_slice_slices = {}
+                if cv_slice is not None:
+                    del cross_val_object.slices[cv_counter]
+                    cross_val_object.slices[cv_counter] = cv_slice
+                    if remote:
+                        cv_slice_stores = None
 
-        for res in results:
-            if remote:
-                (
-                    scores_obj,
-                    packed_cv_slice,
-                    cv_counter,
-                    reg_forest_times,
-                    _slice_slices,
-                ) = res
-                cv_slice = unpack(packed_cv_slice)
-            else:
-                (
-                    forest,
-                    scores_obj,
-                    cv_counter,
-                    cv_slice,
-                    reg_forest_times,
-                    _slice_slices,
-                ) = res
+                if cv_counter not in ret_slice_slices:
+                    ret_slice_slices[cv_counter] = _slice_slices
+                elif ret_slice_slices[cv_counter] is None:
+                    ret_slice_slices[cv_counter] = _slice_slices
+                elif _slice_slices is not None:
+                    ret_slice_slices[cv_counter] = _slice_slices
 
-            total_times = aggregate_times(total_times, reg_forest_times)
+                if scores_obj is None:
+                    raise "Scores must not be None here"
 
-            if cv_slice is not None:
-                del cross_val_object.slices[cv_counter]
-                cross_val_object.slices[cv_counter] = cv_slice
-                if remote:
-                    cv_slice_stores = None
-
-            if cv_counter not in ret_slice_slices:
-                ret_slice_slices[cv_counter] = _slice_slices
-            elif ret_slice_slices[cv_counter] is None:
-                ret_slice_slices[cv_counter] = _slice_slices
-            elif _slice_slices is not None:
-                ret_slice_slices[cv_counter] = _slice_slices
-
-            if scores_obj is None:
-                raise "Scores must not be None here"
+                if config.optimize_mean:
+                    scores_list.append(scores_obj)
+                else:
+                    if worst_scores is None:
+                        worst_scores = scores_obj
+                    elif util.objective_function_criterium(config, worst_scores, scores_obj):  # if worst_scores ar better than scores_obj
+                        worst_scores = scores_obj
+            del results
 
             if config.optimize_mean:
-                scores_list.append(scores_obj)
+                first_scores = scores_list[0]
+                scores_obj = util.mean_scores(scores_list)
+                if get_first_scores:
+                    scores_obj = (first_scores, scores_obj)
             else:
-                if worst_scores is None:
-                    worst_scores = scores_obj
-                elif util.objective_function_criterium(config, worst_scores, scores_obj):  # if worst_scores ar better than scores_obj
-                    worst_scores = scores_obj
-        del results
+                scores_obj = worst_scores
+                forest = worst_forest
 
-        if config.optimize_mean:
-            first_scores = scores_list[0]
-            scores_obj = util.mean_scores(scores_list)
-            if get_first_scores:
-                scores_obj = (first_scores, scores_obj)
-        else:
-            scores_obj = worst_scores
-            forest = worst_forest
+            if repeat > 1:
+                cv_repeat_scores.append(scores_obj)
+
+        if repeat > 1:
+            scores_obj = util.mean_scores(cv_repeat_scores)
 
     if config.verbosity >= 2:
         print_times(total_times, label = 'Train forest')

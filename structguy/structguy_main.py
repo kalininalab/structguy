@@ -54,7 +54,8 @@ def parse_arguments(argument_start = 2, manual_args = None):
                 'nofshpo',
                 'forces',
                 'gpu=',
-                'sd'
+                'sd',
+                'repeat='
             ]
             opts, args = getopt.getopt(argv, "i:n:m:d", long_paras)
 
@@ -97,6 +98,7 @@ def parse_arguments(argument_start = 2, manual_args = None):
     skip_fshpo = False
 
     multi_gpu = 0
+    repeat = None
 
     for opt, arg in opts:
         if opt == '-i':
@@ -180,6 +182,9 @@ def parse_arguments(argument_start = 2, manual_args = None):
         if opt == '--gpu':
             multi_gpu = int(arg)
 
+        if opt == '--repeat':
+            repeat = int(arg)
+
     if path_to_model is not None:
         if path_to_model.count('/') > 0:
             model_name = path_to_model.rsplit("/",1)[1].rsplit('.',1)[0]
@@ -205,6 +210,9 @@ def parse_arguments(argument_start = 2, manual_args = None):
     config.penalize_train_test_gap = penalize_train_test_gap
 
     config.multi_gpu = multi_gpu
+
+    if repeat is not None:
+        config.repeat_training = repeat
 
     if skip_fshpo:
         config.hpo_do_feat_selection = False
