@@ -131,6 +131,25 @@ class CrossValidationSlice(Slotted_obj):
         'test_prot_vec'
         ]
     
+    slot_mask = [
+        True, True, True,
+        True, True, True,
+        True, True, True,
+        True, True, True,
+        True, True, True,
+        True, True, True,
+        True, True, True,
+        True, True, True,
+        True, True, True,
+        True, True, True,
+        True, True, True,
+        True, True, True,
+        True, True, True,
+        True, True, True,
+        True, True, True,
+        False
+    ]
+
     def __init__(self, test_ids = None, train_ids = None, raw_feature_names = None, sample_dict = None, geometric_distance_map = None, config = None, name = '', train_prots = None, test_prots = None, train_equal_test = False, para_number = None, feature_names = None, raw_init = False):
 
         for slot in self.__slots__:

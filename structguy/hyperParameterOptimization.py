@@ -225,7 +225,7 @@ def bayes_random_init(
                     continue
                 results.append((scores, first_scores, params))
 
-                if current_params_id == len(randomized_parameters):
+                if current_params_id >= len(randomized_parameters):
                     com_queue.put(None)
                     dones[i] = True
                 else:
@@ -454,7 +454,7 @@ def bayesian_optimisation(
         n_iters = 4
 
     if config.multi_gpu > 1:
-        n_iters = max([n_params*2, 4])
+        n_iters = max([n_params*2, 2])
 
     return_cv_obj = cv_obj
     return_slice_slices = slice_slices

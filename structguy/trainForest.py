@@ -900,8 +900,9 @@ def trainForest(
                 cv_slice: CrossValidationSlice = cross_val_object.slices[cv_counter]
                 if remote:
                     t01 = time.time()
-                    packed_cv_slice: bytes = pack(cv_slice)
-                    cv_slice_stores[cv_counter] = packed_cv_slice
+                    if cv_counter not in cv_slice_stores:
+                        packed_cv_slice: bytes = pack(cv_slice)
+                        cv_slice_stores[cv_counter] = packed_cv_slice
                     t02 = time.time()
                     if config.verbosity >= 2:
                         config.logger.info(f"Time for packing cv_slice {cv_counter=} in trainForest: {t02 - t01} {slice_slices is None=} {para_number=} {(samples_store_id is None)=}")
@@ -1000,8 +1001,6 @@ def trainForest(
                 if cv_slice is not None:
                     del cross_val_object.slices[cv_counter]
                     cross_val_object.slices[cv_counter] = cv_slice
-                    if remote:
-                        cv_slice_stores = None
 
                 if cv_counter not in ret_slice_slices:
                     ret_slice_slices[cv_counter] = _slice_slices
@@ -1025,8 +1024,7 @@ def trainForest(
             if config.optimize_mean:
                 first_scores = scores_list[0]
                 scores_obj = util.mean_scores(scores_list)
-                if get_first_scores:
-                    scores_obj = (first_scores, scores_obj)
+                
             else:
                 scores_obj = worst_scores
                 forest = worst_forest
@@ -1036,6 +1034,9 @@ def trainForest(
 
         if repeat > 1:
             scores_obj = util.mean_scores(cv_repeat_scores)
+
+        if get_first_scores:
+            scores_obj = (first_scores, scores_obj)
 
     if config.verbosity >= 2:
         print_times(total_times, label = 'Train forest')
