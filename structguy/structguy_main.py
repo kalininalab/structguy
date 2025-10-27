@@ -284,6 +284,7 @@ def parse_arguments(argument_start = 2, manual_args = None):
     log_file = f'{config.outfolder}/main_log_{time_stamp}.log'
     logging.basicConfig(filename=log_file, encoding='utf-8', level=logging.DEBUG)
 
+    config.logfile = log_file
     config.logger = main_logger
 
     return config, test_config

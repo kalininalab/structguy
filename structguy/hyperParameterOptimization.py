@@ -1034,6 +1034,8 @@ def get_scores(
         ):
     
     t0 = time.time()
+    if samples is None:
+        samples = unpack(ray.get(samples_store_id))
     _, scores, cv_obj, slice_slices = trainForest.trainForest(
         config,
         cv_obj,

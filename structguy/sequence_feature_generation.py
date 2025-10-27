@@ -61,21 +61,21 @@ def initFeatures(config, samples):
 def prepare_gemme(config: util.Config):
     gene_seq_map = parseFasta(config.path_to_sequence_fasta)
     prot_ids = list(gene_seq_map.keys())
-    msa_file_dict = parse_msa_folder(config.msa_folder_path, prot_ids, gene_seq_map)
-    print(f'{len(msa_file_dict)=}')
+    msa_file_dict = parse_msa_folder(prot_ids, gene_seq_map, config)
+    config.logger.info(f'{len(msa_file_dict)=}')
     build_gemme_cmd_script(config.msa_folder_path, msa_file_dict)
 
-    print('- Gemme is prepared -')
-    print('Call in msas folder [docker run -ti --rm --mount type=bind,source=$PWD,target=/project elodielaine/gemme:gemme]')
-    print('Then inside: [./call_gemme_inside_container.sh]')
-    print('Finally: [exit]')
+    config.logger.info('- Gemme is prepared -')
+    config.logger.info('Call in msas folder [docker run -ti --rm --mount type=bind,source=$PWD,target=/project elodielaine/gemme:gemme]')
+    config.logger.info('Then inside: [./call_gemme_inside_container.sh]')
+    config.logger.info('Finally: [exit]')
 
-def parse_msa_folder(msa_folder_path, prot_ids, seq_map):
-    print(f'{len(prot_ids)=}')
+def parse_msa_folder(prot_ids, seq_map, config):
+    config.logger.info(f'{len(prot_ids)=}')
     msa_file_dict = {}
 
-    for fn in os.listdir(msa_folder_path):
-        subfolder = f'{msa_folder_path}/{fn}'
+    for fn in os.listdir(config.msa_folder_path):
+        subfolder = f'{config.msa_folder_path}/{fn}'
         if not os.path.isdir(subfolder):
             continue
         for prot_id in prot_ids:
@@ -97,7 +97,7 @@ def parse_msa_folder(msa_folder_path, prot_ids, seq_map):
                         checked = check_msa_file(msa_file, seq_map[prot_id][0])
 
                         if checked is None:
-                            print(f'Found invalid msa file: {msa_file}')
+                            config.logger.info(f'Found invalid msa file: {msa_file}')
                             continue
 
                         if checked:
@@ -144,13 +144,13 @@ def build_gemme_cmd_script(msa_folder_path, msa_file_dict):
     #os.chmod(f'{msa_folder_path}/call_gemme_inside_container.sh', stat.st_mode | stat.S_IEXEC)
 
 
-def geneSeqMapToFasta(prot_seq_map, outfile, verbosity=0):
+def geneSeqMapToFasta(prot_seq_map, outfile, config):
     lines = []
     n = 0
     m = 0
 
-    if verbosity >= 2:
-        print("Size of prot_seq_map converted into a fasta file:", len(prot_seq_map))
+    if config.verbosity >= 2:
+        config.logger.info(f"Size of prot_seq_map converted into a fasta file: {len(prot_seq_map)=}")
 
     for u_ac in prot_seq_map:
         seq = prot_seq_map[u_ac][0]
@@ -163,8 +163,8 @@ def geneSeqMapToFasta(prot_seq_map, outfile, verbosity=0):
         m += 1
 
     if len(lines) > 0:
-        print("Filtered ", n, " Proteins before mmseqs2")
-        print(m, " sequences going into mmseqs2")
+        config.logger.info(f"Filtered {n} Proteins before mmseqs2")
+        config.logger.info(f"{m} sequences going into mmseqs2")
         f = open(outfile, "w")
         page = "".join(lines)
         f.write(page)
@@ -200,6 +200,7 @@ def estimate_cost(config, prot_id, msa_ref_dbs, gpw_ref_dbs, seq_len, n_of_mappe
 @ray.remote
 def para_mmseqs(store, db, indeces, temp_fasta):
     config, mmseqs2_search_dbs, max_seqs = store
+    util.reset_logger_for_remotes(config)
     sequence_maps = {}
     n_mapped_sequences = 0
     for index in indeces:
@@ -277,7 +278,7 @@ def do_mmseqs_search(
     for mmseq_search in mmseq_searchs:
         mmseq_search: dict[str, list[str]]
         temp_fasta = "%s/tmp_%s.fasta" % (config.mmseqs_tmp_folder, randomString())
-        returncode = geneSeqMapToFasta(mmseq_search, temp_fasta, verbosity=config.verbosity)
+        returncode = geneSeqMapToFasta(mmseq_search, temp_fasta, config)
 
         number_of_targets = len(mmseq_search)
         distribution_factor = config.proc_n // number_of_targets
@@ -309,7 +310,7 @@ def do_mmseqs_search(
             os.remove(temp_fasta)
 
         else:
-            print("Skipped mmseqs2 because of: ", returncode)
+            config.logger.info(f"Skipped mmseqs2 because of: {returncode}")
             for db in dbs:
                 sequence_maps[db] = {}
     return sequence_maps, n_mapped_sequences
@@ -318,7 +319,7 @@ def do_mmseqs_search(
 def local_ali_pipeline(config, samples, n_of_processes=6, update_mode=False):
     if config.verbosity >= 2:
         t0 = time.time()
-        print(f"Call of getSequenceFeatures with MSA DB: {config.msa_db}")
+        config.logger.info(f"Call of getSequenceFeatures with MSA DB: {config.msa_db}")
 
     msa_dbs = config.msa_dbs
     gpw_dbs = config.gpw_dbs
@@ -343,10 +344,10 @@ def local_ali_pipeline(config, samples, n_of_processes=6, update_mode=False):
 
     gene_seq_map, in_db = parseFromFasta(config.path_to_sequence_fasta, config=config, dbs=dbs)
     if config.verbosity >= 2:
-        print(f"Parsed protein sequences from: {config.path_to_sequence_fasta}\nLength of the map:{len(gene_seq_map)}, Length of in_db: {len(in_db)}")
+        config.logger.info(f"Parsed protein sequences from: {config.path_to_sequence_fasta}\nLength of the map:{len(gene_seq_map)}, Length of in_db: {len(in_db)}")
 
     if config.verbosity >= 2:
-        print(f"Query proteins that are in_db:\n{in_db=}")
+        config.logger.info(f"Query proteins that are in_db:\n{in_db=}")
 
     N = 0
     mmseq_searchs: list[dict[str, list[str]]] = []
@@ -368,7 +369,7 @@ def local_ali_pipeline(config, samples, n_of_processes=6, update_mode=False):
 
     if config.verbosity >= 2:
         t1 = time.time()
-        print("getSequenceFeature part 1: ", t1 - t0)
+        config.logger.info(f"getSequenceFeature part 1: {t1 - t0}")
 
     mmseqs2_search_dbs = {"ref50": config.mmseqs_search_db_ref50, "ref90": config.mmseqs_search_db_ref90, "ref100": config.mmseqs_search_db_ref100}
 
@@ -376,14 +377,17 @@ def local_ali_pipeline(config, samples, n_of_processes=6, update_mode=False):
 
     if config.verbosity >= 2:
         t2 = time.time()
-        print("getSequenceFeature part 2: ", t2 - t1)
+        config.logger.info(f"getSequenceFeature part 2: {t2 - t1}")
     
 
     if config.verbosity >= 2:
         t3 = time.time()
-        print("getSequenceFeature part 3: ", t3 - t2)
+        config.logger.info(f"getSequenceFeature part 3: {t3 - t2}")
 
-    ray_init(config, overwrite_logging_level=0)
+    logging_level = 0
+    if config.verbosity >= 4:
+        logging_level = 20
+    ray_init(config, overwrite_logging_level=logging_level)
 
     cost_map = {}
     cost_tuples = []
@@ -402,7 +406,7 @@ def local_ali_pipeline(config, samples, n_of_processes=6, update_mode=False):
         cost_tuples.append((primary_protein_id, cost))
 
         if config.verbosity >= 3:
-            print(f"Adding {primary_protein_id=} to cost_map  with {cost=} {seq_len=} {n_of_mapped_seqs=}")
+            config.logger.info(f"Adding {primary_protein_id=} to cost_map  with {cost=} {seq_len=} {n_of_mapped_seqs=}")
 
     prots_sorted_by_cost = sorted(cost_tuples, key=lambda x: x[1], reverse=True)
 
@@ -448,7 +452,7 @@ def local_ali_pipeline(config, samples, n_of_processes=6, update_mode=False):
     com_queue = Queue()
 
     if config.verbosity >= 2:
-        print(f"Going into ray_paraMSA, msa_dbs: {msa_dbs}, gpw_dbs: {gpw_dbs}, optimal cost: {optimal_cost}, number of chunks: {len(chunks)}")
+        config.logger.info(f"Going into ray_paraMSA, msa_dbs: {msa_dbs}, gpw_dbs: {gpw_dbs}, optimal cost: {optimal_cost}, number of chunks: {len(chunks)}")
 
     ray_process_ids = []
     started_procs: int = 0
@@ -459,15 +463,15 @@ def local_ali_pipeline(config, samples, n_of_processes=6, update_mode=False):
         else:
             sub_threads = 1
         if config.verbosity >= 2:
-            print(f"Starting a ray_paraMSA thread, chunk cost: {chunk_cost}, sub_threads: {sub_threads}")
+            config.logger.info(f"Starting a ray_paraMSA thread, chunk cost: {chunk_cost}, sub_threads: {sub_threads}")
         ray_process_ids.append(ray_paraMSA.remote(store, sequence_store, chunk[1], chunk[2], chunk[3], sub_threads, com_queue))
         started_procs += sub_threads
         if started_procs >= n_of_processes:
             break
 
     if config.verbosity >= 1:
-        print("Amount of total mapped sequences: ", n_mapped_sequences)
-        print("Amount of alignments: ", n)
+        config.logger.info(f"Amount of total mapped sequences: {n_mapped_sequences}")
+        config.logger.info(f"Amount of alignments: {n}")
 
     while True:
         ready, not_ready = ray.wait(ray_process_ids, timeout=0.1)
@@ -504,7 +508,7 @@ def local_ali_pipeline(config, samples, n_of_processes=6, update_mode=False):
                 except ZeroDivisionError:
                     sub_threads = freed_processes
                 if config.verbosity >= 2:
-                    print(f"Starting2 a ray_paraMSA thread, chunk cost: {chunk_cost}, sub_threads: {sub_threads}")
+                    config.logger.info(f"Starting2 a ray_paraMSA thread, chunk cost: {chunk_cost}, sub_threads: {sub_threads}")
                 new_ray_process_ids.append(ray_paraMSA.remote(store, sequence_store, chunk[1], chunk[2], chunk[3], sub_threads, com_queue))
                 started_procs += sub_threads
                 if started_procs >= n_of_processes:
@@ -517,12 +521,12 @@ def local_ali_pipeline(config, samples, n_of_processes=6, update_mode=False):
 
     if config.verbosity >= 2:
         t4 = time.time()
-        print("getSequenceFeature part 4: ", t4 - t3)
+        config.logger.info(f"getSequenceFeature part 4: {t4 - t3}")
 
     return msa_map, gpw_map
 
 
-def parseGemmeFile(infile, prot_id: str, samples: SampleSpace, gemme_pred_type, ori_prot_id):
+def parseGemmeFile(config, infile, prot_id: str, samples: SampleSpace, gemme_pred_type, ori_prot_id):
     seq = samples.sequence_map[ori_prot_id][0]
 
     f = open(infile, 'r')
@@ -539,7 +543,7 @@ def parseGemmeFile(infile, prot_id: str, samples: SampleSpace, gemme_pred_type, 
             try:
                 wt_aa = seq[seq_pos]
             except IndexError as e:
-                print(f'IndexError found:\n{prot_id=} {len(seq)=} {infile=} {line=}')
+                config.logger.info(f'IndexError found:\n{prot_id=} {len(seq)=} {infile=} {line=}')
                 os.remove(infile)
                 return None
                 #raise e
@@ -556,9 +560,15 @@ def parseGemmeFile(infile, prot_id: str, samples: SampleSpace, gemme_pred_type, 
 
 @ray.remote
 def para_psic(package, config):
+    util.reset_logger_for_remotes(config)
     for msa_path, psic_name in package:
         f = open(msa_path, "r")
-        msa = f.read()
+        try:
+            msa = f.read()
+        except UnicodeDecodeError as e:
+            print(f'Error reading msa: {msa_path=}')
+            config.logger.info(f'Error reading msa: {msa_path=}')
+            raise e
         f.close()
         psicFromFasta(msa, psic_name, config)
 
@@ -643,9 +653,9 @@ def afdb_msa_pipeline(config, samples: SampleSpace):
                 if checked:
                     msa_map[prot_id] = {'smsa' : msa_file}
                     psic_name = f'{subfolder}/{sfn[:-6]}.psic'
-                    if not os.path.isfile(psic_name):
+                    if not os.path.isfile(psic_name) or config.overwrite:
                         if config.verbosity >= 3:
-                            print(f"Calc psic profiles from afdb_msa_pipeline {sfn}")
+                            config.logger.info(f"Calc psic profiles from afdb_msa_pipeline {sfn}")
                         if len(psic_jobs) == current_job:
                             psic_jobs.append([])
                         psic_jobs[current_job].append((msa_file, psic_name))
@@ -653,7 +663,7 @@ def afdb_msa_pipeline(config, samples: SampleSpace):
                         if current_job >= config.proc_n:
                             current_job = 0
                 else:
-                    print(f'Need to remove: {msa_file=}')
+                    config.logger.info(f'Need to remove: {msa_file=}')
                     to_remove.append(msa_file)
 
             else:
@@ -662,7 +672,7 @@ def afdb_msa_pipeline(config, samples: SampleSpace):
                     if tokens[1] == 'normPred' and sfn[-4:] == '.txt':
                         gemme_pred_type = tokens[2].split('.')[0][4:]
                         
-                        value_map = parseGemmeFile(f'{subfolder}/{sfn}', prot_id, samples, gemme_pred_type, prot_id_back_map[prot_id])
+                        value_map = parseGemmeFile(config, f'{subfolder}/{sfn}', prot_id, samples, gemme_pred_type, prot_id_back_map[prot_id])
                         if value_map is None:
                             continue
                         if prot_id not in gemme_predictions:
@@ -724,7 +734,7 @@ def afdb_msa_pipeline(config, samples: SampleSpace):
         psic_name = f'{target_folder}/{sfn[:-6]}.psic'
         if not os.path.isfile(psic_name):
             if config.verbosity >= 3:
-                print(f"Calc psic profiles from afdb_msa_pipeline {sfn}")
+                config.logger.info(f"Calc psic profiles from afdb_msa_pipeline {sfn}")
             if len(psic_jobs) == current_job:
                 psic_jobs.append([])
             psic_jobs[current_job].append((f'{target_folder}/{sfn}', psic_name))
@@ -739,18 +749,18 @@ def afdb_msa_pipeline(config, samples: SampleSpace):
         proc_ids.append(para_psic.remote(package, config_store))
     ray.get(proc_ids)
 
-    return msa_map, gemme_predictions
+    return msa_map, gemme_predictions, prot_id_back_map
 
 
 def getSequenceFeatures(config, samples, n_of_processes=6, update_mode=False):
     
+    
     config.msa_dbs = ['smsa']
     config.gpw_dbs = []
     initFeatures(config, samples)
-
     #msa_map, gpw_map = local_ali_pipeline(config, samples, n_of_processes=n_of_processes, update_mode=update_mode)
 
-    msa_map, gemme_predictions = afdb_msa_pipeline(config, samples)
+    msa_map, gemme_predictions, prot_id_back_map = afdb_msa_pipeline(config, samples)
     gpw_map = {}
 
     packages = []
@@ -766,7 +776,7 @@ def getSequenceFeatures(config, samples, n_of_processes=6, update_mode=False):
         aacs = prot_mut_map[u_ac]
 
         if config.verbosity >= 6:
-            print("Added to CalcSeqFeat queue:", u_ac, aacs)
+            config.logger.info(f"Added to CalcSeqFeat queue: {u_ac=}, {aacs=}")
 
         if len(packages) == current_package:
             packages.append([])
@@ -776,24 +786,33 @@ def getSequenceFeatures(config, samples, n_of_processes=6, update_mode=False):
             current_package = 0
 
     if config.verbosity >=3:
-        print(f'{msa_map=}')
+        config.logger.info(f'{msa_map=}')
 
-    msa_store = ray.put((msa_map, gpw_map, config))
-
-    processes = []
-    for package in packages:
-        processes.append(paraCalcSeqFeat.remote(package, msa_store))
     
-    results = ray.get(processes)
+    if len(packages) > 1:
+        msa_store = ray.put((msa_map, gpw_map, config))
+        processes = []
+        for package in packages:
+            processes.append(paraCalcSeqFeat.remote(package, msa_store))
+        
+        results = ray.get(processes)
+    elif len(packages) == 1:
+        results = [calcSeqFeat(packages[0], msa_map, gpw_map, config)]
+    else:
+        results = []
 
     if config.verbosity >= 1:
-        print("after paraCalcSeqFeat")
+        config.logger.info("after paraCalcSeqFeat")
 
     for result in results:
         for u_ac, prot_mut_map in result:
+            if u_ac in prot_id_back_map:
+                prot_id = prot_id_back_map[u_ac]
+            else:
+                prot_id = u_ac
             for aac in prot_mut_map:
                 for value, feat_name in prot_mut_map[aac]:
-                    samples.addValue((u_ac, aac), value, feat_name)
+                    samples.addValue((prot_id, aac), value, feat_name, config=config)
 
     return
 
@@ -801,7 +820,7 @@ def getSequenceFeatures(config, samples, n_of_processes=6, update_mode=False):
 @ray.remote(max_calls=1)
 def ray_paraMSA(store, sequence_store, prot_ids, prot_seq_map, hit_seq_maps, sub_threads, com_queue):
     config, update_mode, in_db, msa_dbs, gpw_dbs = store
-
+    util.reset_logger_for_remotes(config)
     results = []
 
     for prot_id in prot_ids:
@@ -811,7 +830,7 @@ def ray_paraMSA(store, sequence_store, prot_ids, prot_seq_map, hit_seq_maps, sub
             elif prot_id in in_db:
                 seq = None
             else:
-                print("Skipped getMSA for:", prot_id, "It was not in the gene_seq_map")
+                config.logger.info(f"Skipped getMSA for: {prot_id}, It was not in the gene_seq_map")
                 continue
         else:
             seq = prot_seq_map[prot_id][0]
@@ -825,6 +844,10 @@ def ray_paraMSA(store, sequence_store, prot_ids, prot_seq_map, hit_seq_maps, sub
 @ray.remote
 def paraCalcSeqFeat(package, store):
     msa_map, gpw_map, config = store
+    util.reset_logger_for_remotes(config)
+    return calcSeqFeat(package, msa_map, gpw_map, config)
+
+def calcSeqFeat(package, msa_map, gpw_map, config):
     dbs = []
     for db_id in config.msa_dbs:
         dbs.append((db_id, False))
@@ -855,15 +878,15 @@ def paraCalcSeqFeat(package, store):
                     u_ac = clean_prot_id(u_ac)
                 else:
                     if config.verbosity >= 1:
-                        print(f"Filtered {u_ac}, since it was not in the results_map: {db_name} ({is_gpw})")
+                        config.logger.info(f"Filtered {u_ac}, since it was not in the results_map: {db_name} ({is_gpw})")
                     continue
             if db_name not in results_map[u_ac]:
                 if config.verbosity >= 1:
-                    print(f"Filtered {u_ac} since db_name {db_name} was not in the results_map_map[u_ac], {is_gpw}")
+                    config.logger.info(f"Filtered {u_ac} since db_name {db_name} was not in the results_map_map[u_ac], {is_gpw}")
                 continue
 
             gpw_file_path = results_map[u_ac][db_name]
-            # print(gpw_file_path)
+            # config.logger.info(gpw_file_path)
 
             try:
                 if gpw_file_path[-3:] == '.gz':
@@ -875,18 +898,18 @@ def paraCalcSeqFeat(package, store):
             except:
                 [e, f, g] = sys.exc_info()
                 g = traceback.format_exc()
-                print(f"Error with reading file, path: {gpw_file_path}, protein: {u_ac}, db_name: {db_name}, is_gpw: {is_gpw}\n{e}\n{f}\n{g}")
+                config.logger.info(f"Error with reading file, path: {gpw_file_path}, protein: {u_ac}, db_name: {db_name}, is_gpw: {is_gpw}\n{e}\n{f}\n{g}")
 
             if gpw_fasta is None:
                 if config.verbosity >= 1:
-                    print("Filtered", u_ac, ",since gpw_fasta was None", db_name)
+                    config.logger.info(f"Filtered {u_ac}, since gpw_fasta was None {db_name=}")
 
                 continue
             if is_gpw:
                 gpw_ds, seed = msa.parseGpwFasta(gpw_fasta, dict_out=True)
 
                 if len(gpw_ds) == 0:
-                    print("Error, gpw_ds is empty: ", u_ac)
+                    config.logger.info(f"Error, gpw_ds is empty: {u_ac}")
 
                 seed_seq = gpw_ds[list(gpw_ds.keys())[0]][0].replace("-", "")
                 try:
@@ -894,7 +917,7 @@ def paraCalcSeqFeat(package, store):
                 except:
                     [e, f, g] = sys.exc_info()
                     g = traceback.format_exc()
-                    print(f"Error in getPosWiseGPW: {u_ac} {db_name} {seed} {gpw_file_path}\n{e}\n{f}\n{g}")
+                    config.logger.info(f"Error in getPosWiseGPW: {u_ac} {db_name} {seed} {gpw_file_path}\n{e}\n{f}\n{g}")
                     continue
                 psic_name = None
             else:
@@ -902,27 +925,30 @@ def paraCalcSeqFeat(package, store):
                 try:
                     seed_seq = seq_map[seed].replace("-", "")
                 except KeyError as e:
-                    print(f'Error: invalid seed: {seed=} {gpw_file_path=}')
+                    config.logger.info(f'Error: invalid seed: {seed=} {gpw_file_path=}')
                     raise e
                 pos_wise_map = msa.getPosWiseMSA(seq_map, seed)
                 psic_name = f'{gpw_file_path[:-6]}.psic'
 
-            (psic_wt_map, psic_mut_map, dpsic_map, positional_dpsic_map, window_dpsic_map, protein_median_dpsic) = msa.calcPsicProfiles(config, u_ac, aacs, seed_seq, db_name, gpw=is_gpw, debug=config.verbosity, psic_name=psic_name)
+            (psic_wt_map, psic_mut_map, dpsic_map, positional_dpsic_map, window_dpsic_map, protein_median_dpsic) = msa.calcPsicProfiles(config, u_ac, aacs, seed_seq, db_name, gpw=is_gpw, psic_name=psic_name)
 
+            config.logger.info(f'After calcPSicProfiles: {u_ac=} {len(aacs)=} {len(psic_wt_map)=} {len(dpsic_map)=}')
+            
             err_count = 0
             for aac in aacs:
                 aa1 = aac[0]
                 aa2 = aac[-1]
                 pos = int(aac[1:-1]) - 1
-
-                if pos >= len(seed_seq):
+                if pos > 38 and pos < 40:
+                    config.logger.info(f'dpsic slice: {u_ac=} {aac=} {dpsic_map[aac]=}')
+                if pos >= len(pos_wise_map):
                     if config.verbosity >= 1:
-                        print(f"Filtered {u_ac=}, {pos=} {aac=}, since it was outside of the seed_seq, {len(seed_seq)=}")
+                        config.logger.info(f"Filtered {u_ac=}, {pos=} {aac=}, since it was outside of the seed_seq, {len(seed_seq)=} {len(pos_wise_map)=}")
                     continue
 
                 if aac not in psic_wt_map:
                     if config.verbosity >= 1 and err_count < 5:
-                        print(f"Filtered {u_ac=} {aac=} not in {len(psic_wt_map)=}")
+                        config.logger.info(f"Filtered {u_ac=} {aac=} not in {len(psic_wt_map)=}")
                         err_count += 1
                     continue
 
@@ -969,6 +995,7 @@ def paraCalcSeqFeat(package, store):
                     prot_mut_map[aac].append((pos / len(seed_seq), "Relative Sequence Position"))
                     prot_mut_map[aac].append((len(seed_seq), "Protein Size"))
             first_db = False
+        config.logger.info(f'Adding to results: {u_ac=} {len(prot_mut_map)=}')
         results.append((u_ac, prot_mut_map))
     return results
 

@@ -559,11 +559,13 @@ class SampleSpace(Slotted_obj):
         self.feature_names = list(self.features.keys())
         return
 
-    def addValue(self,sample_id,value,feat_name):
+    def addValue(self,sample_id,value,feat_name, config = None):
         if sample_id not in self.samples:
             self.samples[sample_id] = Sample(sample_id,self.sample_nr)
             self.sample_nr += 1
             self.feature_matrix_dict[sample_id] = {}
+            if config is not None:
+                config.logger.info(f'Added new sample: {sample_id=} {self.sample_nr=}')
         if not self.features[feat_name].f_type == 'categorical':
             self.feature_matrix_dict[sample_id][feat_name] = value
         else:

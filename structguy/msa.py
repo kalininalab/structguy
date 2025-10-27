@@ -633,10 +633,9 @@ def saveGpw(config, gpw, prot_id, ref_db_id, pdb_tuple):
     return f"{filename}.gz"
 
 
-def parsePsicFile(infile, debug=0):
+def parsePsicFile(infile):
     if not os.path.isfile(infile):
-        if debug >= 1:
-            print("Did not found psic-file: ", infile)
+        print(f"Did not found psic-file: {infile}")
         return {}
 
     if infile[-3:] == '.gz':
@@ -662,13 +661,16 @@ def parsePsicFile(infile, debug=0):
 
 
 # called by sequence_feature_generation
-def calcPsicProfiles(config, prot_id, aacs, seq, ref_db_id, gpw=False, debug=0, psic_name = None):
+def calcPsicProfiles(config, prot_id, aacs, seq, ref_db_id, gpw=False, psic_name = None):
     out_directory = get_out_directory(prot_id, config)
 
     if psic_name is None:
         psic_name = util.get_msa_path(out_directory, prot_id, ref_db_id, gpw=gpw, psic=True)
 
-    psic_profiles = parsePsicFile(psic_name, debug=debug)
+    if config.verbosity >= 2:
+        config.logger.info(f'calcPsicProfiles: {prot_id=} {len(seq)=} {ref_db_id=} {gpw=} {psic_name=} {out_directory=}')
+
+    psic_profiles = parsePsicFile(psic_name)
 
     psic_wt_map = {}
     psic_mut_map = {}
@@ -677,20 +679,18 @@ def calcPsicProfiles(config, prot_id, aacs, seq, ref_db_id, gpw=False, debug=0, 
     positional_dpsic_map = {}
 
     if psic_profiles == {}:
-        print("Empty psic profiles: ", prot_id, ref_db_id)
+        config.logger.info(f"Empty psic profiles: {prot_id=}, {ref_db_id=}")
         return psic_wt_map, psic_mut_map, dpsic_map, [], {}, None
+
+    config.logger.info(f"{len(psic_profiles)=} {prot_id=} {ref_db_id=}")
 
     positional_median_dpsics = []
     for pos, wt in enumerate(seq):
         if pos not in psic_profiles:
-            if debug >= 1:
-                print("pos not in psic_profiles:", prot_id, pos)
+            config.logger.info("pos not in psic_profiles:", prot_id, pos)
             continue
         if wt not in psic_profiles[pos]:
-            if debug >= 1:
-                print(
-                    f"wt not in psic_profiles[pos]: {prot_id} {pos} {wt}\n{psic_profiles[pos]}"
-                )
+            config.logger.info(f"wt not in psic_profiles[pos]: {prot_id} {pos} {wt}\n{psic_profiles[pos]}")
             continue
         psic_wt = psic_profiles[pos][wt]
         positional_dpsics = []
@@ -726,8 +726,7 @@ def calcPsicProfiles(config, prot_id, aacs, seq, ref_db_id, gpw=False, debug=0, 
                 window_a = 0
 
         if pos not in psic_profiles:
-            if debug >= 1:
-                print("psic error ", prot_id, aac, ref_db_id, gpw)
+            config.logger.info(f"psic error {prot_id=} {aac=} {ref_db_id=} {gpw=}")
             positional_dpsic_map[aac] = 0.0
             psic_wt_map[aac] = 0.0
             psic_mut_map[aac] = 0.0
@@ -735,8 +734,7 @@ def calcPsicProfiles(config, prot_id, aacs, seq, ref_db_id, gpw=False, debug=0, 
             continue
 
         if aa_wt not in psic_profiles[pos]:
-            if debug >= 1:
-                print("psic error 2", prot_id, aac, ref_db_id, gpw)
+            config.logger.info(f"psic error 2 {prot_id=} {aac=} {ref_db_id=} {gpw=}")
             positional_dpsic_map[aac] = 0.0
             psic_wt_map[aac] = 0.0
             psic_mut_map[aac] = 0.0
@@ -751,8 +749,7 @@ def calcPsicProfiles(config, prot_id, aacs, seq, ref_db_id, gpw=False, debug=0, 
         window_dpsic_map[aac] = window_median_dpsic
 
         if pos >= len(positional_median_dpsics):
-            if debug >= 1:
-                print("psic error 3", prot_id, aac, ref_db_id, gpw)
+            config.logger.info(f"psic error 3 {prot_id=} {aac=} {ref_db_id=} {gpw=}")
             positional_dpsic_map[aac] = 0.0
             psic_wt_map[aac] = 0.0
             psic_mut_map[aac] = 0.0

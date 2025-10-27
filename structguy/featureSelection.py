@@ -687,13 +687,14 @@ def filterCorrelatedFeats(
     if config.verbosity >= 3:
         print(f'Filtering correlated features {config.corr_thresh=} {len(feats_to_filter)=}')
 
-    return list(feats_to_filter)
+    return list(feats_to_filter), samples
 
 
 def meanCorrelationWrapper(
     config: Config,
     cross_val_object: CrossValidationSlice,
     samples_store_id,
+    samples=None,
     dummy_call=False,
     print_out=False,
     pre_filter=None,
@@ -708,7 +709,7 @@ def meanCorrelationWrapper(
 
     if not cv_repeat:
         return detectBiasedFeaturesByMeanCorrelation(
-            config, cross_val_object, samples_store_id, dummy_call=dummy_call, print_out=print_out, pre_filter=pre_filter, debug=debug, return_list=return_list, return_score_list=return_score_list, remote=remote
+            config, cross_val_object, samples_store_id, samples=samples, dummy_call=dummy_call, print_out=print_out, pre_filter=pre_filter, debug=debug, return_list=return_list, return_score_list=return_score_list, remote=remote
         )
 
     else:
@@ -716,7 +717,7 @@ def meanCorrelationWrapper(
         for cv_counter in cross_val_object.slices:
             cv_slice = cross_val_object.slices[cv_counter]
             return_lists[cv_counter] = detectBiasedFeaturesByMeanCorrelation(
-                config, cv_slice, samples_store_id, dummy_call=dummy_call, print_out=print_out, pre_filter=pre_filter, debug=debug, return_list=return_list, return_score_list=return_score_list, remote=remote
+                config, cv_slice, samples_store_id, samples=samples, dummy_call=dummy_call, print_out=print_out, pre_filter=pre_filter, debug=debug, return_list=return_list, return_score_list=return_score_list, remote=remote
             )
 
         if return_list or return_score_list:
@@ -804,6 +805,7 @@ def detectBiasedFeaturesByMeanCorrelation(
     config,
     cv_slice: CrossValidationSlice,
     samples_store_id,
+    samples=None,
     dummy_call=False,
     thresh=None,
     print_out=False,
@@ -842,7 +844,8 @@ def detectBiasedFeaturesByMeanCorrelation(
         feats_to_remove = []
         cv_slice.tvmb_map = {}
         if not dummy_call or remote:
-            samples = unpack(ray.get(samples_store_id))
+            if samples is None:
+                samples = unpack(ray.get(samples_store_id))
             for feat_name in cv_slice.feature_names:
                 to_remove = cv_slice.addToTvmbMap(feat_name, samples, config, dummy_call=dummy_call)
                 if to_remove:
@@ -1165,7 +1168,7 @@ def select_features(
             print("=== Feature selection by feature confusion ===")
             print(f'{overwrite_proc_n=} {force_confusion=} {get_loss_map=}')
 
-        filter_corr_feats = filterCorrelatedFeats(config, samples = samples, samples_store_id = samples_store_id)
+        filter_corr_feats, samples = filterCorrelatedFeats(config, samples = samples, samples_store_id = samples_store_id)
 
         ta = add_to_times(times, ta)
 
@@ -1173,6 +1176,7 @@ def select_features(
             config,
             cross_val_object,
             samples_store_id,
+            samples=samples,
             dummy_call=True,
             print_out=print_out,
             debug=debug,

@@ -14,7 +14,7 @@ from structman.base_utils.base_utils import calculate_chunksizes, pack, unpack
 def expand_structural_feature_table(config):
     samples = sampleSpace.SampleSpace(config)
     # strfg.initFeatures(samples)
-    seqfg.initFeatures(config, samples)
+    # seqfg.initFeatures(config, samples)
 
     parse_structural_features(samples, config)
 

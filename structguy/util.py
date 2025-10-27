@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 import sys, os
+import logging
 import getopt
 import statistics
 import numpy as np
@@ -2083,3 +2084,8 @@ def categorize_shap_from_xgb(shap_values, feat_names):
 
     cat_wise_data = sorted(cat_wise_data, key=lambda x:abs(x[1]), reverse=True)
     return cat_wise_data, np.array(summed_shaps)
+
+def reset_logger_for_remotes(config):
+    main_logger = logging.getLogger(__name__)
+    logging.basicConfig(filename=config.logfile, encoding='utf-8', level=logging.DEBUG)
+    config.logger = main_logger
