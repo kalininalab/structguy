@@ -887,6 +887,12 @@ def trainForest(
                 para_number = config.proc_n // len(cv_counters)
             else:
                 para_number = para_number // len(cv_counters)
+            if config.multi_gpu >= len(cv_counters):
+                remote_wrapper_function = trainRegressionForestWrapper
+            else:
+                quota = min([0.5, config.multi_gpu / len(cv_counters)])
+                remote_wrapper_function = trainRegressionForestWrapper.options(num_gpus=quota)
+
             cv_slice_stores = {}
         else:
             cv_slice_stores = None
@@ -916,7 +922,7 @@ def trainForest(
                     if samples_store_id is None:
                         samples_store_id = ray.put(pack(samples))
                     slice_result_ids.append(
-                        trainRegressionForestWrapper.remote(
+                        remote_wrapper_function.remote(
                             config,
                             packed_cv_slice,
                             samples_store_id=[samples_store_id],

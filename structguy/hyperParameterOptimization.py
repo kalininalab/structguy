@@ -596,43 +596,20 @@ def bayesian_optimisation(
 
     else:
         remote_processes = []
-        para_number = config.proc_n // config.multi_gpu
+        threads_per_gpu = 4
+        para_number = max([1,config.proc_n // (config.multi_gpu * threads_per_gpu)])
+        remote_function = para_eval.options(num_gpus = 1/threads_per_gpu)
         current_params_id = 0
         for gpu_id in range(config.multi_gpu):
-            if gpu_id == 0 and len(x_list) > 4:
-                try:
-                    model.fit(scaled_xp, yp)
-                except:
-                    config.logger.info(f"{xp=}, {yp=}")
-                    config.logger.info(f"{x_list=}, {y_list=}")
-                    raise "None in Input"
-
-                # Sample next hyperparameter
-                if random_search:
-                    x_random = np.random.uniform(bounds[:, 0], bounds[:, 1], size=(random_search, n_params))
-                    ei = -1 * expected_improvement(x_random, model, yp, greater_is_better=True, n_params=n_params)
-                    next_sample: np.ndarray = x_random[np.argmax(ei), :]
-                else:
-                    next_sample = sample_next_hyperparameter(expected_improvement, model, yp, greater_is_better=True, bounds=scaled_bounds, n_restarts=100)
-
-                # Duplicates will break the GP. In case of a duplicate, we will randomly sample a next query point.
-                if np.any(np.sum(np.abs(next_sample - scaled_xp), axis = 1) <= epsilon):
-                    if config.verbosity >= 2:
-                        config.logger.info(f"Sampled a duplicate: {next_sample} {bounds}")
-                    next_sample = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
-                    count_dups += 1
-                else:
-                    next_sample = scaler.inverse_transform([next_sample])[0]
-                current_params_id += 1
-            else:
+            for _ in range(threads_per_gpu):
                 next_sample = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
 
-            com_queue = Queue()
-            out_queue = Queue()
-            com_queue.put((next_sample))
-            
-            proc_id = para_eval.remote(com_queue, out_queue, store, para_number, gpu_id)
-            remote_processes.append((com_queue, out_queue, proc_id))
+                com_queue = Queue()
+                out_queue = Queue()
+                com_queue.put((next_sample))
+                
+                proc_id = remote_function.remote(com_queue, out_queue, store, para_number, gpu_id)
+                remote_processes.append((com_queue, out_queue, proc_id))
 
         dones = []
         counts = []
@@ -640,7 +617,9 @@ def bayesian_optimisation(
             dones.append(False)
             counts.append(0)
         all_done = False
-            
+        
+        append_counter = 0
+
         while not all_done:
             for i, (com_queue, out_queue, proc_id) in enumerate(remote_processes):
                 if dones[i]:
@@ -693,6 +672,7 @@ def bayesian_optimisation(
                 # Update lists
                 x_list.append(next_sample)
                 y_list.append(cv_score)
+                append_counter += 1
 
                 # Update xp and yp
                 xp = np.array(x_list)
@@ -703,7 +683,7 @@ def bayesian_optimisation(
                     com_queue.put(None)
                     dones[i] = True
                 else:
-                    if i == 0 and len(x_list) > 4:
+                    if append_counter >= 2:
                         try:
                             model.fit(scaled_xp, yp)
                         except:
@@ -728,6 +708,7 @@ def bayesian_optimisation(
                         else:
                             next_sample = scaler.inverse_transform([next_sample])[0]
                         current_params_id += 1
+                        append_counter = 0
                     else:
                         next_sample = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
                     com_queue.put(next_sample)

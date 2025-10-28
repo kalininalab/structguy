@@ -230,7 +230,8 @@ def learn(config, effectRegressor=None, test_config=None):
                 cv_repeat=config.cv_hpo,
                 print_out=True,
                 debug=debug,
-                remote=(config.multi_gpu >= len(initial_training_input.slices)),
+                #remote=(config.multi_gpu >= len(initial_training_input.slices)),
+                remote=(config.multi_gpu > 0),
                 get_first_scores=True,
             )
             hpo.threeDimHyperOptimization(
