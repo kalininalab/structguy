@@ -964,7 +964,9 @@ def trainForest(
                         ) = slice_result_ids[0]
                         margin, best_first_scores = cv_interuption
                         if not util.objective_function_criterium(config, scores_obj, best_first_scores, feature_penalty=config.feature_penalty, margin=margin):
-                            return forest, (scores_obj, scores_obj), cross_val_object, slice_slices
+                            obj_first_score = util.get_objective_score(config, scores_obj, feature_penalty = config.feature_penalty)
+                            estimated_obj_score = obj_first_score + config.estimation_delta
+                            return forest, (estimated_obj_score, scores_obj), cross_val_object, slice_slices
                     
 
             if remote:
@@ -1031,6 +1033,7 @@ def trainForest(
 
             if repeat > 1:
                 cv_repeat_scores.append(scores_obj)
+                scores_list = []
 
         if repeat > 1:
             scores_obj = util.mean_scores(cv_repeat_scores)

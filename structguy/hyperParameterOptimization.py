@@ -168,6 +168,8 @@ def bayes_random_init(
     config.logger.info(f"bayesian optimization: {param_names}, {n_pre_samples=}")
     config.logger.info("Current best scores:")
     best_scores.printOut(config=config)
+    config.logger.info("Current best first scores:")
+    best_first_scores.printOut(config=config)
     config.logger.info(f"Objective score: {best_scores.objective_value(config)}")
 
     if config.multi_gpu > 1:
@@ -645,17 +647,25 @@ def bayesian_optimisation(
                     continue
                 if not out_queue.empty():
                     (scores, next_sample, first_scores) = out_queue.get(timeout=5)
+                elif current_params_id >= n_iters:
+                    com_queue.put(None)
+                    dones[i] = True
+                    continue
                 else:
                     continue
 
-                cv_score = util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)
+                if isinstance(first_scores, float):
+                    cv_score = first_scores
+                else:
+                    cv_score = util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)
 
                 if config.verbosity >= 1:
                     config.logger.info(f"Bayesian optimization, iteration: gpu_id: {i} {counts[i]} {current_params_id=}")
                     counts[i] += 1
-                    config.logger.info(f"Objective score: {cv_score}, unpenalized: {scores.objective_value(config)}")
+                    config.logger.info(f"Objective score: {cv_score}, unpenalized: {scores.objective_value(config)} {isinstance(first_scores, float)}")
 
-                if util.objective_function_criterium(config, scores, best_scores, feature_penalty=config.feature_penalty):
+                
+                if (not isinstance(first_scores, float)) and util.objective_function_criterium(config, scores, best_scores, feature_penalty=config.feature_penalty):
                     best_scores = scores
                     best_first_scores = first_scores
                     best_params = next_sample
@@ -1075,9 +1085,12 @@ def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_id):
         if com_queue.empty():
             time.sleep(0.5)
             continue
-        params = com_queue.get()
+        try:
+            params = com_queue.get(timeout=180)
+        except:
+            return
         if params is None:
-            break
+            return
 
         for pos, para_value in enumerate(params):
             parameters[pos].setValue(config, para_value)
@@ -1268,7 +1281,7 @@ def threeDimHyperOptimization(
     distance_map=None,
     debug=False
 ):
-    
+    util.set_estimation_delta(config, first_scores, best_scores)
     random.seed()
     fss_parameters, fs_parameters, parameters = initParameters(config, split_fs_parameters=True)
     converged = False

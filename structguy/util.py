@@ -1226,9 +1226,6 @@ def calc_protein_wise_corr(y_test, y_pred, sample_ids, corr_function, mono_retur
     return prot_wise_corrs, mean_corr, prot_wise_raw_corrs
 
 
-
-
-
 def rho_eval_for_xgboost(predt: np.ndarray, dtest: xgb.DMatrix) -> tuple[str, float]:
     if isinstance(dtest, xgb.DMatrix):
         y = dtest.get_label()
@@ -1236,6 +1233,14 @@ def rho_eval_for_xgboost(predt: np.ndarray, dtest: xgb.DMatrix) -> tuple[str, fl
         y = dtest
     corr, _ = stats.spearmanr(predt, y)
     return (1.0-corr)
+
+
+def set_estimation_delta(config: Config, first_scores: Scores, scores: Scores):
+    obj_first_score: float = get_objective_score(config, first_scores)
+    obj_best_score: float = get_objective_score(config, scores)
+
+    config.estimation_delta = obj_best_score - obj_first_score
+
 
 def objective_function_criterium(config, scores, best_scores, feature_penalty = None, margin=1.0):
     if best_scores is None:
