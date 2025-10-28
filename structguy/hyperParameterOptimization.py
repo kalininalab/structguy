@@ -466,7 +466,7 @@ def bayesian_optimisation(
     if config.verbosity >= 1:
         config.logger.info(f"Number of bayesian optimization iterations: {n_iters}")
 
-    if config.multi_gpu < 2:
+    if config.multi_gpu < 1:
 
         for n in range(n_iters):
             if config.verbosity >= 2:
@@ -600,6 +600,7 @@ def bayesian_optimisation(
         para_number = max([1,config.proc_n // (config.multi_gpu * threads_per_gpu)])
         remote_function = para_eval.options(num_gpus = 1/threads_per_gpu)
         current_params_id = 0
+        n_of_sent_hpo_sets = 0
         for gpu_id in range(config.multi_gpu):
             for _ in range(threads_per_gpu):
                 next_sample = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
@@ -607,6 +608,7 @@ def bayesian_optimisation(
                 com_queue = Queue()
                 out_queue = Queue()
                 com_queue.put((next_sample))
+                n_of_sent_hpo_sets += 1
                 
                 proc_id = remote_function.remote(com_queue, out_queue, store, para_number, gpu_id)
                 remote_processes.append((com_queue, out_queue, proc_id))
@@ -622,13 +624,14 @@ def bayesian_optimisation(
 
         while not all_done:
             for i, (com_queue, out_queue, proc_id) in enumerate(remote_processes):
-                if dones[i]:
-                    continue
+ 
                 if not out_queue.empty():
                     (scores, next_sample, first_scores) = out_queue.get(timeout=5)
+                    n_of_sent_hpo_sets -= 1
                 elif current_params_id >= n_iters:
-                    com_queue.put(None)
-                    dones[i] = True
+                    if not dones[i]:
+                        com_queue.put(None)
+                        dones[i] = True
                     continue
                 else:
                     continue
@@ -712,11 +715,14 @@ def bayesian_optimisation(
                     else:
                         next_sample = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
                     com_queue.put(next_sample)
+                    n_of_sent_hpo_sets += 1
                     
             all_done = True
             for done in dones:
                 if not done:
                     all_done = False
+            if n_of_sent_hpo_sets > 0:
+                all_done = False
             if not all_done:
                 time.sleep(0.5)
 
