@@ -898,10 +898,13 @@ def trainForest(
             cv_slice_stores = None
 
         cv_repeat_scores = []
+        cv_repeat_first_scores = []
 
         for i in range(0, repeat):
 
             for cv_id, cv_counter in enumerate(cv_counters):
+                if cv_id == 0:
+                    first_cv_counter = cv_counter
                 
                 cv_slice: CrossValidationSlice = cross_val_object.slices[cv_counter]
                 if remote:
@@ -1020,6 +1023,9 @@ def trainForest(
                 if scores_obj is None:
                     raise "Scores must not be None here"
 
+                if cv_counter == first_cv_counter:
+                    first_scores = scores_obj
+
                 if config.optimize_mean:
                     scores_list.append(scores_obj)
                 else:
@@ -1030,7 +1036,6 @@ def trainForest(
             del results
 
             if config.optimize_mean:
-                first_scores = scores_list[0]
                 scores_obj = util.mean_scores(scores_list)
                 
             else:
@@ -1039,10 +1044,12 @@ def trainForest(
 
             if repeat > 1:
                 cv_repeat_scores.append(scores_obj)
+                cv_repeat_first_scores.append(first_scores)
                 scores_list = []
 
         if repeat > 1:
             scores_obj = util.mean_scores(cv_repeat_scores)
+            first_scores = util.mean_scores(cv_repeat_first_scores)
 
         if get_first_scores:
             scores_obj = (first_scores, scores_obj)

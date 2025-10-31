@@ -456,7 +456,7 @@ def bayesian_optimisation(
         n_iters = 4
 
     if config.multi_gpu > 1:
-        n_iters = max([n_params*2, 2])
+        n_iters = max([n_params**2, 2])
 
     return_cv_obj = cv_obj
     return_slice_slices = slice_slices
@@ -596,7 +596,7 @@ def bayesian_optimisation(
 
     else:
         remote_processes = []
-        threads_per_gpu = 4
+        threads_per_gpu = 5
         para_number = max([1,config.proc_n // (config.multi_gpu * threads_per_gpu)])
         remote_function = para_eval.options(num_gpus = 1/threads_per_gpu)
         current_params_id = 0
@@ -607,7 +607,7 @@ def bayesian_optimisation(
 
                 com_queue = Queue()
                 out_queue = Queue()
-                com_queue.put((next_sample))
+                com_queue.put(next_sample)
                 n_of_sent_hpo_sets += 1
                 
                 proc_id = remote_function.remote(com_queue, out_queue, store, para_number, gpu_id)
@@ -621,10 +621,11 @@ def bayesian_optimisation(
         all_done = False
         
         append_counter = 0
+        final_countdown_started = False
 
         while not all_done:
             for i, (com_queue, out_queue, proc_id) in enumerate(remote_processes):
- 
+                
                 if not out_queue.empty():
                     (scores, next_sample, first_scores) = out_queue.get(timeout=5)
                     n_of_sent_hpo_sets -= 1
@@ -642,9 +643,9 @@ def bayesian_optimisation(
                     cv_score = util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)
 
                 if config.verbosity >= 1:
-                    config.logger.info(f"Bayesian optimization, iteration: gpu_id: {i} {counts[i]} {current_params_id=}")
+                    config.logger.info(f"Bayesian optimization, iteration: gpu_id: {i} {counts[i]} {current_params_id=} {n_of_sent_hpo_sets=}")
                     counts[i] += 1
-                    config.logger.info(f"Objective score: {cv_score}, unpenalized: {scores.objective_value(config)} {isinstance(first_scores, float)}")
+                    config.logger.info(f"Objective score: {cv_score}, unpenalized: {scores.objective_value(config)} {isinstance(first_scores, float)=}")
 
                 
                 if (not isinstance(first_scores, float)) and util.objective_function_criterium(config, scores, best_scores, feature_penalty=config.feature_penalty):
@@ -722,7 +723,19 @@ def bayesian_optimisation(
                 if not done:
                     all_done = False
             if n_of_sent_hpo_sets > 0:
-                all_done = False
+                if n_of_sent_hpo_sets < 5:
+                    if not final_countdown_started:
+                        final_countdown_started = True
+                        final_countdown_start = time.time()
+                        all_done = False
+                    else:
+                        countdown = time.time() - final_countdown_start
+                        if countdown > 7200:
+                            all_done = True
+                        else:
+                            all_done = False
+                else:
+                    all_done = False
             if not all_done:
                 time.sleep(0.5)
 
@@ -1072,10 +1085,7 @@ def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_id):
         if com_queue.empty():
             time.sleep(0.5)
             continue
-        try:
-            params = com_queue.get(timeout=180)
-        except:
-            return
+        params = com_queue.get()
         if params is None:
             return
 
@@ -1222,6 +1232,7 @@ def initParameters(
             parameters["max_cat_to_onehot"] = Parameter("max_cat_to_onehot", "integer", half_step_limits=[1,500])
             parameters["max_cat_threshold"] = Parameter("max_cat_threshold", "integer", half_step_limits=[1,100])
 
+            parameters["max_sample_parameter_1"] = Parameter("max_sample_parameter_1", "real", half_step_limits=config.max_sample_half_step)
             parameters["early_stopping_1"] = Parameter("early_stopping_1", "integer", half_step_limits=[1, 1000])
             parameters["min_child_weight_1"] = Parameter("min_child_weight_1", "real", half_step_limits=[0., 100.])
             parameters["xgb_gamma_1"] = Parameter("xgb_gamma_1", "real", half_step_limits=[0.,10.])
@@ -1503,7 +1514,7 @@ class SubdimensionNode:
         self.parent = parent
         self.tree = tree
         self.param_names = param_names
-        if len(param_names) > 2:
+        if len(param_names) > 3:
             h = len(param_names) // 2
             self.left_params = param_names[:h]
             self.right_params = param_names[h:]
