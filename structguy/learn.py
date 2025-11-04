@@ -149,6 +149,12 @@ def learn(config, effectRegressor=None, test_config=None):
     t_0 = time.time()
     config.logger.info(f"Time for loading dataset: {t_0 - t0} {config.n_of_features=}")
 
+    if config.verbosity >= 3:
+        feat_coverage_file = f"{config.outfolder}/prot_wise_feat_coverage.tsv"
+        samples.write_feature_coverage_matrix(feat_coverage_file)
+        config.logger.info(f'Wrote prot-wise feature coverages to {feat_coverage_file}')
+
+
     if config.weighting == "geometric" and config.regression:
         samples.setGeometricDistanceMap(config)
         distance_map = ray.put(samples.geometric_distance_map)
@@ -552,6 +558,11 @@ def evaluate_dataset(config: Config):
         config.logger.info(f'{extern_feature_names_list=}')
 
     samples, test_feature_matrix, test_targets, sample_id_list, feat_id_vec, cat_vec = load_data_for_pred(config, impute_map, extern_feature_names_list, extern_features)
+
+    if config.verbosity >= 3:
+        feat_coverage_file = f"{config.outfolder}/prot_wise_feat_coverage.tsv"
+        samples.write_feature_coverage_matrix(feat_coverage_file)
+        config.logger.info(f'Wrote prot-wise feature coverages to {feat_coverage_file}')
 
     external_feat_pos_dict = dict(zip(extern_feature_names_list, range(len(extern_feature_names_list))))
 

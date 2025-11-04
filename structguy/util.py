@@ -2000,76 +2000,83 @@ def loadModel(fn):
         print("\n============\nLoaded model from %s\n============\n" % fn)
     return model, feature_names, impute_map, config, feat_stats, features
 
-def catogrize_feat_by_name(featname):
+def categorize_feat_by_name(featname):
     if featname in feat_name_category_dict:
         return feat_name_category_dict[featname]
     if featname.count('GPW ref') > 0:
-        return 0
+        return 0, None
+    if featname.count('MSA smsa') > 0:
+        return 0, None
+    if featname[:5] == 'gemme':
+        return 0, None
     if featname[1:3] == 'c ':
         if featname[3:7] == 'long' or featname[3:8] == 'neigh' or featname[3:8] == 'short':
-            return 1
+            return 1, 0
         if featname[3:10] == 'Protein':
-            return 5
+            return 5, 1
         if featname[3:10] == 'Peptide':
-            return 8
+            return 8, 1
         if featname[3:9] == 'ligand':
-            return 8
+            return 8, 1
         if featname[3:6] == 'ion':
-            return 8
+            return 8, 1
         if featname[3:6] == 'DNA':
-            return 8
+            return 8, 1
         if featname[3:6] == 'RNA':
-            return 8
+            return 8, 1
         if featname[3:8] == 'metal':
-            return 8
+            return 8, 1
 
     if featname[:4] == 'lig_' or featname[:4] == 'rna_':
-        return 8
+        return 8, 1
 
     if featname[:3] == 'oh_':
         if featname[3:28] == 'structural_classification':
-            return 2
+            return 2, 3
         if featname[3:7] == 'ssa_':
-            return 7
+            return 7, 0
         if featname[3:15] == 'simple_class':
             if featname.count('Peptide') > 0 or featname.count('ligand') > 0 or featname.count('DNA') or featname.count('ion'):
-                return 8
+                return 8, 3
 
     if featname[-4:] == '_rsa' or featname[:4] == 'rsa_' or featname[-13:] == 'surface_value' or featname[1:7] == 'c_rsa_' or featname.count('location') > 0:
-        return 2
+        if featname[1:7] == 'c_rsa_':
+            return 2, 3
+        else:
+            return 2, 0
 
     if featname.count('Centrality') > 0:
-        return 3
+        return 3, 3
     
     if featname [-7:] == ' change':
-        return 4
+        return 4, None
     
     if featname.count(' AA_') > 0 or featname[:6] == 'oh_AA ':
-        return 4
+        return 4, None
 
     if featname[:5] == 'Site_' or featname[:9] == 'Backbone_' or featname[:9] == 'nof_site_' or featname[:8] == 'All_atom':
-        return 6
+        return 6, 2
     
     if featname[:12] == 'inter_chain_':
-        return 5
+        return 5, 1
     
     if featname[:12] == 'intra_chain_':
-        return 1
+        return 1, 0
     
     if featname[:16] == 'oh_Function Type' or featname == 'Function Type':
-        return 10
+        return 10, None
     
     if featname[:4] == 'cis_' or featname[:7] == 'ssbond_' or featname[-6:] == 'ssbond':
-        return 7
+        return 7, 0
     
     print(f'Unknown feature for categorization: {featname}')
-    return None
+    return None, None
 
 def categorize_shap(shap_obj, feat_names):
     summed_shaps = [0.] * len(feature_categories)
   
     for pos, shap_val in enumerate(shap_obj.values):
-        feat_cat = catogrize_feat_by_name(feat_names[pos])
+        feat_cat, _ = categorize_feat_by_name(feat_names[pos])
         summed_shaps[feat_cat] += shap_val
 
     shap_obj.values = np.array(summed_shaps)
@@ -2080,7 +2087,7 @@ def categorize_shap_from_xgb(shap_values, feat_names):
     max_feats = [(0., None, None)] * len(feature_categories)
 
     for pos, shap_val in enumerate(shap_values):
-        feat_cat = catogrize_feat_by_name(feat_names[pos])
+        feat_cat, _ = categorize_feat_by_name(feat_names[pos])
         summed_shaps[feat_cat] += shap_val
         if abs(shap_val) > abs(max_feats[feat_cat][0]):
             max_feats[feat_cat] = (shap_val, feat_names[pos], pos)

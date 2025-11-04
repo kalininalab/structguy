@@ -8,6 +8,7 @@ import sys
 import traceback
 import ray
 import gzip
+import shutil
 
 from pathlib import Path
 from ray.util.queue import Queue
@@ -73,6 +74,7 @@ def prepare_gemme(config: util.Config):
 def parse_msa_folder(prot_ids, seq_map, config):
     config.logger.info(f'{len(prot_ids)=}')
     msa_file_dict = {}
+    
 
     for fn in os.listdir(config.msa_folder_path):
         subfolder = f'{config.msa_folder_path}/{fn}'
@@ -85,7 +87,7 @@ def parse_msa_folder(prot_ids, seq_map, config):
             if fn[:name_len] == clean_prot_id(prot_id):
                 done = False
                 for sfn in os.listdir(subfolder):
-                    if sfn[-13:] == 'evolCombi.txt':
+                    if sfn[-13:] == 'evolCombi.txt' and not config.overwrite:
                         done = True
                 if not done:
                     to_remove = []
@@ -198,7 +200,7 @@ def estimate_cost(config, prot_id, msa_ref_dbs, gpw_ref_dbs, seq_len, n_of_mappe
     return total_cost
 
 @ray.remote
-def para_mmseqs(store, db, indeces, temp_fasta):
+def para_mmseqs(store, db, indeces, temp_fasta, n_threads):
     config, mmseqs2_search_dbs, max_seqs = store
     util.reset_logger_for_remotes(config)
     sequence_maps = {}
@@ -206,12 +208,20 @@ def para_mmseqs(store, db, indeces, temp_fasta):
     for index in indeces:
         mmseqs2_search_db = mmseqs2_search_dbs[db].replace('_search_db', f'_{index}_search_db')
 
+        config.logger.info(f'Para mmseqs2: {mmseqs2_search_db=}, {indeces=} in this process')
+
         temp_subfolder = f'{config.mmseqs_tmp_folder}/{index}'
         if not os.path.isdir(temp_subfolder):
             os.makedirs(temp_subfolder)
 
+        temp_fasta_trunk = os.path.abspath(temp_fasta)[:-6]
+        cp_temp_fasta = f'{temp_fasta_trunk}_{index}.fasta'
+
+        shutil.copy(temp_fasta, cp_temp_fasta)
+
+
         temp_outfile = f"{temp_subfolder}/tmp_outfile_{randomString()}.fasta"
-        FNULL = open(os.devnull, 'w')
+        #FNULL = open(os.devnull, 'w')
         p = subprocess.Popen(
             [
                 config.mmseqs_path,
@@ -226,10 +236,13 @@ def para_mmseqs(store, db, indeces, temp_fasta):
                 "query,target,tseq",
                 "--max-seq-len",
                 "999999",
-                '--min-aln-len', '30'
-            ], stdout=FNULL
+                '--min-aln-len', '30',
+                '--threads', str(n_threads)
+            ]#, stdout=FNULL
         )
         p.wait()
+
+        config.logger.info(f'finished Para mmseqs2: {mmseqs2_search_db=}')
 
         f = open(temp_outfile, "r")
         lines = f.read().split("\n")
@@ -254,6 +267,7 @@ def para_mmseqs(store, db, indeces, temp_fasta):
             n_mapped_sequences += 1
 
         os.remove(temp_outfile)
+        os.remove(cp_temp_fasta)
 
     return sequence_maps, n_mapped_sequences, db
 
@@ -288,6 +302,8 @@ def do_mmseqs_search(
         if n_splits % n_procs != 0:
             splits_per_proc += 1
 
+        config.logger.info(f'Starting para mmseqs2: {config.proc_n=} {number_of_targets=} {distribution_factor=} {n_procs=} {splits_per_proc=}')
+
         if returncode is None:
             for db in dbs:
                 #mmseqs2_search_db = mmseqs2_search_dbs[db]
@@ -300,7 +316,7 @@ def do_mmseqs_search(
                         if current_index < n_splits:
                             indeces.append(current_index)
                         current_index += 1
-                    procs.append(para_mmseqs.remote(store, db, indeces, temp_fasta))
+                    procs.append(para_mmseqs.remote(store, db, indeces, temp_fasta, distribution_factor))
 
                 results = ray.get(procs)
                 for remote_sequence_maps, remote_n_mapped_sequences, remote_db in results:
@@ -540,6 +556,7 @@ def parseGemmeFile(config, infile, prot_id: str, samples: SampleSpace, gemme_pre
         words = line[:-1].split()
         mut_aa = words[0][1:-1].upper()
         for seq_pos, gemme_val_str in enumerate(words[1:]):
+            
             try:
                 wt_aa = seq[seq_pos]
             except IndexError as e:
@@ -548,6 +565,9 @@ def parseGemmeFile(config, infile, prot_id: str, samples: SampleSpace, gemme_pre
                 return None
                 #raise e
             aac = f'{wt_aa}{seq_pos+1}{mut_aa}'
+            if (ori_prot_id, aac) not in samples.samples:
+                continue
+
             if gemme_val_str == 'NA':
                 gemme_val = None
             else:
@@ -572,7 +592,7 @@ def para_psic(package, config):
         f.close()
         psicFromFasta(msa, psic_name, config)
 
-def clean_msa(msa_page):
+def clean_msa(msa_page, overwrite = False):
     outlines = []
     first_entry = True
     first_seq = []
@@ -591,10 +611,13 @@ def clean_msa(msa_page):
                             gap_mask.append(False)
                             masked_seq.append(char)
                     masked_seq = ''.join(masked_seq)
-                    if len(first_seq) == len(masked_seq):
+                    if len(first_seq) == len(masked_seq) and not overwrite:
                         return msa_page
 
-                    outlines.append(f'{masked_seq}\n')
+                    if masked_seq == len(masked_seq) * masked_seq[0]:
+                        del outlines[-1]
+                    else:
+                        outlines.append(f'{masked_seq}\n')
                     first_entry = False
                 outlines.append(line)
             else:
@@ -607,7 +630,10 @@ def clean_msa(msa_page):
                     if not gap_mask[pos]:
                         masked_seq.append(char)
                 masked_seq = ''.join(masked_seq)
-                outlines.append(f'{masked_seq}\n')
+                if masked_seq == len(masked_seq) * masked_seq[0]:
+                    del outlines[-1]
+                else:
+                    outlines.append(f'{masked_seq}\n')
                 current_seq = []
                 outlines.append(line)
             else:
@@ -619,9 +645,125 @@ def clean_msa(msa_page):
         if not gap_mask[pos]:
             masked_seq.append(char)
     masked_seq = ''.join(masked_seq)
-    outlines.append(f'{masked_seq}\n')
+    if masked_seq == len(masked_seq) * masked_seq[0]:
+        del outlines[-1]
+    else:
+        outlines.append(f'{masked_seq}\n')
 
     return ''.join(outlines)
+
+@ray.remote
+def para_gemme(chunk, msa_folder_path, proc_id, overwrite):
+    lines = []
+    for msa_path in chunk:
+        f = open(f'{msa_folder_path}/{msa_path}', 'r')
+        page = f.read()
+        f.close()
+
+        msa = clean_msa(page, overwrite=overwrite)
+
+        f = open(f'{msa_folder_path}/{msa_path}', 'w')
+        f.write(msa)
+        f.close()
+
+        subfolder, msaf = msa_path.split('/')
+        lines.append(f'cd "{subfolder}"\n')
+        lines.append(f'echo "{msaf}"\n')
+        #lines.append(f'head -n 1 "{msaf}"\n')
+        line = f'python2.7 $GEMME_PATH/gemme.py "{msaf}" -r input -f "{msaf}"\n'
+        lines.append(line)
+
+        lines.append('cd ..\n')
+
+    f = open(f'{msa_folder_path}/call_gemme_inside_container_{proc_id}.sh', 'w')
+    f.write(''.join(lines))
+    f.close()
+
+    f = Path(f'{msa_folder_path}/call_gemme_inside_container_{proc_id}.sh')
+    f.chmod(f.stat().st_mode | stat.S_IEXEC)
+
+    cmds = ' '.join([
+        "docker", "run", "--rm", "--mount", "type=bind,source=$PWD,target=/project",
+        "elodielaine/gemme:gemme",
+        "bash", f"./call_gemme_inside_container_{proc_id}.sh", "exit"
+        ])
+
+    p = subprocess.Popen(cmds, shell=True, cwd=msa_folder_path)
+    p.wait()
+
+    
+
+def calc_gemme_feats(config, samples, prot_id_back_map):
+    gene_seq_map = parseFasta(config.path_to_sequence_fasta)
+    prot_ids = list(gene_seq_map.keys())
+    msa_file_dict = parse_msa_folder(prot_ids, gene_seq_map, config)
+    config.logger.info(f'{len(msa_file_dict)=}')
+
+    chunks = []
+    current_chunk = 0
+    for prot_id in msa_file_dict:
+        msa_path = msa_file_dict[prot_id]
+
+        if len(chunks) == current_chunk:
+            chunks.append([])
+        chunks[current_chunk].append(msa_path)
+
+        current_chunk += 1
+        if current_chunk >= config.proc_n:
+            current_chunk = 0
+
+    process_ids = []
+    for proc_id, chunk in enumerate(chunks):
+        process_ids.append(para_gemme.remote(chunk, config.msa_folder_path, proc_id, config.overwrite))
+
+    ray.get(process_ids)        
+
+    for prot_id in os.listdir(config.msa_folder_path):
+        subfolder = f'{config.msa_folder_path}/{prot_id}'
+        if not os.path.isdir(subfolder):
+            continue
+        for sfn in os.listdir(subfolder):
+            if sfn[-10:] == '_msa.fasta':
+                continue
+            else:
+                tokens = sfn.split('_')
+                if len(tokens) > 2:
+                    if tokens[1] == 'normPred' and sfn[-4:] == '.txt':
+                        gemme_pred_type = tokens[2].split('.')[0][4:]
+                        
+                        _ = parseGemmeFile(config, f'{subfolder}/{sfn}', prot_id, samples, gemme_pred_type, prot_id_back_map[prot_id])
+
+@ray.remote
+def para_mafft(chunk, config):
+    util.reset_logger_for_remotes(config)
+    for prot_id, msa_index, sequence_map, seq in chunk:
+        target_folder = f'{config.msa_folder_path}/{clean_prot_id(prot_id)}'
+        if not os.path.isdir(target_folder):
+            os.makedirs(target_folder)
+        sfn = f'{clean_prot_id(prot_id)}_msa.fasta'
+
+        config.logger.info(f'Calc MSA for {prot_id} {msa_index}')
+
+        msa, _, _ = computeMSA(
+            config,
+            seq,
+            prot_id,
+            search_db='ref90',
+            debug=config.verbosity,
+            sequence_map=sequence_map,
+            sub_threads=config.proc_n,
+            target_file = f'{target_folder}/{sfn}'
+        )
+
+        if msa is None:
+            continue
+
+        msa = clean_msa(msa)
+
+        f = open(f'{target_folder}/{sfn}', 'w')
+        f.write(msa)
+        f.close()
+
 
 def afdb_msa_pipeline(config, samples: SampleSpace):
     msa_map = {}
@@ -665,7 +807,7 @@ def afdb_msa_pipeline(config, samples: SampleSpace):
                 else:
                     config.logger.info(f'Need to remove: {msa_file=}')
                     to_remove.append(msa_file)
-
+            """
             else:
                 tokens = sfn.split('_')
                 if len(tokens) > 2:
@@ -678,6 +820,7 @@ def afdb_msa_pipeline(config, samples: SampleSpace):
                         if prot_id not in gemme_predictions:
                             gemme_predictions[prot_id] = {}
                         gemme_predictions[prot_id][gemme_pred_type] = value_map
+            """
         for msa_file in to_remove:
             os.remove(msa_file)
 
@@ -705,32 +848,20 @@ def afdb_msa_pipeline(config, samples: SampleSpace):
 
     sequence_maps, n_mapped_sequences = do_mmseqs_search(config, mmseq_searchs, dbs, mmseqs2_search_dbs)
 
-    for prot_id in sequence_maps['ref90']:
+    n_of_para_maffts = min([5, config.proc_n])
+
+    current_chunk = 0
+    chunks = []
+    for msa_index, prot_id in enumerate(sequence_maps['ref90']):
+        if len(chunks) == current_chunk:
+            chunks.append([])
+
+        chunks[current_chunk].append((prot_id, msa_index, sequence_maps['ref90'][prot_id], samples.sequence_map[prot_id]))
+        current_chunk += 1
+        if current_chunk >= n_of_para_maffts:
+            current_chunk = 0
+
         target_folder = f'{config.msa_folder_path}/{clean_prot_id(prot_id)}'
-        if not os.path.isdir(target_folder):
-            os.makedirs(target_folder)
-        sfn = f'{clean_prot_id(prot_id)}_msa.fasta'
-
-        msa, _, _ = computeMSA(
-            config,
-            samples.sequence_map[prot_id],
-            prot_id,
-            search_db='ref90',
-            debug=config.verbosity,
-            sequence_map=sequence_maps['ref90'][prot_id],
-            sub_threads=config.proc_n,
-            target_file = f'{target_folder}/{sfn}'
-        )
-
-        if msa is None:
-            continue
-
-        msa = clean_msa(msa)
-
-        f = open(f'{target_folder}/{sfn}', 'w')
-        f.write(msa)
-        f.close()
-
         psic_name = f'{target_folder}/{sfn[:-6]}.psic'
         if not os.path.isfile(psic_name):
             if config.verbosity >= 3:
@@ -744,10 +875,19 @@ def afdb_msa_pipeline(config, samples: SampleSpace):
 
         msa_map[prot_id] = {'smsa' : f'{target_folder}/{sfn}'}
 
+    process_ids = []
+    for chunk in chunks:
+        process_ids.append(para_mafft.remote(chunk, config_store))
+
+    ray.get(process_ids)
+        
+
     proc_ids = []
     for package in psic_jobs:
         proc_ids.append(para_psic.remote(package, config_store))
     ray.get(proc_ids)
+
+    calc_gemme_feats(config, samples, prot_id_back_map)
 
     return msa_map, gemme_predictions, prot_id_back_map
 

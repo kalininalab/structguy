@@ -531,7 +531,7 @@ def trainRegressionForest(
         except:
             slice_slice = packed_slice_slice
         slice_slice.filterFeatures(filtered_features)
-        if debug:
+        if config.verbosity >= 3:
             slice_slice.printBalance(config)
         if samples is None:
             samples = unpack(ray.get(samples_store_id))

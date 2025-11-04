@@ -650,6 +650,44 @@ class SampleSpace(Slotted_obj):
                 f.write('\n'.join(class_out_lines[class_name]))
                 f.close()
 
+    def write_feature_coverage_matrix(self, outfile):
+        prot_wise_feature_coverage = {}
+        feat_name_list = list(self.features.keys())
+        
+        sample_id_list = list(self.samples.keys())
+
+        for feat_name in self.features:
+            val_list = self.get_feature_value_vector(sample_id_list, feat_name)
+            for index, sample_id in enumerate(sample_id_list):
+                prot_id ,aac = sample_id
+                if prot_id not in prot_wise_feature_coverage:
+                    prot_wise_feature_coverage[prot_id] = {}
+                
+                if feat_name not in prot_wise_feature_coverage[prot_id]:
+                    prot_wise_feature_coverage[prot_id][feat_name] = [0, 0]
+
+                if val_list[index] is not None:
+                    prot_wise_feature_coverage[prot_id][feat_name][0] += 1
+                prot_wise_feature_coverage[prot_id][feat_name][1] += 1
+            
+        prot_id_list = list(prot_wise_feature_coverage.keys())
+        
+
+        header = '\t' + '\t'.join(feat_name_list) + '\n'
+        outlines = [header]
+        for prot_id in prot_id_list:
+            words = [prot_id]
+            for feat_name in feat_name_list:
+                cov = prot_wise_feature_coverage[prot_id][feat_name][0] / prot_wise_feature_coverage[prot_id][feat_name][1]
+
+                words.append(str(cov))
+
+            outlines.append('\t'.join(words) + '\n')
+
+        f = open(outfile, 'w')
+        f.write(''.join(outlines))
+        f.close()
+
     def transform_matrix_dict(self):
         fixed_feat_names = []
         for sample_pos, sample_id in enumerate(self.feature_matrix_dict):

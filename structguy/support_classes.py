@@ -502,19 +502,19 @@ class CrossValidationSlice(Slotted_obj):
     def printBalance(self, config):
         if config.regression:
             if len(self.test_targets) > 0:
-                print(f'{self.name} Mean train target value: {sum(self.train_targets)/len(self.train_targets)} Mean test target value: {sum(self.test_targets)/len(self.test_targets)}')
-            print(f'{self.name} Test set size: {len(self.test_targets)}, Train set size: {len(self.train_targets)}, Feats: {len(self.feature_names)}')
+                config.logger.info(f'{self.name} Mean train target value: {sum(self.train_targets)/len(self.train_targets)} Mean test target value: {sum(self.test_targets)/len(self.test_targets)}')
+            config.logger.info(f'{self.name} Test set size: {len(self.test_targets)}, Train set size: {len(self.train_targets)}, Feats: {len(self.feature_names)}')
             try:
-                print(f'{self.feature_names[:5]}\n...\n{self.feature_names[-5:]}')
+                config.logger.info(f'{self.feature_names[:5]}\n...\n{self.feature_names[-5:]}')
             except:
-                print(self.feature_names)
+                config.logger.info(f'{self.feature_names}')
             return
         balance_map = {}
         for ttv in self.train_targets:
             if not ttv in balance_map:
                 balance_map[ttv] = 0
             balance_map[ttv] += 1
-        print('Train set balance: ',balance_map)
+        config.logger.info('Train set balance: ',balance_map)
         if len(balance_map) == 2:
             tv_1,tv_2 = balance_map.keys()
             
@@ -529,7 +529,7 @@ class CrossValidationSlice(Slotted_obj):
             if not ttv in balance_map:
                 balance_map[ttv] = 0
             balance_map[ttv] += 1
-        print('Test set balance: ',balance_map)
+        config.logger.info('Test set balance: ',balance_map)
 
     def getGeometricDistanceMap(self,config):
         if self.geometric_distance_map != None:
