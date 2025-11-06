@@ -621,7 +621,8 @@ def bayesian_optimisation(
         all_done = False
         
         append_counter = 0
-        final_countdown_started = False
+        overall_timeout_start = time.time()
+        timeout_start = None
 
         while not all_done:
             for i, (com_queue, out_queue, proc_id) in enumerate(remote_processes):
@@ -629,6 +630,7 @@ def bayesian_optimisation(
                 if not out_queue.empty():
                     (scores, next_sample, first_scores) = out_queue.get(timeout=5)
                     n_of_sent_hpo_sets -= 1
+                    
                 elif current_params_id >= n_iters:
                     if not dones[i]:
                         com_queue.put(None)
@@ -672,6 +674,8 @@ def bayesian_optimisation(
                     config.logger.info(f" === cv_score is None or Nan: {next_sample}")
                     scores = util.Scores(zero=True)
                     cv_score = scores.objective_value(config)
+                else:
+                    timeout_start = time.time()
 
                 # Update lists
                 x_list.append(next_sample)
@@ -711,6 +715,7 @@ def bayesian_optimisation(
                             count_dups += 1
                         else:
                             next_sample = scaler.inverse_transform([next_sample])[0]
+                        overall_timeout_start = time.time()
                         current_params_id += 1
                         append_counter = 0
                     else:
@@ -723,21 +728,20 @@ def bayesian_optimisation(
                 if not done:
                     all_done = False
             if n_of_sent_hpo_sets > 0:
-                if n_of_sent_hpo_sets < 5:
-                    if not final_countdown_started:
-                        final_countdown_started = True
-                        final_countdown_start = time.time()
-                        all_done = False
+                if timeout_start is not None:
+                    timeout = time.time() - timeout_start
+                    overall_timeout = time.time() - overall_timeout_start
+                    if timeout > 3600:
+                        all_done = True
+                    elif overall_timeout > 36_000:
+                        all_done = True
                     else:
-                        countdown = time.time() - final_countdown_start
-                        if countdown > 7200:
-                            all_done = True
-                        else:
-                            all_done = False
-                else:
-                    all_done = False
+                        all_done = False
             if not all_done:
                 time.sleep(0.5)
+
+        for proc in remote_processes:
+            ray.kill(proc)
 
     if new_optimimum:
         for pos, para_value in enumerate(best_params):
