@@ -741,7 +741,7 @@ def bayesian_optimisation(
                 time.sleep(0.5)
 
         for proc in remote_processes:
-            ray.kill(proc)
+            ray.cancel(proc)
 
     if new_optimimum:
         for pos, para_value in enumerate(best_params):
