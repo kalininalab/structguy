@@ -149,11 +149,10 @@ def learn(config, effectRegressor=None, test_config=None):
     t_0 = time.time()
     config.logger.info(f"Time for loading dataset: {t_0 - t0} {config.n_of_features=}")
 
-    if config.verbosity >= 3:
-        feat_coverage_file = f"{config.outfolder}/prot_wise_feat_coverage.tsv"
-        samples.write_feature_coverage_matrix(feat_coverage_file)
-        config.logger.info(f'Wrote prot-wise feature coverages to {feat_coverage_file}')
-
+    feat_coverage_file = f"{config.outfolder}/prot_wise_feat_coverage.tsv"
+    prot_wise_feature_coverage = samples.write_feature_coverage_matrix(feat_coverage_file)
+    samples.select_bad_prots(prot_wise_feature_coverage, config)
+    config.logger.info(f'Wrote prot-wise feature coverages to {feat_coverage_file}')
 
     if config.weighting == "geometric" and config.regression:
         samples.setGeometricDistanceMap(config)

@@ -15,7 +15,7 @@ from ray.util.queue import Queue
 
 from structguy import msa, consts, util
 from structguy.msa import computeMSA
-from structguy.sequence_util import parseFromFasta, parseFasta
+from structguy.sequence_util import parseFromFasta, parseFasta, check_psic_file
 from structman.base_utils.base_utils import pack, unpack
 from structman.base_utils.ray_utils import ray_init
 from structman.lib.lib_utils import clean_prot_id, check_msa_file
@@ -295,8 +295,8 @@ def do_mmseqs_search(
         returncode = geneSeqMapToFasta(mmseq_search, temp_fasta, config)
 
         number_of_targets = len(mmseq_search)
-        distribution_factor = config.proc_n // number_of_targets
-        n_procs = min([distribution_factor, n_splits])
+        distribution_factor = max([4, (4*config.proc_n) // number_of_targets])
+        n_procs = min([config.proc_n, n_splits])
 
         splits_per_proc = n_splits // n_procs
         if n_splits % n_procs != 0:
@@ -795,6 +795,7 @@ def afdb_msa_pipeline(config, samples: SampleSpace):
                 if checked:
                     msa_map[prot_id] = {'smsa' : msa_file}
                     psic_name = f'{subfolder}/{sfn[:-6]}.psic'
+                    check_psic_file(psic_name)
                     if not os.path.isfile(psic_name) or config.overwrite:
                         if config.verbosity >= 3:
                             config.logger.info(f"Calc psic profiles from afdb_msa_pipeline {sfn}")
@@ -821,6 +822,7 @@ def afdb_msa_pipeline(config, samples: SampleSpace):
                             gemme_predictions[prot_id] = {}
                         gemme_predictions[prot_id][gemme_pred_type] = value_map
             """
+        #config.logger.info(f'Removing invalid msa files: {to_remove}')
         for msa_file in to_remove:
             os.remove(msa_file)
 
@@ -830,7 +832,7 @@ def afdb_msa_pipeline(config, samples: SampleSpace):
     mmseq_search = {}
 
     for prot_id in samples.sequence_map:
-        if clean_prot_id(prot_id) in msa_map:
+        if clean_prot_id(prot_id) in msa_map or prot_id in msa_map:
             continue
         mmseq_search[prot_id] = samples.sequence_map[prot_id]
 
@@ -862,16 +864,19 @@ def afdb_msa_pipeline(config, samples: SampleSpace):
             current_chunk = 0
 
         target_folder = f'{config.msa_folder_path}/{clean_prot_id(prot_id)}'
-        psic_name = f'{target_folder}/{sfn[:-6]}.psic'
-        if not os.path.isfile(psic_name):
-            if config.verbosity >= 3:
-                config.logger.info(f"Calc psic profiles from afdb_msa_pipeline {sfn}")
-            if len(psic_jobs) == current_job:
-                psic_jobs.append([])
-            psic_jobs[current_job].append((f'{target_folder}/{sfn}', psic_name))
-            current_job += 1
-            if current_job >= config.proc_n:
-                current_job = 0        
+        for sfn in os.listdir(target_folder):
+            if sfn[-10:] == '_msa.fasta':
+                psic_name = f'{target_folder}/{sfn[:-6]}.psic'
+                check_psic_file(psic_name)
+                if not os.path.isfile(psic_name) or config.overwrite:
+                    if config.verbosity >= 3:
+                        config.logger.info(f"Calc psic profiles from afdb_msa_pipeline {sfn}")
+                    if len(psic_jobs) == current_job:
+                        psic_jobs.append([])
+                    psic_jobs[current_job].append((f'{target_folder}/{sfn}', psic_name))
+                    current_job += 1
+                    if current_job >= config.proc_n:
+                        current_job = 0        
 
         msa_map[prot_id] = {'smsa' : f'{target_folder}/{sfn}'}
 

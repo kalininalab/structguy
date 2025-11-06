@@ -128,3 +128,16 @@ def split_fasta_db():
         cmds = ['mmseqs', 'createindex', search_db, sys.argv[2], '-s', '7.5']
         p = subprocess.Popen(cmds)
         p.wait()
+
+def check_psic_file(infile):
+    if not os.path.isfile(infile):
+        return
+    
+    f = open(infile, 'r')
+    lines = f.readlines()
+    f.close()
+
+    if len(lines) < 2:
+        os.remove(infile)
+
+    return

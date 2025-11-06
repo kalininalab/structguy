@@ -645,7 +645,13 @@ def parsePsicFile(infile):
     lines = f.read().decode("ascii").split("\n")
     f.close()
 
-    aa_key = lines[1].split()[1:-1]
+    if len(lines) < 2:
+        return {}
+
+    try:
+        aa_key = lines[1].split()[1:-1]
+    except IndexError:
+        raise IndexError(f'IndexError in parsePsicFile of {infile=}')
 
     psic_profiles = {}
 

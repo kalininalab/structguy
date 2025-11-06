@@ -664,23 +664,31 @@ class SampleSpace(Slotted_obj):
                     prot_wise_feature_coverage[prot_id] = {}
                 
                 if feat_name not in prot_wise_feature_coverage[prot_id]:
-                    prot_wise_feature_coverage[prot_id][feat_name] = [0, 0]
+                    prot_wise_feature_coverage[prot_id][feat_name] = [0, 0, 0]
 
                 if val_list[index] is not None:
                     prot_wise_feature_coverage[prot_id][feat_name][0] += 1
-                prot_wise_feature_coverage[prot_id][feat_name][1] += 1
+                if val_list[index] == 0:
+                    prot_wise_feature_coverage[prot_id][feat_name][1] += 1
+                prot_wise_feature_coverage[prot_id][feat_name][2] += 1
             
         prot_id_list = list(prot_wise_feature_coverage.keys())
         
-
-        header = '\t' + '\t'.join(feat_name_list) + '\n'
+        header_words = ['']
+        for feat_name in feat_name_list:
+            header_words.append(f'{feat_name} cov')
+            header_words.append(f'{feat_name} zeros')
+            header_words.append(f'{feat_name} total')
+        header = '\t'.join(header_words) + '\n'
         outlines = [header]
         for prot_id in prot_id_list:
             words = [prot_id]
             for feat_name in feat_name_list:
-                cov = prot_wise_feature_coverage[prot_id][feat_name][0] / prot_wise_feature_coverage[prot_id][feat_name][1]
-
+                cov = prot_wise_feature_coverage[prot_id][feat_name][0] / prot_wise_feature_coverage[prot_id][feat_name][2]
+                zeros = prot_wise_feature_coverage[prot_id][feat_name][1] / prot_wise_feature_coverage[prot_id][feat_name][2]
                 words.append(str(cov))
+                words.append(str(zeros))
+                words.append(str(prot_wise_feature_coverage[prot_id][feat_name][2]))
 
             outlines.append('\t'.join(words) + '\n')
 
@@ -688,7 +696,69 @@ class SampleSpace(Slotted_obj):
         f.write(''.join(outlines))
         f.close()
 
+        return prot_wise_feature_coverage
+    
+    def select_bad_prots(self, prot_wise_feature_coverage, config):
+        filter_criteria = {
+            'gemme_Ind' : (0.5, 0.5),
+        }
+
+        prots_to_remove = []
+        for prot_id in prot_wise_feature_coverage:
+            for feat_name in prot_wise_feature_coverage[prot_id]:
+                if feat_name not in filter_criteria:
+                    continue
+                cov, zeros, _ = prot_wise_feature_coverage[prot_id][feat_name]
+
+                cov_lower_bound, zeros_upper_bound = filter_criteria[feat_name]
+
+                if cov < cov_lower_bound or zeros > zeros_upper_bound:
+                    prots_to_remove.append(prot_id)
+        config.logger.info(f'Removing {prots_to_remove} from samples object')
+        self.remove_samples_by_prot_ids_after_matrix_transform(prots_to_remove)
+
+    def remove_samples_by_prot_ids_after_matrix_transform(self, prots_to_remove):
+        prots_to_remove = set(prots_to_remove)
+        samples_to_remove = []
+        sample_pos_to_remove = []
+        for sample_id in self.samples:
+            prot_id, _ = sample_id
+            if prot_id in prots_to_remove:
+                samples_to_remove.append(sample_id)
+                sample_pos_to_remove.append(self.sample_pos_dict[sample_id])
+
+        sample_pos_to_remove_rev = sorted(sample_pos_to_remove, reverse=True)
+        sample_pos_to_remove = sorted(sample_pos_to_remove_rev)
+
+        for sample_id in samples_to_remove:
+            del self.samples[sample_id]
+
+        update_pos_list = []
+        updater = 0
+        for pos in sample_pos_to_remove:
+            while len(update_pos_list) < pos:
+                update_pos_list.append(updater)
+            updater += 1
+
+        while len(update_pos_list) < len(self.sample_pos_dict):
+            update_pos_list.append(updater)
+
+        for sample_id in self.sample_pos_dict:
+            old_pos = self.sample_pos_dict[sample_id]
+            updater = update_pos_list[old_pos]
+            new_pos = old_pos-updater
+            self.sample_pos_dict[sample_id] = new_pos
+
+        for pos in sample_pos_to_remove_rev:
+
+            try:
+                del self.raw_feature_matrix[pos]
+            except TypeError:
+                self.raw_feature_matrix = list(self.raw_feature_matrix)
+                del self.raw_feature_matrix[pos]
+
     def transform_matrix_dict(self):
+        self.raw_feature_matrix = []
         fixed_feat_names = []
         for sample_pos, sample_id in enumerate(self.feature_matrix_dict):
             self.sample_pos_dict[sample_id] = sample_pos
