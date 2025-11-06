@@ -685,7 +685,9 @@ class SampleSpace(Slotted_obj):
             words = [prot_id]
             for feat_name in feat_name_list:
                 cov = prot_wise_feature_coverage[prot_id][feat_name][0] / prot_wise_feature_coverage[prot_id][feat_name][2]
+                prot_wise_feature_coverage[prot_id][feat_name][0] = cov
                 zeros = prot_wise_feature_coverage[prot_id][feat_name][1] / prot_wise_feature_coverage[prot_id][feat_name][2]
+                prot_wise_feature_coverage[prot_id][feat_name][1] = zeros
                 words.append(str(cov))
                 words.append(str(zeros))
                 words.append(str(prot_wise_feature_coverage[prot_id][feat_name][2]))
