@@ -863,7 +863,16 @@ def afdb_msa_pipeline(config, samples: SampleSpace):
         if current_chunk >= n_of_para_maffts:
             current_chunk = 0
 
+    process_ids = []
+    for chunk in chunks:
+        process_ids.append(para_mafft.remote(chunk, config_store))
+
+    ray.get(process_ids)
+        
+    for msa_index, prot_id in enumerate(sequence_maps['ref90']):
         target_folder = f'{config.msa_folder_path}/{clean_prot_id(prot_id)}'
+        if not os.path.isdir(target_folder):
+            os.makedirs(target_folder)
         for sfn in os.listdir(target_folder):
             if sfn[-10:] == '_msa.fasta':
                 psic_name = f'{target_folder}/{sfn[:-6]}.psic'
@@ -879,13 +888,6 @@ def afdb_msa_pipeline(config, samples: SampleSpace):
                         current_job = 0        
 
         msa_map[prot_id] = {'smsa' : f'{target_folder}/{sfn}'}
-
-    process_ids = []
-    for chunk in chunks:
-        process_ids.append(para_mafft.remote(chunk, config_store))
-
-    ray.get(process_ids)
-        
 
     proc_ids = []
     for package in psic_jobs:

@@ -12,16 +12,7 @@ from ray.train import ScalingConfig
 
 
 import structman.base_utils.ray_utils as ray_utils
-## Import the Forest-Guided Clustering package
-from fgclustering import (
-    forest_guided_clustering, 
-    forest_guided_feature_importance, 
-    plot_forest_guided_feature_importance, 
-    plot_forest_guided_decision_paths,
-    DistanceRandomForestProximity,
-    ClusteringKMedoids,
-    ClusteringClara
-)
+
 
 disclaimer = """
 structguy_main.py generate_features [-i -o --verbosity]\n
@@ -55,7 +46,8 @@ def parse_arguments(argument_start = 2, manual_args = None):
                 'forces',
                 'gpu=',
                 'sd',
-                'repeat='
+                'repeat=',
+                'select_samples'
             ]
             opts, args = getopt.getopt(argv, "i:n:m:d", long_paras)
 
@@ -91,6 +83,7 @@ def parse_arguments(argument_start = 2, manual_args = None):
     plot_sample_forces = False
     calc_sd = False
 
+    select_samples = False
     filter_syn = False
     random_split = False
     bayesianComplete = False
@@ -185,6 +178,9 @@ def parse_arguments(argument_start = 2, manual_args = None):
         if opt == '--repeat':
             repeat = int(arg)
 
+        if opt == '--select_samples':
+            select_samples = True
+
     if path_to_model is not None:
         if path_to_model.count('/') > 0:
             model_name = path_to_model.rsplit("/",1)[1].rsplit('.',1)[0]
@@ -225,6 +221,8 @@ def parse_arguments(argument_start = 2, manual_args = None):
     config.trace_decisions = trace_decisions
     config.plot_sample_forces = plot_sample_forces
     config.calc_sd = calc_sd
+
+    config.select_samples = select_samples
 
     if force_lopo:
         config.crossValidation = 'LOPO'
@@ -332,57 +330,7 @@ def generate_info():
     config: util.Config
     config, _ = parse_arguments()
 
-    t0 = time.time()
-
-    forest, extern_feature_names_list, impute_map, model_config, feat_stats = learn.loadModel(config.path_to_model)
-
-    t1 = time.time()
-
-    print(f'Loaded model: time={t1-t0}')
-
-    n_of_trees, n_of_nodes = featureAnalysis.get_base_stats(forest)
-
-    t2 = time.time()
-    print(f'Random Forest model consits of {n_of_trees} trees and a total of {n_of_nodes} Nodes, time: {t2-t1}')
-
-    samples, test_feature_matrix, test_targets, sample_id_list = learn.load_data_for_pred(config, impute_map, extern_feature_names_list)
-    
-    t3 = time.time()
-    print(f'Loaded data: time={t3-t2}')
-
-    # compute the forest-guided clusters
-    fgc = forest_guided_clustering(
-        estimator=forest, 
-        X=test_feature_matrix, 
-        y=test_targets,
-        n_jobs=config.proc_n,
-        clustering_distance_metric=DistanceRandomForestProximity(memory_efficient=True, dir_distance_matrix="./"), 
-        clustering_strategy=ClusteringClara(sub_sample_size=0.6, sampling_iter=5, method="fasterpam"),
-    )
-
-    t4 = time.time()
-    print(f'Time for clustering: {t4-t3}')
-
-    # evaluate feature importance
-    feature_importance = forest_guided_feature_importance(
-        X=test_feature_matrix, 
-        y=test_targets,
-        cluster_labels=fgc.cluster_labels,
-        model_type=fgc.model_type,
-    )
-
-    # visualize the results
-    plot_forest_guided_feature_importance(
-        feature_importance_local=feature_importance.feature_importance_local,
-        feature_importance_global=feature_importance.feature_importance_global
-    )
-
-    plot_forest_guided_decision_paths(
-        data_clustering=feature_importance.data_clustering,
-        model_type=fgc.model_type,
-    )
-
-    model_config.saveHyperParameter(f'{config.model_name}_hyperparameter.conf')
+    featureAnalysis.get_model_info(config)
 
 def main():
 
