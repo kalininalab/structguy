@@ -1508,19 +1508,63 @@ def radar(labels,values,title,outfile):
     plt.savefig(outfile,dpi=300)
     plt.clf()
 
+def highlight_scatter(prediction_values, true_values, aacs, target_value_name, outfile):
+
+    highlights = {
+        'Q443M': ('s', ([], [])),
+        'F334K': ('p', ([], [])),
+        'E499T': ('*', ([], [])),
+        'P495F': ('d', ([], [])),
+        'F310E': ('P', ([], [])),
+    }
+
+    scatter_data = [[],[]]
+
+    for pos, predicted_value in enumerate(prediction_values):
+        true_value = true_values[pos]
+        aac = aacs[pos]
+
+        if aac in highlights:
+            highlights[aac][1][0].append(true_value)
+            highlights[aac][1][1].append(predicted_value)
+        else:
+            scatter_data[0].append(true_value)
+            scatter_data[1].append(predicted_value)
+
+    ax = plt.subplot()
+
+    plt.scatter(scatter_data[0],scatter_data[1],alpha=0.5,color='green')
+
+    for aac in highlights:
+        plt.scatter(highlights[aac][1][0], highlights[aac][1][1],alpha=0.5,color='blue',marker=highlights[aac][0])
+        plt.scatter([],[],alpha=1,color='blue',label=aac,marker=highlights[aac][0])
+
+    plt.legend(loc="lower right",fontsize = 12,framealpha=1,fancybox=True)
+    
+    plt.xlabel(target_value_name, fontsize=15)
+
+    ax.yaxis.tick_left()
+    ax.yaxis.set_label_position('left')
+
+    plt.ylabel('Predicted value', fontsize=15)
+    
+    plt.tight_layout()
+    plt.savefig(outfile,dpi=300)
+    plt.clf()
+
 def protein_wise_scatter_plot(y_test, y_pred, sample_ids, scatter_folder, tv_values_name):
     test_pred_pairs = {}
     for sample_nr, yt_value in enumerate(y_test):
-        prot_id, _ = sample_ids[sample_nr]
+        prot_id, aac = sample_ids[sample_nr]
         if prot_id not in test_pred_pairs:
-            test_pred_pairs[prot_id] = [], []
+            test_pred_pairs[prot_id] = [], [], []
         test_pred_pairs[prot_id][0].append(yt_value)
         test_pred_pairs[prot_id][1].append(y_pred[sample_nr])
-
+        test_pred_pairs[prot_id][2].append(aac)
 
     for prot_id in test_pred_pairs:
 
-        scatterfile = f"{scatter_folder}/predicted_value_scatterplot_{prot_id}.png"
+        scatterfile = f"{scatter_folder}/predicted_value_scatterplot_{prot_id.replace('/','_')}.png"
 
         scatterplot(
             test_pred_pairs[prot_id][1],
@@ -1528,6 +1572,9 @@ def protein_wise_scatter_plot(y_test, y_pred, sample_ids, scatter_folder, tv_val
             tv_values_name,
             scatterfile,
         )
+        if prot_id == 'PPARG_HUMAN_Majithia_2016':
+            outfile = f"{scatter_folder}/highlight_scatterplot_{prot_id}.png"
+            highlight_scatter(test_pred_pairs[prot_id][1], test_pred_pairs[prot_id][0], test_pred_pairs[prot_id][2], 'Measured effect', outfile)
     return 
 
 def scatterplot(prediction_values,true_values,target_value_name,outfile):
@@ -2096,6 +2143,22 @@ def categorize_shap_from_xgb(shap_values, feat_names):
 
     cat_wise_data = sorted(cat_wise_data, key=lambda x:abs(x[1]), reverse=True)
     return cat_wise_data, np.array(summed_shaps)
+
+def cat_shap_full_matrix(explanations, feat_names):
+    cat_expl = []
+    for pos_exp in explanations:
+        summed_shaps = [0.] * len(feature_categories)
+
+        for pos, shap_val in enumerate(pos_exp[:-1]):
+            feat_cat, _ = categorize_feat_by_name(feat_names[pos])
+            summed_shaps[feat_cat] += shap_val
+        
+        summed_shaps.append(pos_exp[-1])
+
+        cat_expl.append(summed_shaps)
+
+    return np.array(cat_expl)
+        
 
 def reset_logger_for_remotes(config):
     main_logger = logging.getLogger(__name__)

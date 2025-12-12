@@ -19,6 +19,17 @@ from structguy.featureGenerator import createTrainingSet
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.tree import DecisionTreeRegressor
 
+## Import the Forest-Guided Clustering package
+from fgclustering import (
+    forest_guided_clustering, 
+    forest_guided_feature_importance, 
+    plot_forest_guided_feature_importance, 
+    plot_forest_guided_decision_paths,
+    DistanceRandomForestProximity,
+    ClusteringKMedoids,
+    ClusteringClara
+)
+
 
 def findAndAnalyseInterestingSample(forest, cv_slice, config):
     worst_sample, best_effect_sample = findInterestingSamples(forest, cv_slice, config)
@@ -764,3 +775,75 @@ if __name__ == "__main__":
         analysisSample(forest, best_effect_sample, cv_slice, config)
         print('=====================================================================\n\n\n')
         """
+
+
+def get_model_info(config):
+    t0 = time.time()
+
+    model, extern_feature_names_list, impute_map, model_config, feat_stats, extern_features = learn.loadModel(config.path_to_model)
+
+    t1 = time.time()
+
+    print(f'Loaded model: time={t1-t0}')
+
+    if isinstance(model, RandomForestRegressor):
+        get_rf_info(config, impute_map, extern_feature_names_list, model_config, model)
+    else:
+        get_booster_info(config, model)
+
+
+def get_booster_info(config: Config, bst: xgb.Booster):
+    bst_dump = bst.get_dump()
+    total_nodes = 0
+    for tree_nr, tree_dump in enumerate(bst_dump):
+        nodes = tree_dump.count('[')
+        total_nodes += nodes
+
+    print(f'XGBoost model consits of {len(bst_dump)} boosting rounds and a total of {total_nodes} Nodes')
+
+def get_rf_info(config, impute_map, extern_feature_names_list, model_config, forest):
+    t1 = time.time()
+
+    n_of_trees, n_of_nodes = get_base_stats(forest)
+
+    t2 = time.time()
+    print(f'Random Forest model consits of {n_of_trees} trees and a total of {n_of_nodes} Nodes, time: {t2-t1}')
+
+    samples, test_feature_matrix, test_targets, sample_id_list = learn.load_data_for_pred(config, impute_map, extern_feature_names_list)
+    
+    t3 = time.time()
+    print(f'Loaded data: time={t3-t2}')
+
+    # compute the forest-guided clusters
+    fgc = forest_guided_clustering(
+        estimator=forest, 
+        X=test_feature_matrix, 
+        y=test_targets,
+        n_jobs=config.proc_n,
+        clustering_distance_metric=DistanceRandomForestProximity(memory_efficient=True, dir_distance_matrix="./"), 
+        clustering_strategy=ClusteringClara(sub_sample_size=0.6, sampling_iter=5, method="fasterpam"),
+    )
+
+    t4 = time.time()
+    print(f'Time for clustering: {t4-t3}')
+
+    # evaluate feature importance
+    feature_importance = forest_guided_feature_importance(
+        X=test_feature_matrix, 
+        y=test_targets,
+        cluster_labels=fgc.cluster_labels,
+        model_type=fgc.model_type,
+    )
+
+    # visualize the results
+    plot_forest_guided_feature_importance(
+        feature_importance_local=feature_importance.feature_importance_local,
+        feature_importance_global=feature_importance.feature_importance_global
+    )
+
+    plot_forest_guided_decision_paths(
+        data_clustering=feature_importance.data_clustering,
+        model_type=fgc.model_type,
+    )
+
+    model_config.saveHyperParameter(f'{config.model_name}_hyperparameter.conf')

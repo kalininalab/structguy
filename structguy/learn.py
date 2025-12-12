@@ -147,12 +147,13 @@ def learn(config, effectRegressor=None, test_config=None):
         samples.fuse_samples(support_samples)
 
     t_0 = time.time()
-    config.logger.info(f"Time for loading dataset: {t_0 - t0} {config.n_of_features=}")
+    config.logger.info(f"Time for loading dataset: {t_0 - t0} {config.n_of_features=} {config.select_samples=}")
 
-    feat_coverage_file = f"{config.outfolder}/prot_wise_feat_coverage.tsv"
-    prot_wise_feature_coverage = samples.write_feature_coverage_matrix(feat_coverage_file)
-    samples.select_bad_prots(prot_wise_feature_coverage, config)
-    config.logger.info(f'Wrote prot-wise feature coverages to {feat_coverage_file}')
+    if config.select_samples:
+        feat_coverage_file = f"{config.outfolder}/prot_wise_feat_coverage.tsv"
+        prot_wise_feature_coverage = samples.write_feature_coverage_matrix(feat_coverage_file)
+        samples.select_bad_prots(prot_wise_feature_coverage, config)
+        config.logger.info(f'Wrote prot-wise feature coverages to {feat_coverage_file}')
 
     if config.weighting == "geometric" and config.regression:
         samples.setGeometricDistanceMap(config)
@@ -323,6 +324,18 @@ def learn(config, effectRegressor=None, test_config=None):
             test_feature_matrix = cv_slice.get_dtest(samples)
 
             y_pred = forest.predict(test_feature_matrix)
+
+            name_add = ""
+            if config.random_split:
+                name_add = "_random_split"
+            elif config.penalize_train_test_gap:
+                name_add = '_ptt'
+            else:
+                name_add = '_ot'
+
+            modelfile = f"{config.outfolder}/StructGuy_trained_on_{config.dataset_name}{name_add}_slice_{cv_counter}.dump"
+
+            storeModel(forest, cv_slice.feature_names, config, modelfile, samples.feat_stats, samples.features)
 
             if config.regression:
                 mses.append((scores.mse, len(cv_slice.test_targets)))
@@ -767,7 +780,21 @@ def evaluate_dataset(config: Config):
                 #dtest_feature_matrix = DMatrix(test_feature_matrix, feature_names=extern_feature_names_list)
                 
                 explanation = forest.predict(dtest_feature_matrix, pred_contribs=True)
+                shap_expl = shap.Explanation(explanation[:,:-1], data = test_feature_matrix, feature_names=extern_feature_names_list)
                 
+                ax = shap.plots.beeswarm(shap_expl, show=False, max_display= 30)
+                plt.subplots_adjust(left=0.5, right=0.9)
+                plt.savefig(f"{config.outfolder}/beeswarm.png")
+                plt.clf()
+
+                cat_expl = util.cat_shap_full_matrix(explanation, extern_feature_names_list)
+
+                cat_shap_expl = shap.Explanation(cat_expl[:,:-1], feature_names=feature_categories)
+                ax = shap.plots.beeswarm(cat_shap_expl, show=False, max_display = len(feature_categories))
+                plt.subplots_adjust(left=0.5, right=0.9)
+                plt.savefig(f"{config.outfolder}/cat_beeswarm.png")
+                plt.clf()
+
                 # config.logger.info(explanation[0])
 
                 # for pos, shap_val in enumerate(explanation[0][:-1]):
@@ -964,9 +991,9 @@ def evaluate_dataset(config: Config):
                         words.append(f"{max_feat} (shap={max_feat_shap}, {val=})")
 
                         if config.target_values is not None:
-                            eval_words.append(feat_cat)
+                            eval_words.append(str(feat_cat))
                             eval_words.append(str(shap_val))
-                            eval_words.append(max_feat)
+                            eval_words.append(str(max_feat))
                             eval_words.append(str(max_feat_shap))
                             eval_words.append(str(val))
 
