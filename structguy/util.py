@@ -1564,7 +1564,7 @@ def protein_wise_scatter_plot(y_test, y_pred, sample_ids, scatter_folder, tv_val
 
     for prot_id in test_pred_pairs:
 
-        scatterfile = f"{scatter_folder}/predicted_value_scatterplot_{prot_id}.png"
+        scatterfile = f"{scatter_folder}/predicted_value_scatterplot_{prot_id.replace('/','_')}.png"
 
         scatterplot(
             test_pred_pairs[prot_id][1],

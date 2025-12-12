@@ -147,7 +147,7 @@ def learn(config, effectRegressor=None, test_config=None):
         samples.fuse_samples(support_samples)
 
     t_0 = time.time()
-    config.logger.info(f"Time for loading dataset: {t_0 - t0} {config.n_of_features=}")
+    config.logger.info(f"Time for loading dataset: {t_0 - t0} {config.n_of_features=} {config.select_samples=}")
 
     if config.select_samples:
         feat_coverage_file = f"{config.outfolder}/prot_wise_feat_coverage.tsv"

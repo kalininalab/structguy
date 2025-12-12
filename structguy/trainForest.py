@@ -624,24 +624,24 @@ def trainRegressionForest(
             return return_zero(zero_return, remote, cv_slice)
         
 
-        if len(feats_to_remove) > len(filtered_features):
-            cv_slice.filterFeatures(feats_to_remove)
-            slice_slice.filterFeatures(feats_to_remove)      
-            ta = add_to_times(times, ta) #11
+        #if len(feats_to_remove) > len(filtered_features):
+        cv_slice.filterFeatures(feats_to_remove)
+        slice_slice.filterFeatures(feats_to_remove)      
+        ta = add_to_times(times, ta) #11
 
-            dtrain = slice_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor)
+        dtrain = slice_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor)
 
-            dtest_feature_matrix = slice_slice.get_dtest(samples)
+        dtest_feature_matrix = slice_slice.get_dtest(samples)
 
-            forest = xgb_train_wrapper(config, dtrain, dtest_feature_matrix, second_round=True)
-            if forest is None:
-                return return_zero(zero_return, remote, cv_slice)
+        forest = xgb_train_wrapper(config, dtrain, dtest_feature_matrix, second_round=True)
+        if forest is None:
+            return return_zero(zero_return, remote, cv_slice)
 
 
-            slice_slice.filterFeatures([])
-        else:
-            cv_slice.filterFeatures(filtered_features)
-            slice_slice.filterFeatures([])
+        slice_slice.filterFeatures([])
+        #else:
+        #    cv_slice.filterFeatures(filtered_features)
+        #    slice_slice.filterFeatures([])
 
         ta = add_to_times(times, ta) #12
 
