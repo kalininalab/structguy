@@ -596,7 +596,7 @@ def bayesian_optimisation(
 
     else:
         remote_processes = []
-        threads_per_gpu = 5
+        threads_per_gpu = 3
         para_number = max([1,config.proc_n // (config.multi_gpu * threads_per_gpu)])
         remote_function = para_eval.options(num_gpus = 1/threads_per_gpu)
         current_params_id = 0
@@ -623,6 +623,9 @@ def bayesian_optimisation(
         append_counter = 0
         overall_timeout_start = time.time()
         timeout_start = None
+
+        message_counter = 0
+        count_var = 0
 
         while not all_done:
             for i, (com_queue, out_queue, proc_id) in enumerate(remote_processes):
@@ -727,21 +730,43 @@ def bayesian_optimisation(
             for done in dones:
                 if not done:
                     all_done = False
-            if n_of_sent_hpo_sets > 0:
+            if n_of_sent_hpo_sets > 0 and not all_done:
                 if timeout_start is not None:
                     timeout = time.time() - timeout_start
-                    overall_timeout = time.time() - overall_timeout_start
-                    if timeout > 3600:
-                        all_done = True
-                    elif overall_timeout > 36_000:
+                    if timeout > 10*3600:
                         all_done = True
                     else:
                         all_done = False
+                if overall_timeout_start is not None and not all_done:
+                    overall_timeout = time.time() - overall_timeout_start
+                    if overall_timeout > 2*36_000:
+                        all_done = True
+                    else:
+                        all_done = False
+
             if not all_done:
+                if message_counter < 1000:
+                    message_counter += 1
+                else:
+                    message_counter = 0
+                    count_var += 1
+                    if timeout_start is not None:
+                        timeout = time.time() - timeout_start
+                    else:
+                        timeout = None
+                    if overall_timeout_start is not None and not all_done:
+                        overall_timeout = time.time() - overall_timeout_start
+                    else:
+                        overall_timeout = None
+                    config.logger.info(f"Not all done {count_var}: {timeout=} {timeout_start=} {overall_timeout=} {overall_timeout_start=} {dones=}")
+
                 time.sleep(0.5)
 
         for proc in remote_processes:
-            ray.cancel(proc)
+            try:
+                ray.cancel(proc)
+            except TypeError:
+                continue
 
     if new_optimimum:
         for pos, para_value in enumerate(best_params):
