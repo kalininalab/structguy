@@ -50,7 +50,8 @@ def xgbFeatureImportances(bst, config):
         config.logger.info(f"{feature_name}: {score}")
     return feat_importance_map
 
-def calcFeatureImportances(forest, samples, cv_slice, config, print_them=False):
+def calcFeatureImportances(booster_list, samples, cv_slice, config, print_them=False):
+    forest = booster_list[0][0]
     try:
         feature_scores = forest.feature_importances_
     except AttributeError:
@@ -205,6 +206,7 @@ def learn(config, effectRegressor=None, test_config=None):
             forest, scores, initial_training_input, slice_slices = trainForest.trainForest(
                 config,
                 initial_training_input,
+                samples.feat_corr_matrix, samples.feature_names,
                 samples_store_id=samples_store_id,
                 slice_slices=initial_training_input.slice_slices,
                 samples=samples,
@@ -226,9 +228,14 @@ def learn(config, effectRegressor=None, test_config=None):
                 debug=debug,
             )
         elif config.hyperOptimization == "threeDim":
+            if config.multi_gpu > 0:
+                gpu_share = config.multi_gpu
+            else:
+                gpu_share = None
             forest, (first_scores, scores), initial_training_input, slice_slices = trainForest.trainForest(
                 config,
                 initial_training_input,
+                samples.feat_corr_matrix, samples.feature_names,
                 samples_store_id=samples_store_id,
                 slice_slices=initial_training_input.slice_slices,
                 samples=samples,
@@ -239,6 +246,7 @@ def learn(config, effectRegressor=None, test_config=None):
                 #remote=(config.multi_gpu >= len(initial_training_input.slices)),
                 remote=(config.multi_gpu > 0),
                 get_first_scores=True,
+                gpu_share=gpu_share
             )
             hpo.threeDimHyperOptimization(
                 config,
@@ -256,6 +264,7 @@ def learn(config, effectRegressor=None, test_config=None):
                 forest, scores, initial_training_input, slice_slices = trainForest.trainForest(
                     config,
                     initial_training_input,
+                    samples.feat_corr_matrix, samples.feature_names,
                     samples_store_id=samples_store_id,
                     slice_slices=initial_training_input.slice_slices,
                     samples=samples,
@@ -300,9 +309,15 @@ def learn(config, effectRegressor=None, test_config=None):
                 cv_slice.printBalance(config)
 
             print_out = config.verbosity >= 2
-            forest, scores, cv_slice, slice_slices = trainForest.trainForest(
+            if config.multi_gpu > 0:
+                gpu_share = config.multi_gpu
+            else:
+                gpu_share = None
+            booster_list, scores, cv_slice, slice_slices = trainForest.trainForest(
                 config,
                 cv_slice,
+                samples.feat_corr_matrix,
+                samples.feature_names,
                 samples=samples,
                 samples_store_id=samples_store_id,
                 slice_slices=cv_slice.slice_slices,
@@ -310,20 +325,19 @@ def learn(config, effectRegressor=None, test_config=None):
                 repeat=config.repeat_training,
                 print_out=print_out,
                 debug=debug,
-                remote=False
+                remote=False,
+                gpu_share=gpu_share
             )
 
-            if forest is None:
+            if booster_list is None:
                 continue
 
-            forests[cv_counter] = forest
+            forests[cv_counter] = booster_list
 
             if config.crossValidation == "LOPO":
                 lopo_scores[tuple(cv_counter)] = scores
 
-            test_feature_matrix = cv_slice.get_dtest(samples)
-
-            y_pred = forest.predict(test_feature_matrix)
+            y_pred = trainForest.booster_list_process_and_predict(booster_list, cv_slice, samples)
 
             name_add = ""
             if config.random_split:
@@ -335,7 +349,7 @@ def learn(config, effectRegressor=None, test_config=None):
 
             modelfile = f"{config.outfolder}/StructGuy_trained_on_{config.dataset_name}{name_add}_slice_{cv_counter}.dump"
 
-            storeModel(forest, cv_slice.feature_names, config, modelfile, samples.feat_stats, samples.features)
+            storeModel(booster_list, cv_slice.feature_names, config, modelfile, samples.feat_stats, samples.features)
 
             if config.regression:
                 mses.append((scores.mse, len(cv_slice.test_targets)))
@@ -473,7 +487,7 @@ def learn(config, effectRegressor=None, test_config=None):
         if samples_store_id is None:
             samples_store_id = ray.put(pack(samples))
 
-        forest = buildFinalModel(
+        booster_list = buildFinalModel(
             samples,
             samples_store_id,
             config,
@@ -494,7 +508,7 @@ def learn(config, effectRegressor=None, test_config=None):
 def load_data_for_pred(
     config: Config,
     impute_map,
-    feature_names: list[str],
+    booster_list,
     extern_features
 ):
     t0 = time.time()
@@ -506,9 +520,12 @@ def load_data_for_pred(
     for sample_id in samples.samples:
         samples.samples[sample_id].testtrain = "test"
 
-    test_feature_matrix, test_targets, sample_id_list, feat_id_vec, cat_vec = samples.get_test_data_for_feature_list(feature_names, config, extern_features)
+    booster_specific_data = []
+    for _, feature_names in booster_list:
+        test_feature_matrix, test_targets, sample_id_list, feat_id_vec, cat_vec = samples.get_test_data_for_feature_list(feature_names, config, extern_features)
+        booster_specific_data.append((test_feature_matrix, test_targets, sample_id_list, feat_id_vec, cat_vec))
 
-    return samples, test_feature_matrix, test_targets, sample_id_list, feat_id_vec, cat_vec
+    return samples, booster_specific_data
 
 
 def val_to_str(val):
@@ -549,7 +566,7 @@ def val_to_str(val):
 def evaluate_dataset(config: Config):
     t0 = time.time()
     extern_feature_names_list: list[str]
-    forest, extern_feature_names_list, impute_map, model_config, feat_stats, extern_features = loadModel(config.path_to_model)
+    booster_list, extern_feature_names_list, impute_map, model_config, feat_stats, extern_features = loadModel(config.path_to_model)
     t1 = time.time()
 
     config.logger.info(f"Time for loading model: {t1 - t0}")
@@ -569,7 +586,9 @@ def evaluate_dataset(config: Config):
     if config.verbosity >= 5:
         config.logger.info(f'{extern_feature_names_list=}')
 
-    samples, test_feature_matrix, test_targets, sample_id_list, feat_id_vec, cat_vec = load_data_for_pred(config, impute_map, extern_feature_names_list, extern_features)
+    samples, booster_specific_data = load_data_for_pred(config, impute_map, booster_list, extern_features)
+
+    test_feature_matrix, test_targets, sample_id_list, feat_id_vec, cat_vec = booster_specific_data[0]
 
     if config.verbosity >= 3:
         feat_coverage_file = f"{config.outfolder}/prot_wise_feat_coverage.tsv"
@@ -612,12 +631,16 @@ def evaluate_dataset(config: Config):
         y_pred = total_y_pred
     else:
     """
-    dtest_feature_matrix = DMatrix(
-        numpy.array(test_feature_matrix),
-        feature_types=cat_vec,
-        enable_categorical=True,
-        feature_names = extern_feature_names_list)
-    y_pred = forest.predict(dtest_feature_matrix)
+    test_feat_mats = []
+    for booster_index, (_, extern_feature_names_list) in enumerate(booster_list):
+        test_feature_matrix, test_targets, sample_id_list, feat_id_vec, cat_vec = booster_specific_data[booster_index]
+        dtest_feature_matrix = DMatrix(
+            numpy.array(test_feature_matrix),
+            feature_types=cat_vec,
+            enable_categorical=True,
+            feature_names = extern_feature_names_list)
+        test_feat_mats.append(dtest_feature_matrix)
+    y_pred = trainForest.booster_list_predict(booster_list, test_feat_mats)
 
     if config.path_to_multi_savs_table is not None:
         multi_savs = util.parse_multi_savs_table(config)
@@ -766,7 +789,6 @@ def evaluate_dataset(config: Config):
             prot_wise_spearmans,
             protein_info,
         )
-        tree_df = forest.trees_to_dataframe()
 
         if config.trace_decisions:
             if isinstance(forest, RandomForestRegressor):
@@ -835,6 +857,8 @@ def evaluate_dataset(config: Config):
                     # config.logger.info(tree_df)
 
                     feat_tree_map = {}
+                    
+                    tree_df = forest.trees_to_dataframe()
 
                     tree_id_vec = tree_df["Tree"]
                     feat_name_vec = tree_df["Feature"]
@@ -1197,26 +1221,33 @@ def buildFinalModel(samples, samples_store_id, config, internal_cv=None, outfile
             full_slice.subslices.append(slice_slice.test_prots)
 
     print_out = config.verbosity >= 1
-    forest, scores, full_slice, slice_slices = trainForest.trainForest(
+    if config.multi_gpu > 0:
+        gpu_share = config.multi_gpu
+    else:
+        gpu_share = None
+    booster_list, scores, full_slice, slice_slices = trainForest.trainForest(
         config,
         full_slice,
+        samples.feat_corr_matrix,
+        samples.feature_names,
         samples=samples,
         samples_store_id=samples_store_id,
         distance_map=samples.geometric_distance_map,
         print_out=print_out,
         skip_scoring=True,
+        gpu_share=gpu_share
     )
 
     if config.verbosity >= 1:
         config.logger.info("Full Slice Info after training:")
         full_slice.printBalance(config)
 
-    feat_importance_map = calcFeatureImportances(forest, samples, full_slice, config, print_them=print_out)
+    feat_importance_map = calcFeatureImportances(booster_list, samples, full_slice, config, print_them=print_out)
 
     if outfile is not None:
-        storeModel(forest, full_slice.feature_names, config, outfile, samples.feat_stats, samples.features)
+        storeModel(booster_list, full_slice.feature_names, config, outfile, samples.feat_stats, samples.features)
 
     if filtered_features_file is not None:
         save_feature_importances(filtered_features_file, feat_importance_map)
 
-    return forest
+    return booster_list

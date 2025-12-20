@@ -195,7 +195,7 @@ def bayes_random_init(
         if debug:
             config.logger.info(f"Init params: {init_params}")
 
-        store = ray.put((config, pack(initial_cv_obj), parameters, samples_store_id, pack(slice_slices), force_confusion, best_first_scores))
+        store = ray.put((config, pack(initial_cv_obj), parameters, samples_store_id, pack(slice_slices), force_confusion, best_first_scores, samples.feat_corr_matrix, samples.feature_names))
 
         config.logger.info(f"after store init, samples is None: {samples is None}")
 
@@ -208,7 +208,7 @@ def bayes_random_init(
             out_queue = Queue()
             com_queue.put((randomized_parameters[current_params_id]))
             current_params_id += 1
-            proc_id = para_eval.remote(com_queue, out_queue, store, para_number, gpu_id)
+            proc_id = para_eval.remote(com_queue, out_queue, store, para_number, 1.0)
             remote_processes.append((com_queue, out_queue, proc_id))
 
         config.logger.info(f"Para random init started: # of packages: {len(para_eval_ret_ids)} # of subthreads: {para_number} {len(remote_processes)=}")
@@ -248,16 +248,23 @@ def bayes_random_init(
             for params in np.random.uniform(bounds[:, 0], bounds[:, 1], (n_pre_samples, bounds.shape[0])):
                 for pos, para_value in enumerate(params):
                     parameters[pos].setValue(config, para_value)
+                if config.multi_gpu > 0:
+                    gpu_share = config.multi_gpu
+                else:
+                    gpu_share = None
                 scores, cv_obj, slice_slices, first_scores = get_scores(
                     config,
                     cv_obj,
                     distance_map,
                     slice_slices,
+                    samples.feat_corr_matrix,
+                    samples.feature_names,
                     samples=samples,
                     samples_store_id=samples_store_id,
                     force_confusion=force_confusion,
                     get_first_scores=True,
-                    cv_interuption=(0.95, best_first_scores)
+                    cv_interuption=(0.95, best_first_scores),
+                    gpu_share=gpu_share
                     )
                 results.append((scores, first_scores, params))
                 # projected_parameter_values = fill_plane(params, integer_type_params)
@@ -527,6 +534,8 @@ def bayesian_optimisation(
                 cv_obj,
                 distance_map,
                 slice_slices,
+                samples.feat_corr_matrix,
+                samples.feature_names,
                 samples=samples,
                 samples_store_id=samples_store_id,
                 force_confusion=force_confusion,
@@ -598,7 +607,8 @@ def bayesian_optimisation(
         remote_processes = []
         threads_per_gpu = 3
         para_number = max([1,config.proc_n // (config.multi_gpu * threads_per_gpu)])
-        remote_function = para_eval.options(num_gpus = 1/threads_per_gpu)
+        gpu_share = 1/threads_per_gpu
+        remote_function = para_eval#.options(num_gpus = gpu_share)
         current_params_id = 0
         n_of_sent_hpo_sets = 0
         for gpu_id in range(config.multi_gpu):
@@ -610,7 +620,7 @@ def bayesian_optimisation(
                 com_queue.put(next_sample)
                 n_of_sent_hpo_sets += 1
                 
-                proc_id = remote_function.remote(com_queue, out_queue, store, para_number, gpu_id)
+                proc_id = remote_function.remote(com_queue, out_queue, store, para_number, gpu_share)
                 remote_processes.append((com_queue, out_queue, proc_id))
 
         dones = []
@@ -1061,6 +1071,8 @@ def get_scores(
         cv_obj,
         distance_map,
         slice_slices,
+        feat_corr_matrix,
+        feature_names,
         samples=None,
         samples_store_id=None,
         remote=True,
@@ -1069,15 +1081,16 @@ def get_scores(
         force_confusion=False,
         get_first_scores=False,
         cv_interuption=None,
-        gpu_id = None
+        gpu_share = None
         ):
     
     t0 = time.time()
-    if samples is None:
-        samples = unpack(ray.get(samples_store_id))
+    
     _, scores, cv_obj, slice_slices = trainForest.trainForest(
         config,
         cv_obj,
+        feat_corr_matrix,
+        feature_names,
         samples=samples,
         samples_store_id=samples_store_id,
         slice_slices=slice_slices,
@@ -1090,7 +1103,7 @@ def get_scores(
         force_confusion=force_confusion,
         get_first_scores=get_first_scores,
         cv_interuption=cv_interuption,
-        gpu_id = gpu_id
+        gpu_share=gpu_share
     )
     t1 = time.time()
     config.logger.info(f"Time for training forest in get_scores: {t1 - t0}")
@@ -1101,13 +1114,11 @@ def get_scores(
     return scores, cv_obj, slice_slices
 
 
-@ray.remote(max_calls=1, num_gpus = 1)
-def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_id):
-    (config, packed_cv_obj, parameters, samples_store_id, packed_slice_slices, force_confusion, best_first_scores) = store
+@ray.remote(max_calls=1)
+def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_share):
+    (config, packed_cv_obj, parameters, samples_store_id, packed_slice_slices, force_confusion, best_first_scores, feat_corr_matrix, feature_names,) = store
     cv_obj = unpack(packed_cv_obj)
     slice_slices = unpack(packed_slice_slices)
-
-    gpu_id = ray.get_runtime_context().get_accelerator_ids()["GPU"][0]
 
     not_done = True
     while not_done:
@@ -1125,13 +1136,15 @@ def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_id):
             cv_obj,
             None,
             slice_slices,
+            feat_corr_matrix,
+            feature_names,
             samples_store_id=samples_store_id,
             remote=False,
             para_number=para_number,
             force_confusion=force_confusion,
             get_first_scores=True,
             cv_interuption=(0.95, best_first_scores),
-            gpu_id = gpu_id)
+            gpu_share=gpu_share)
         
         out_queue.put((scores, params, first_scores))
     return

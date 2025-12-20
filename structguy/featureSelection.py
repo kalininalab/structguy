@@ -224,7 +224,7 @@ def crossFoldConfusionSelect(
 
         cv_slice.filterFeatures(pre_filter, print_out=print_out)
 
-        return True, pre_filter, times, slice_slices, None
+        return True, pre_filter, times, slice_slices, None, samples
 
 
     if force_confusion:
@@ -655,25 +655,22 @@ def regu_fs(config, cv_slice, samples, print_out=False, pre_filter=None, debug=F
 
 def filterCorrelatedFeats(
     config: Config,
-    samples = None,
-    samples_store_id = None,
+    feat_corr_matrix,
+    feature_names
 ):
-    
-    if samples is None:
-        samples = unpack(ray.get(samples_store_id))
 
     feats_to_filter = set()
-    for feat_nr_a, feat_name_a in enumerate(samples.feature_names):
+    for feat_nr_a, feat_name_a in enumerate(feature_names):
         if feat_name_a in feats_to_filter:
             continue
-        for feat_nr_b, feat_name_b in enumerate(samples.feature_names):
+        for feat_nr_b, feat_name_b in enumerate(feature_names):
             if feat_nr_a == feat_nr_b:
                 continue
         
             if feat_name_b in feats_to_filter:
                 continue
 
-            corr, cov_a, cov_b, cov_both, tv_corr_a, tv_corr_b = samples.feat_corr_matrix[feat_nr_a][feat_nr_b]
+            corr, cov_a, cov_b, cov_both, tv_corr_a, tv_corr_b = feat_corr_matrix[feat_nr_a][feat_nr_b]
             feat_score_a = cov_a * abs(tv_corr_a)
             feat_score_b = cov_b * abs(tv_corr_b)
 
@@ -687,7 +684,7 @@ def filterCorrelatedFeats(
     if config.verbosity >= 3:
         print(f'Filtering correlated features {config.corr_thresh=} {len(feats_to_filter)=}')
 
-    return list(feats_to_filter), samples
+    return list(feats_to_filter)
 
 
 def meanCorrelationWrapper(
@@ -884,7 +881,7 @@ def detectBiasedFeaturesByMeanCorrelation(
     if dummy_call:
         if print_out:
             print(f"Time for tvmb filtering dummy call: {t1 - t0}")
-        return
+        return samples
 
     cv_slice.rank_tvmb(samples_store_id, config)
 
@@ -1150,6 +1147,8 @@ def select_features(
         config,
         cross_val_object: CrossValidationSlice,
         slice_slices,
+        feat_corr_matrix,
+        feature_names,
         samples_store_id=None,
         samples=None,
         print_out=False,
@@ -1168,11 +1167,11 @@ def select_features(
             print("=== Feature selection by feature confusion ===")
             print(f'{overwrite_proc_n=} {force_confusion=} {get_loss_map=}')
 
-        filter_corr_feats, samples = filterCorrelatedFeats(config, samples = samples, samples_store_id = samples_store_id)
+        filter_corr_feats = filterCorrelatedFeats(config, feat_corr_matrix, feature_names)
 
         ta = add_to_times(times, ta)
 
-        meanCorrelationWrapper(
+        samples = meanCorrelationWrapper(
             config,
             cross_val_object,
             samples_store_id,
@@ -1187,7 +1186,7 @@ def select_features(
         
         ta = add_to_times(times, ta)
 
-        filtered, to_filter, conf_times, slice_slices, loss_map = crossFoldConfusionSelect(
+        filtered, to_filter, conf_times, slice_slices, loss_map, samples = crossFoldConfusionSelect(
             config,
             cross_val_object,
             slice_slices,
@@ -1203,7 +1202,7 @@ def select_features(
 
         times += conf_times
 
-        return filtered, to_filter, times, slice_slices, loss_map
+        return filtered, to_filter, times, slice_slices, loss_map, samples
 
     else:
         print("=== ERROR: Feature selection with illegal key word:", config.feature_selection, "called ===")

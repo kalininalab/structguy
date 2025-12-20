@@ -19,7 +19,6 @@ from scipy import stats
 import xgboost as xgb
 from ray.train.xgboost import XGBoostTrainer, RayTrainReportCallback
 
-
 from filelock import FileLock
 from structguy import featureSelection, util
 from structman.base_utils.base_utils import pack, unpack, add_to_times, print_times, aggregate_times
@@ -62,10 +61,12 @@ def para_prediction(forest_dump_file, feat_matrix):
     pred = forest.predict(feat_matrix)
     return pred
 
-@ray.remote(max_calls=1, num_gpus=1)
+@ray.remote(max_calls=1)
 def trainRegressionForestWrapper(
     config,
     cv_slice,
+    feat_corr_matrix,
+    feature_names,
     samples_store_id=None,
     slice_slices=None,
     distance_map=None,
@@ -77,12 +78,13 @@ def trainRegressionForestWrapper(
     skip_feature_selection=False,
     force_confusion=False,
     score_train=True,
-    
+    gpu_share=None
 ):
-    gpu_id = ray.get_runtime_context().get_accelerator_ids()["GPU"][0]
     return trainRegressionForest(
         config,
         unpack(cv_slice),
+        feat_corr_matrix,
+        feature_names,
         samples_store_id=samples_store_id[0],
         slice_slices=slice_slices,
         distance_map=distance_map,
@@ -95,7 +97,7 @@ def trainRegressionForestWrapper(
         overwrite_proc_n=overwrite_proc_n,
         force_confusion=force_confusion,
         score_train=score_train,
-        gpu_id=gpu_id
+        sub_gpu_share=gpu_share
     )
 
 
@@ -268,6 +270,22 @@ def rho_eval_for_xgboost_cb(predt: numpy.ndarray, dtest: xgb.DMatrix) -> tuple[s
         corr, _ = stats.spearmanr(predt, y)
         return 'irho', (1.0-corr)
 
+def booster_list_process_and_predict(booster_list, cv_slice: CrossValidationSlice, samples):
+    y_preds = []
+    for booster, feat_names in booster_list:
+        cv_slice.set_to_features(feat_names)
+        test_feature_matrix = cv_slice.get_dtest(samples)
+        y_preds.append(booster.predict(test_feature_matrix))
+    y_pred = numpy.mean(y_preds, axis=0)
+    return y_pred
+
+def booster_list_predict(booster_list, feat_mats):
+    y_preds = []
+    for booster_index, (booster, _) in enumerate(booster_list):
+        y_preds.append(booster.predict(feat_mats[booster_index]))
+    y_pred = numpy.mean(y_preds, axis=0)
+    return y_pred
+
 def xgb_train_wrapper(
         config: util.Config,
         dtrain: xgb.DMatrix,
@@ -351,9 +369,70 @@ def xgb_train_wrapper(
 
     return forest
 
+@ray.remote
+def double_booster_remote(slice_slice, store):
+    config, filtered_features, packed_cv_slice, skip_scoring, score_train, samples_store_id, retain_model = store
+    samples = unpack(ray.get(samples_store_id))
+    cv_slice = unpack(packed_cv_slice)
+    slice_slice.filterFeatures(filtered_features)
+
+    dtrain = slice_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor)
+    
+    dtest_feature_matrix = slice_slice.get_dtest(samples)
+
+    booster = xgb_train_wrapper(config, dtrain, dtest_feature_matrix)
+    if booster is None:
+        return None
+    
+    y_pred = booster.predict(dtest_feature_matrix)
+
+    acc_feat_impacts, shap_times = shap_analysis(config, booster, dtest_feature_matrix, slice_slice.feature_names, y_pred, slice_slice.test_targets)
+
+    if acc_feat_impacts is None:
+        return None
+    
+    feats_to_remove = filtered_features[:]
+    for feat_name, feat_impact in acc_feat_impacts:
+        if feat_impact >= config.feat_impact_thresh:
+            feats_to_remove.append(feat_name)
+
+    if len(feats_to_remove) >= (len(cv_slice.feature_names)+ len(filtered_features)):
+        return None
+    
+    slice_slice.filterFeatures(feats_to_remove)
+
+    dtrain = slice_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor)
+
+    dtest_feature_matrix = slice_slice.get_dtest(samples)
+
+    booster_2 = xgb_train_wrapper(config, dtrain, dtest_feature_matrix, second_round=True)
+    if booster_2 is None:
+        return None
+    
+    if skip_scoring:
+        return booster_2, slice_slice.feature_names[:]
+
+    cv_slice.filterFeatures(feats_to_remove)
+
+    y_pred = booster_2.predict(cv_slice.get_dtest(samples))
+
+    if score_train:
+        x_pred = booster_2.predict(cv_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor))
+    else:
+        x_pred = None
+
+    if retain_model:
+        return y_pred, x_pred
+    else:
+        return booster_2, slice_slice.feature_names[:], y_pred, x_pred
+
+
+
 def trainRegressionForest(
     config: util.Config,
     cv_slice: CrossValidationSlice,
+    feat_corr_matrix,
+    feature_names,
     samples=None,
     samples_store_id=None,
     slice_slices=None,
@@ -367,7 +446,7 @@ def trainRegressionForest(
     debug=False,
     skip_feature_selection=False,
     force_confusion=False,
-    gpu_id=None
+    sub_gpu_share=None,
 ):
     times = []
     t_start = ta = time.time()
@@ -471,14 +550,16 @@ def trainRegressionForest(
 
     ta = add_to_times(times, ta) #0
     if config.verbosity >= 2:
-        config.logger.info(f"Train regression forest part 1, Threads: {proc} {gpu_id=}, Feature selection: {not skip_feature_selection} {samples is None=} {config.forest_type=} {config.gpu_mode=} {config.multi_gpu=}")
+        config.logger.info(f"Train regression forest part 1, Threads: {proc}, Feature selection: {not skip_feature_selection} {samples is None=} {config.forest_type=} {config.gpu_mode=} {config.multi_gpu=}")
 
     if not skip_feature_selection and not config.random_split:
         get_loss_map = False
-        slice_updated, filtered_features, feat_select_times, slice_slices, loss_map = featureSelection.select_features(
+        slice_updated, filtered_features, feat_select_times, slice_slices, loss_map, samples = featureSelection.select_features(
             config,
             cv_slice,
             slice_slices,
+            feat_corr_matrix,
+            feature_names,
             samples_store_id=samples_store_id,
             samples=samples,
             print_out=print_out,
@@ -523,21 +604,22 @@ def trainRegressionForest(
         config.logger.info(f"Train regression forest part 2, {proc=} {samples is None=} {score_train=} {len(filtered_features)=}")
     
     if config.forest_type == "xgboost" and not skip_feature_selection:
-        import xgboost as xgb
-
-        packed_slice_slice = slice_slices[0]
-        try:
-            slice_slice = unpack(packed_slice_slice)
-        except:
-            slice_slice = packed_slice_slice
-        slice_slice.filterFeatures(filtered_features)
-        if config.verbosity >= 3:
-            slice_slice.printBalance(config)
-        if samples is None:
-            samples = unpack(ray.get(samples_store_id))
-
-        #protwise_test_data_tuples = slice_slice.get_prot_wise_test_data_tuples(samples)
-
+        if sub_gpu_share is not None:
+            for packed_slice_slice in slice_slices:
+                if not isinstance(packed_slice_slice, bytes):
+                    packed_slice_slice = pack(packed_slice_slice)
+        else:
+            processed_slice_slices = []
+            for packed_slice_slice in slice_slices:
+                try:
+                    slice_slice = unpack(packed_slice_slice)
+                except:
+                    slice_slice = packed_slice_slice
+                slice_slice.filterFeatures(filtered_features)
+                if config.verbosity >= 4:
+                    slice_slice.printBalance(config)
+                processed_slice_slices.append(slice_slice)
+            
     elif skip_feature_selection:
         forest = RandomForestRegressor(
             n_estimators=config.fs_num_of_trees,
@@ -569,118 +651,166 @@ def trainRegressionForest(
             f"Train regression {config.forest_type} forest, call of fit with # of features: {len(cv_slice.feature_names)}, skip feature selection {skip_feature_selection}, slice update {slice_updated}, skip scoring {skip_scoring}"
         )
 
-    if samples is None:
-        samples = unpack(ray.get(samples_store_id))
-
     ta = add_to_times(times, ta) #5
 
     weights_updated = False
 
     
     if config.forest_type == "xgboost" and not skip_feature_selection:
-        if config.weighting == "geometric":
-            slice_slice.calcSampleWeights(config, distance_map)
-        elif config.weighting == "subsample_distance":
-            weights_updated = slice_slice.calcSubsampleDistanceWeights(config, para_number=proc)
+        booster_list = []
+        if sub_gpu_share is not None:
+            sub_share = sub_gpu_share/len(slice_slices)
+            if config.verbosity >= 2:
+                config.logger.info(f'call of double_booster_remote: {sub_share=}')
+            remote_function = double_booster_remote.options(num_gpus = sub_share)
+            remote_proc_ids = []
+            packed_cv_slice = pack(cv_slice)
+            store = ray.put((config, filtered_features, packed_cv_slice, skip_scoring, score_train, samples_store_id, remote))
+            for packed_slice_slice in slice_slices:
+                remote_proc_ids.append(remote_function.remote(packed_slice_slice, store))
 
-        dtrain = slice_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor)
-        
-        dtest_feature_matrix = slice_slice.get_dtest(samples)
+            results = ray.get(remote_proc_ids)
+            y_preds = []
+            x_preds = []
+            booster_2_list = []
+            for res in results:
+                if res is None:
+                    if config.verbosity >= 1:
+                        config.logger.info('double_booster_remote returned None')
+                    return return_zero(zero_return, remote, cv_slice)
+                if skip_scoring:
+                    booster_2_list.append(res)
+                elif not remote:
+                    booster, sl_sl_feat_names, y_pred, x_pred = res
+                    booster_2_list.append((booster, sl_sl_feat_names))
+                    y_preds.append(y_pred)
+                    x_preds.append(x_pred)
+                else:
+                    y_pred, x_pred = res
+                    y_preds.append(y_pred)
+                    x_preds.append(x_pred)
+            if not skip_scoring:
+                y_pred = numpy.mean(y_preds, axis=0)
+                if score_train:
+                    x_pred = numpy.mean(x_preds, axis=0)
+        else:
+            if samples is None:
+                samples = unpack(ray.get(samples_store_id))
+            for slice_slice in processed_slice_slices:
+                if config.weighting == "geometric":
+                    slice_slice.calcSampleWeights(config, distance_map)
+                elif config.weighting == "subsample_distance":
+                    weights_updated = slice_slice.calcSubsampleDistanceWeights(config, para_number=proc)
 
-        ta = add_to_times(times, ta) #6
+                dtrain = slice_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor)
+                
+                dtest_feature_matrix = slice_slice.get_dtest(samples)
 
-        forest = xgb_train_wrapper(config, dtrain, dtest_feature_matrix)
-        if forest is None:
-            return return_zero(zero_return, remote, cv_slice)
+                ta = add_to_times(times, ta) #6
 
+                booster = xgb_train_wrapper(config, dtrain, dtest_feature_matrix)
+                if booster is None:
+                    return return_zero(zero_return, remote, cv_slice)
+                booster_list.append((booster, dtest_feature_matrix))
 
     slice_updated = slice_updated or weights_updated
     ta = add_to_times(times, ta) #7
 
     if config.forest_type == 'xgboost' and not skip_feature_selection:
-
-        ta = add_to_times(times, ta) #8
-
-        y_pred = forest.predict(dtest_feature_matrix)
-
-        ta = add_to_times(times, ta) #9
-
-        acc_feat_impacts, shap_times = shap_analysis(config, forest, dtest_feature_matrix, slice_slice.feature_names, y_pred, slice_slice.test_targets)
-        times.append(shap_times)
-
-        ta = add_to_times(times, ta) #10
-        if acc_feat_impacts is None:
-            return return_zero(zero_return, remote, cv_slice)
-
-        config.logger.info(f'{acc_feat_impacts[:5]=}\n{acc_feat_impacts[-5:]=}')
-        feats_to_remove = filtered_features[:]
-        for feat_name, feat_impact in acc_feat_impacts:
-            if feat_impact >= config.feat_impact_thresh:
-                feats_to_remove.append(feat_name)
-
-        config.logger.info(f'{len(feats_to_remove)=} {len(filtered_features)=} {len(cv_slice.feature_names) + len(filtered_features)=}')
-
-        if len(feats_to_remove) >= (len(cv_slice.feature_names)+ len(filtered_features)):
-            return return_zero(zero_return, remote, cv_slice)
         
+        test_feat_mats = []
+        train_feat_mats = []
+        if sub_gpu_share is None:
+            booster_2_list = []
+            for booster_index, (booster, dtest_feature_matrix) in enumerate(booster_list):
+                slice_slice = processed_slice_slices[booster_index]
+                ta = add_to_times(times, ta) #8
 
-        #if len(feats_to_remove) > len(filtered_features):
-        cv_slice.filterFeatures(feats_to_remove)
-        slice_slice.filterFeatures(feats_to_remove)      
-        ta = add_to_times(times, ta) #11
+                y_pred = booster.predict(dtest_feature_matrix)
 
-        dtrain = slice_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor)
+                ta = add_to_times(times, ta) #9
 
-        dtest_feature_matrix = slice_slice.get_dtest(samples)
+                acc_feat_impacts, shap_times = shap_analysis(config, booster, dtest_feature_matrix, slice_slice.feature_names, y_pred, slice_slice.test_targets)
+                times.append(shap_times)
 
-        forest = xgb_train_wrapper(config, dtrain, dtest_feature_matrix, second_round=True)
-        if forest is None:
-            return return_zero(zero_return, remote, cv_slice)
+                ta = add_to_times(times, ta) #10
+                if acc_feat_impacts is None:
+                    return return_zero(zero_return, remote, cv_slice)
 
+                config.logger.info(f'{acc_feat_impacts[:5]=}\n{acc_feat_impacts[-5:]=}')
+                feats_to_remove = filtered_features[:]
+                for feat_name, feat_impact in acc_feat_impacts:
+                    if feat_impact >= config.feat_impact_thresh:
+                        feats_to_remove.append(feat_name)
 
-        slice_slice.filterFeatures([])
-        #else:
-        #    cv_slice.filterFeatures(filtered_features)
-        #    slice_slice.filterFeatures([])
+                config.logger.info(f'{len(feats_to_remove)=} {len(filtered_features)=} {len(cv_slice.feature_names) + len(filtered_features)=}')
+
+                if len(feats_to_remove) >= (len(cv_slice.feature_names)+ len(filtered_features)):
+                    return return_zero(zero_return, remote, cv_slice)
+                
+
+                #if len(feats_to_remove) > len(filtered_features):
+                cv_slice.filterFeatures(feats_to_remove)
+                slice_slice.filterFeatures(feats_to_remove)
+
+                if not skip_scoring:
+                    test_feat_mats.append(cv_slice.get_dtest(samples))
+                    train_feat_mats.append(cv_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor))
+
+                ta = add_to_times(times, ta) #11
+
+                dtrain = slice_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor)
+
+                dtest_feature_matrix = slice_slice.get_dtest(samples)
+
+                booster_2 = xgb_train_wrapper(config, dtrain, dtest_feature_matrix, second_round=True)
+                if booster_2 is None:
+                    return return_zero(zero_return, remote, cv_slice)
+
+                booster_2_list.append((booster_2, slice_slice.feature_names[:]))
+                slice_slice.filterFeatures([])
+                #else:
+                #    cv_slice.filterFeatures(filtered_features)
+                #    slice_slice.filterFeatures([])
 
         ta = add_to_times(times, ta) #12
+        if skip_scoring:
+            return booster_2_list, None, cv_counter, cv_slice, times, slice_slices
 
-    if skip_scoring:
+    elif skip_scoring:
         return forest, None, cv_counter, cv_slice, times, slice_slices
 
     if debug:
         cv_slice.printBalance(config)
 
-    dtest_feature_matrix = cv_slice.get_dtest(samples)
-
-    try:
-        y_pred = forest.predict(dtest_feature_matrix)
-    except ValueError:
-        [e, f, g] = sys.exc_info()
-        g = traceback.format_exc()
-        config.logger.info(f'Catched error {config.forest_type=} {skip_feature_selection=}: {e}\n{f}\n{g}\n')
-        return return_zero(zero_return, remote, cv_slice)
-    if score_train:
-        dtrain_feature_matrix = cv_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor)
-        done = False
-        n = 1
-        while not done:
-            try:
-                if n > 1:
-                    x_pred = cut_and_predict(dtrain_feature_matrix, forest)
-                else:
-                    x_pred = forest.predict(dtrain_feature_matrix)
-                done = True
-            except ValueError:
-                if n < 4:
-                    time.sleep(n**2)
-                    done = False
-                    n += 1
-                else:
-                    [e, f, g] = sys.exc_info()
-                    g = traceback.format_exc()
-                    config.logger.info(f'Catched error {config.forest_type=} {skip_feature_selection=}: {e}\n{f}\n{g}\n')
-                    return return_zero(zero_return, remote, cv_slice)
+    if sub_gpu_share is None:
+        try:
+            y_pred = booster_list_predict(booster_2_list, test_feat_mats)
+        except ValueError:
+            [e, f, g] = sys.exc_info()
+            g = traceback.format_exc()
+            config.logger.info(f'Catched error {config.forest_type=} {skip_feature_selection=}: {e}\n{f}\n{g}\n')
+            return return_zero(zero_return, remote, cv_slice)
+        if score_train:
+            done = False
+            n = 1
+            while not done:
+                try:
+                    if n > 1:
+                        x_pred = cut_and_predict(dtrain_feature_matrix, forest)
+                    else:
+                        x_pred = booster_list_predict(booster_2_list, train_feat_mats)
+                    done = True
+                except ValueError:
+                    if n < 4:
+                        time.sleep(n**2)
+                        done = False
+                        n += 1
+                    else:
+                        [e, f, g] = sys.exc_info()
+                        g = traceback.format_exc()
+                        config.logger.info(f'Catched error {config.forest_type=} {skip_feature_selection=}: {e}\n{f}\n{g}\n')
+                        return return_zero(zero_return, remote, cv_slice)
 
     ta = add_to_times(times, ta) #8/13
 
@@ -726,7 +856,7 @@ def trainRegressionForest(
 
     if remote:
         return scores_obj, pack(cv_slice), cv_counter, times, slice_slices
-    return forest, scores_obj, cv_counter, cv_slice, times, slice_slices
+    return booster_2_list, scores_obj, cv_counter, cv_slice, times, slice_slices
 
 
 def calc_scores_obj(target_vector, prediction_vector, sample_id_vector, weight_vector, feature_names, runtime_penalty = 0.):
@@ -775,6 +905,8 @@ def calc_scores_obj(target_vector, prediction_vector, sample_id_vector, weight_v
 def trainForest(
     config: util.Config,
     cross_val_object: CrossValidationSlice | DataSAIL_cv,
+    feat_corr_matrix,
+    feature_names,
     samples_store_id=None,
     samples=None,
     slice_slices: None | list[CrossValidationSlice] | dict[int, list[CrossValidationSlice]] = None,
@@ -791,7 +923,7 @@ def trainForest(
     score_train=True,
     get_first_scores=False,
     cv_interuption=None,
-    gpu_id = None,
+    gpu_share=None
 ) -> tuple[RandomForestRegressor | None, util.Scores, CrossValidationSlice | DataSAIL_cv, None | list[CrossValidationSlice] | dict[int, list[CrossValidationSlice]]]:
     # if cv_repeat is False, the cross_val_object is a cross validation slice object instead
     zero_scores_obj = util.Scores(zero=True)
@@ -821,7 +953,7 @@ def trainForest(
                 config.logger.info(f"Training with #of features: {len(cross_val_object.feature_names)} and #of samples: {len(cross_val_object.sub_sampled_train_targets)}")
 
             (
-                forest,
+                booster_list,
                 scores_obj,
                 cv_counter,
                 cv_slice,
@@ -830,6 +962,8 @@ def trainForest(
             ) = trainRegressionForest(
                 config,
                 cross_val_object,
+                feat_corr_matrix,
+                feature_names,
                 samples_store_id=samples_store_id,
                 samples=samples,
                 slice_slices=slice_slices,
@@ -841,7 +975,7 @@ def trainForest(
                 overwrite_proc_n=para_number,
                 force_confusion=force_confusion,
                 score_train=score_train,
-                gpu_id=gpu_id
+                sub_gpu_share=gpu_share
             )
             total_times = aggregate_times(total_times, reg_forest_times)
 
@@ -889,9 +1023,10 @@ def trainForest(
                 para_number = para_number // len(cv_counters)
             if config.multi_gpu >= len(cv_counters):
                 remote_wrapper_function = trainRegressionForestWrapper
+                quota = 1.0
             else:
                 quota = min([0.5, config.multi_gpu / len(cv_counters)])
-                remote_wrapper_function = trainRegressionForestWrapper.options(num_gpus=quota)
+                remote_wrapper_function = trainRegressionForestWrapper
 
             cv_slice_stores = {}
         else:
@@ -928,6 +1063,8 @@ def trainForest(
                         remote_wrapper_function.remote(
                             config,
                             packed_cv_slice,
+                            feat_corr_matrix,
+                            feature_names,
                             samples_store_id=[samples_store_id],
                             slice_slices=s_slice_slices,
                             distance_map=distance_map,
@@ -939,6 +1076,7 @@ def trainForest(
                             skip_scoring=skip_scoring,
                             force_confusion=force_confusion,
                             score_train=score_train,
+                            gpu_share=quota
                         )
                     )
                     
@@ -947,6 +1085,8 @@ def trainForest(
                         trainRegressionForest(
                             config,
                             cv_slice,
+                            feat_corr_matrix,
+                            feature_names,
                             samples=samples,
                             samples_store_id=samples_store_id,
                             slice_slices=s_slice_slices,
@@ -959,7 +1099,7 @@ def trainForest(
                             skip_scoring=skip_scoring,
                             force_confusion=force_confusion,
                             score_train=score_train,
-                            gpu_id=gpu_id
+                            sub_gpu_share=gpu_share
                         )
                     )
                     if cv_interuption is not None and len(slice_result_ids) == 1:
@@ -997,9 +1137,10 @@ def trainForest(
                         _slice_slices,
                     ) = res
                     cv_slice = unpack(packed_cv_slice)
+                    booster_list = None
                 else:
                     (
-                        forest,
+                        booster_list,
                         scores_obj,
                         cv_counter,
                         cv_slice,
@@ -1061,4 +1202,4 @@ def trainForest(
     if config.verbosity >= 2:
         config.logger.info(f"Time for trainForest: {t1 - t0}")
 
-    return forest, scores_obj, cross_val_object, ret_slice_slices
+    return booster_list, scores_obj, cross_val_object, ret_slice_slices

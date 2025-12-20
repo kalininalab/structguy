@@ -873,6 +873,26 @@ class CrossValidationSlice(Slotted_obj):
             return None, None
         return corr,p_val
 
+    def set_to_features(self, dedicated_features):
+        dedicated_features = set(dedicated_features)
+        reacs = []
+        for deac_feat in self.deactivated_features:
+            if deac_feat in dedicated_features:
+                reacs.append(deac_feat)
+
+        for reac in reacs:
+            self.reactivateFeature(reac)
+
+        for ff in self.feature_names[:]:
+            if ff not in dedicated_features:
+                self.deactivateFeature(ff)
+
+        if len(self.feature_names) > 0:
+            if isinstance(self.feature_names, tuple):
+                self.feature_names = list(self.feature_names)
+            self.feature_names.sort()
+
+
     def filterFeatures(self,filtered_features, print_out = False):
         dont_reactivate = set(filtered_features)
         reacs = []
