@@ -61,7 +61,7 @@ def para_prediction(forest_dump_file, feat_matrix):
     pred = forest.predict(feat_matrix)
     return pred
 
-@ray.remote(max_calls=1)
+@ray.remote
 def trainRegressionForestWrapper(
     config,
     cv_slice,
@@ -80,6 +80,7 @@ def trainRegressionForestWrapper(
     score_train=True,
     gpu_share=None
 ):
+    util.reset_logger_for_remotes(config)
     return trainRegressionForest(
         config,
         unpack(cv_slice),
@@ -660,6 +661,8 @@ def trainRegressionForest(
         booster_list = []
         if sub_gpu_share is not None:
             sub_share = sub_gpu_share/len(slice_slices)
+            if sub_share < 1.0 and sub_share > 0.5:
+                sub_share = 0.5
             if config.verbosity >= 2:
                 config.logger.info(f'call of double_booster_remote: {sub_share=}')
             remote_function = double_booster_remote.options(num_gpus = sub_share)
@@ -1021,12 +1024,9 @@ def trainForest(
                 para_number = config.proc_n // len(cv_counters)
             else:
                 para_number = para_number // len(cv_counters)
-            if config.multi_gpu >= len(cv_counters):
-                remote_wrapper_function = trainRegressionForestWrapper
-                quota = 1.0
-            else:
-                quota = min([0.5, config.multi_gpu / len(cv_counters)])
-                remote_wrapper_function = trainRegressionForestWrapper
+
+            quota = gpu_share/len(cv_counters)
+            remote_wrapper_function = trainRegressionForestWrapper
 
             cv_slice_stores = {}
         else:
@@ -1048,7 +1048,7 @@ def trainForest(
                         packed_cv_slice: bytes = pack(cv_slice)
                         cv_slice_stores[cv_counter] = packed_cv_slice
                     t02 = time.time()
-                    if config.verbosity >= 2:
+                    if config.verbosity >= 4:
                         config.logger.info(f"Time for packing cv_slice {cv_counter=} in trainForest: {t02 - t01} {slice_slices is None=} {para_number=} {(samples_store_id is None)=}")
 
                 if slice_slices is not None and cv_counter in slice_slices:

@@ -174,7 +174,7 @@ def bayes_random_init(
 
     if config.multi_gpu > 1:
         #para_random_init = True
-        store = ray.put((config, pack(initial_cv_obj), parameters, samples_store_id, pack(slice_slices), force_confusion, best_first_scores))
+        store = ray.put((config, pack(initial_cv_obj), parameters, samples_store_id, pack(slice_slices), force_confusion, best_first_scores, samples.feat_corr_matrix, samples.feature_names))
         return x_list, y_list, bounds, n_params, best_scores, best_first_scores, best_params, initial_values, new_optimimum, len(fix_parameters_pos), param_names, integer_type_params, initial_cv_obj, slice_slices, store
     else:
         para_random_init = False
@@ -605,23 +605,27 @@ def bayesian_optimisation(
 
     else:
         remote_processes = []
-        threads_per_gpu = 3
+        threads_per_gpu = 0.25
         para_number = max([1,config.proc_n // (config.multi_gpu * threads_per_gpu)])
         gpu_share = 1/threads_per_gpu
-        remote_function = para_eval#.options(num_gpus = gpu_share)
+        remote_function = para_eval #.options(num_gpus = gpu_share)
         current_params_id = 0
         n_of_sent_hpo_sets = 0
-        for gpu_id in range(config.multi_gpu):
-            for _ in range(threads_per_gpu):
-                next_sample = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
+        number_of_procs = int(config.multi_gpu * threads_per_gpu)
+        
+        for _ in range(number_of_procs):
+            next_sample = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
 
-                com_queue = Queue()
-                out_queue = Queue()
-                com_queue.put(next_sample)
-                n_of_sent_hpo_sets += 1
-                
-                proc_id = remote_function.remote(com_queue, out_queue, store, para_number, gpu_share)
-                remote_processes.append((com_queue, out_queue, proc_id))
+            com_queue = Queue()
+            out_queue = Queue()
+            com_queue.put(next_sample)
+            n_of_sent_hpo_sets += 1
+            
+            proc_id = remote_function.remote(com_queue, out_queue, store, para_number, gpu_share)
+            remote_processes.append((com_queue, out_queue, proc_id))
+
+        if config.verbosity >= 1:
+            config.logger.info(f'Started {len(remote_processes)} para_eval processes: {para_number=} {gpu_share=}')
 
         dones = []
         counts = []
@@ -1084,6 +1088,8 @@ def get_scores(
         gpu_share = None
         ):
     
+    if config.verbosity >= 2:
+        config.logger.info(f"Call of get_scores: {gpu_share=} {para_number=}")
     t0 = time.time()
     
     _, scores, cv_obj, slice_slices = trainForest.trainForest(
@@ -1114,12 +1120,17 @@ def get_scores(
     return scores, cv_obj, slice_slices
 
 
-@ray.remote(max_calls=1)
+@ray.remote
 def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_share):
-    (config, packed_cv_obj, parameters, samples_store_id, packed_slice_slices, force_confusion, best_first_scores, feat_corr_matrix, feature_names,) = store
+    (config, packed_cv_obj, parameters, samples_store_id, packed_slice_slices, force_confusion, best_first_scores, feat_corr_matrix, feature_names) = store
+    
+    util.reset_logger_for_remotes(config)
+    if config.verbosity >= 2:
+        config.logger.info(f"Call of para_eval: {com_queue.empty()=}")
+    
     cv_obj = unpack(packed_cv_obj)
     slice_slices = unpack(packed_slice_slices)
-
+    
     not_done = True
     while not_done:
         if com_queue.empty():
@@ -1139,7 +1150,7 @@ def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_share)
             feat_corr_matrix,
             feature_names,
             samples_store_id=samples_store_id,
-            remote=False,
+            remote=True,
             para_number=para_number,
             force_confusion=force_confusion,
             get_first_scores=True,
