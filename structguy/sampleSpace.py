@@ -17,6 +17,7 @@ from datasail.sail import datasail
 from structguy.sequence_util import parseFromFasta
 from structguy.support_classes import CrossValidationSlice, Feature
 from structguy.util import median
+from structguy.prefiltering import detectBiasedFeaturesByMeanCorrelation
 
 from structman.base_utils.base_utils import pack, unpack
 from structman.lib.sdsc.sdsc_utils import Slotted_obj
@@ -388,7 +389,7 @@ class SampleSpace(Slotted_obj):
         subsamples = random.sample(sample_list, n_of_subsamples)
         return subsamples
 
-    def calc_subsamples_feat_corr_matrix(self, config, n_of_subsamples = 50_000):
+    def calc_subsamples_feat_corr_matrix(self, config, n_of_subsamples = 50_000) -> list[list[tuple[float, float, float, float, float, float, float]]]:
         subsamples = self.draw_subsamples(n_of_subsamples=n_of_subsamples)
         feat_matrix = np.array(self.get_feat_matrix_from_ids(subsamples, self.feature_names))#, dtype=float)
         #feat_matrix = np.nan_to_num(feat_matrix, nan=-1_000_000)
@@ -410,7 +411,7 @@ class SampleSpace(Slotted_obj):
 
         feat_corr_processes = []
 
-        feat_corr_matrix = [[]]*len(self.feature_names) 
+        feat_corr_matrix: list[list[tuple[float, float, float, float, float, float, float]]] = [[]]*len(self.feature_names) 
 
         for proc_id in range(n_of_procs):
             left = proc_id * feats_per_process
@@ -1355,7 +1356,7 @@ class Given_split(CrossValidation):
 
 class DataSAIL_cv(CrossValidation):
     __slots__ = cv_slots + ['prots']
-    def __init__(self, sampleSpace = None, config = None, as_list = None):
+    def __init__(self, samples_store_id = None, sampleSpace = None, config = None, as_list = None):
         t0 = time.time()
         if as_list is not None:
             for slot_number, slot in enumerate(self.__slots__):
@@ -1503,6 +1504,41 @@ class DataSAIL_cv(CrossValidation):
                 self.slices[cv_counter].subslices = []
                 for subslice_counter in train_test_pairs[cv_counter][2]:
                     self.slices[cv_counter].subslices.append(train_test_pairs[cv_counter][2][subslice_counter])
+
+            detectBiasedFeaturesByMeanCorrelation(
+                config, self.slices[cv_counter], samples_store_id, samples=sampleSpace, dummy_call=True
+            )
+
+            subslices = [set([x]) for x in self.slices[cv_counter].train_prots]
+
+            slice_slices = []
+
+            for i, subslice_test_proteins in enumerate(subslices):
+                try:
+                    remaining_prots = set(self.slices[cv_counter].train_prots) - subslice_test_proteins
+                except TypeError:
+                    remaining_prots = []
+
+                if self.slices[cv_counter].train_equal_test:
+                    ignore_samples = None
+                else:
+                    ignore_samples = set(self.slices[cv_counter].test_sample_ids)
+                test_ids, train_ids = splitDataSet(config, sampleSpace.samples, specific_id=subslice_test_proteins, protein_wise=(not config.random_split), ignore_samples=ignore_samples)
+
+                cv_slice_slice = CrossValidationSlice(
+                    test_ids,
+                    train_ids,
+                    raw_feature_names=sampleSpace.feature_names,
+                    sample_dict=sampleSpace.samples,
+                    config=config,
+                    name=f"{self.slices[cv_counter].name}_subslice_{i}",
+                    train_prots=remaining_prots,
+                    feature_names=self.slices[cv_counter].feature_names,
+                )
+                
+                slice_slices.append(ray.put(pack(cv_slice_slice)))
+
+            self.slices[cv_counter].slice_slices = slice_slices
 
         t6 = time.time()
         if config.verbosity >= 2:

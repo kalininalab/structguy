@@ -1,5 +1,6 @@
 #!/usr/bin/python3
-import sys, os
+import os
+import sys
 import logging
 import getopt
 import statistics

@@ -10,9 +10,7 @@ from structguy import featureGenerator, util, learn, featureAnalysis
 from structguy.sequence_feature_generation import prepare_gemme
 from ray.train import ScalingConfig
 
-
 import structman.base_utils.ray_utils as ray_utils
-
 
 disclaimer = """
 structguy_main.py generate_features [-i -o --verbosity]\n
@@ -308,7 +306,7 @@ def build_model_main(manual_args = None):
 
     ray_utils.ray_init(config, overwrite_logging_level = logging_level, total_memory_quantile = 0.74, num_gpus=config.multi_gpu)
 
-    out_value = learn.learn(config, test_config=test_config)
+    out_value = learn.learn(config)
 
     config.saveHyperParameter()
     return out_value

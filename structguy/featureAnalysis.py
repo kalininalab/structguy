@@ -9,12 +9,11 @@ import math
 
 import xgboost as xgb
 import matplotlib.pyplot as plt
-from structguy import learn
 from structman.base_utils.base_utils import calculate_chunksizes, pack, unpack
 from structguy.support_classes import CrossValidationSlice
 from structguy.util import Config, loadModel
 from structguy.sampleSpace import SampleSpace, FullSlice
-from structguy.featureGenerator import createTrainingSet
+from structguy.featureGenerator import createTrainingSet, load_data_for_pred
 
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.tree import DecisionTreeRegressor
@@ -780,7 +779,7 @@ if __name__ == "__main__":
 def get_model_info(config):
     t0 = time.time()
 
-    model, extern_feature_names_list, impute_map, model_config, feat_stats, extern_features = learn.loadModel(config.path_to_model)
+    model, extern_feature_names_list, impute_map, model_config, feat_stats, extern_features = loadModel(config.path_to_model)
 
     t1 = time.time()
 
@@ -809,7 +808,7 @@ def get_rf_info(config, impute_map, extern_feature_names_list, model_config, for
     t2 = time.time()
     print(f'Random Forest model consits of {n_of_trees} trees and a total of {n_of_nodes} Nodes, time: {t2-t1}')
 
-    samples, test_feature_matrix, test_targets, sample_id_list = learn.load_data_for_pred(config, impute_map, extern_feature_names_list)
+    samples, test_feature_matrix, test_targets, sample_id_list = load_data_for_pred(config, impute_map, extern_feature_names_list)
     
     t3 = time.time()
     print(f'Loaded data: time={t3-t2}')

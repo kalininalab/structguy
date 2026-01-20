@@ -4,15 +4,16 @@ import traceback
 import time
 import ray
 
-from structguy import sampleSpace, consts
-from structguy import structural_feature_generation as strfg
+from structguy import consts
+from structguy.sampleSpace import SampleSpace
 from structguy import sequence_feature_generation as seqfg
+from structguy.util import Config
 
-from structman.base_utils.base_utils import calculate_chunksizes, pack, unpack
+from structman.base_utils.base_utils import unpack
 
 
 def expand_structural_feature_table(config):
-    samples = sampleSpace.SampleSpace(config)
+    samples = SampleSpace(config)
     # strfg.initFeatures(samples)
     # seqfg.initFeatures(config, samples)
 
@@ -293,7 +294,7 @@ def createTrainingSet(
     if config.verbosity >= 2:
         config.logger.info(f"Call of createTrainingSet: {external_impute is None=} {for_prediction=} {config.path_to_processed_features_file=}")
 
-    samples = sampleSpace.SampleSpace(config)
+    samples = SampleSpace(config)
 
     if config.path_to_processed_features_file is not None and not config.overwrite:
         if config.path_to_processed_features_file[-5:] == '.dump':
@@ -404,3 +405,26 @@ def createTrainingSet(
         t_1 = time.time()
         config.logger.info(f'Time for calculating feat_corr_matrix: {t_1-t_0}')
     return samples
+
+
+def load_data_for_pred(
+    config: Config,
+    impute_map,
+    booster_list,
+    extern_features
+):
+    t0 = time.time()
+    samples = createTrainingSet(config, external_impute=impute_map, for_prediction=True, filter_synon=config.trace_decisions)
+    t1 = time.time()
+
+    config.logger.info(f"Time for loading dataset: {t1 - t0}")
+
+    for sample_id in samples.samples:
+        samples.samples[sample_id].testtrain = "test"
+
+    booster_specific_data = []
+    for _, feature_names in booster_list:
+        test_feature_matrix, test_targets, sample_id_list, feat_id_vec, cat_vec = samples.get_test_data_for_feature_list(feature_names, config, extern_features)
+        booster_specific_data.append((test_feature_matrix, test_targets, sample_id_list, feat_id_vec, cat_vec))
+
+    return samples, booster_specific_data

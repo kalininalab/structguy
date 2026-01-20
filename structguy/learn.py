@@ -3,8 +3,6 @@ import sys
 import os
 import time
 import ray
-import random
-import math
 import shap
 import numpy
 
@@ -23,11 +21,16 @@ from sklearn.ensemble import RandomForestRegressor
 from supertree import SuperTree
 from structman.base_utils.base_utils import pack
 
-from structguy import featureAnalysis, featureGenerator, sampleSpace, trainForest, util
+from structguy import featureAnalysis, featureGenerator, sampleSpace, trainForest
+from structguy.featureGenerator import load_data_for_pred
 from structguy import hyperParameterOptimization as hpo
 from structguy.results_analysis import Results, write_protein_wise_performances
 from structguy.support_classes import CrossValidationSlice
-from structguy.util import Config, loadModel, storeModel
+from structguy.util import (
+    Config, loadModel, storeModel, calc_protein_wise_corr, scatterplot, hexbinplot,
+    printMean, radar, parse_multi_savs_table, combine_individual_effects, cat_shap_full_matrix,
+    categorize_shap_from_xgb, protein_wise_scatter_plot
+)
 from structguy.consts import feature_categories
 
 from xgboost import plot_tree, DMatrix
@@ -114,7 +117,7 @@ def save_feature_importances(outfile, feature_importance_map):
     f.close()
 
 
-def learn(config, effectRegressor=None, test_config=None):
+def learn(config: Config):
     crossValidation = config.crossValidation
 
     if config.verbosity >= 1:
@@ -166,10 +169,12 @@ def learn(config, effectRegressor=None, test_config=None):
     samples_store_id = None
 
     if not config.skip_cv:
+        samples_store_id = ray.put(pack(samples))
+
         if crossValidation == "LOPO":
             cross_val_obj = sampleSpace.LOPO(samples, config)
         elif crossValidation == "DataSAIL":
-            cross_val_obj = sampleSpace.DataSAIL_cv(sampleSpace=samples, config=config)
+            cross_val_obj = sampleSpace.DataSAIL_cv(samples_store_id=samples_store_id, sampleSpace=samples, config=config)
         elif crossValidation == "specific":
             cross_val_obj = sampleSpace.Given_split(samples, config)
         else:
@@ -182,17 +187,6 @@ def learn(config, effectRegressor=None, test_config=None):
             config.logger.info(f"{len(cv_slice.test_targets)=}")
 
         debug = config.debug_mode
-        if (
-            config.feature_selection == "confusion"
-            or config.feature_selection == "confusion_and_regu"
-            or config.feature_selection == "sequential_confusion"
-            or config.feature_selection == "threeStaged"
-            or config.feature_selection == "sequential_confusion_and_regu"
-            or config.feature_selection == "threeStaged_listranking"
-        ):
-            samples_store_id = ray.put(pack(samples))
-        else:
-            samples_store_id = None
 
         if config.cv_hpo:
             initial_training_input = cross_val_obj
@@ -203,12 +197,11 @@ def learn(config, effectRegressor=None, test_config=None):
             config.logger.info(f"Before initial model training: {config.cv_hpo=} {initial_training_input.slice_slices=}")
 
         if config.hyperOptimization == "bayesianComplete":
-            forest, scores, initial_training_input, slice_slices = trainForest.trainForest(
+            forest, scores, initial_training_input = trainForest.trainForest(
                 config,
                 initial_training_input,
                 samples.feat_corr_matrix, samples.feature_names,
                 samples_store_id=samples_store_id,
-                slice_slices=initial_training_input.slice_slices,
                 samples=samples,
                 distance_map=distance_map,
                 repeat=config.repeat_training,
@@ -221,7 +214,6 @@ def learn(config, effectRegressor=None, test_config=None):
                 config,
                 initial_training_input,
                 scores,
-                slice_slices,
                 samples=samples,
                 samples_store_id=samples_store_id,
                 distance_map=distance_map,
@@ -232,12 +224,11 @@ def learn(config, effectRegressor=None, test_config=None):
                 gpu_share = config.multi_gpu
             else:
                 gpu_share = None
-            forest, (first_scores, scores), initial_training_input, slice_slices = trainForest.trainForest(
+            forest, (first_scores, scores), initial_training_input = trainForest.trainForest(
                 config,
                 initial_training_input,
                 samples.feat_corr_matrix, samples.feature_names,
                 samples_store_id=samples_store_id,
-                slice_slices=initial_training_input.slice_slices,
                 samples=samples,
                 repeat=config.repeat_training,
                 cv_repeat=config.cv_hpo,
@@ -253,7 +244,6 @@ def learn(config, effectRegressor=None, test_config=None):
                 initial_training_input,
                 scores,
                 first_scores,
-                slice_slices,
                 samples=samples,
                 samples_store_id=samples_store_id,
                 distance_map=distance_map,
@@ -261,12 +251,11 @@ def learn(config, effectRegressor=None, test_config=None):
             )
         else:
             if debug:
-                forest, scores, initial_training_input, slice_slices = trainForest.trainForest(
+                forest, scores, initial_training_input = trainForest.trainForest(
                     config,
                     initial_training_input,
                     samples.feat_corr_matrix, samples.feature_names,
                     samples_store_id=samples_store_id,
-                    slice_slices=initial_training_input.slice_slices,
                     samples=samples,
                     distance_map=distance_map,
                     repeat=config.repeat_training,
@@ -313,14 +302,13 @@ def learn(config, effectRegressor=None, test_config=None):
                 gpu_share = config.multi_gpu
             else:
                 gpu_share = None
-            booster_list, scores, cv_slice, slice_slices = trainForest.trainForest(
+            booster_list, scores, cv_slice = trainForest.trainForest(
                 config,
                 cv_slice,
                 samples.feat_corr_matrix,
                 samples.feature_names,
                 samples=samples,
                 samples_store_id=samples_store_id,
-                slice_slices=cv_slice.slice_slices,
                 distance_map=distance_map,
                 repeat=config.repeat_training,
                 print_out=print_out,
@@ -355,7 +343,7 @@ def learn(config, effectRegressor=None, test_config=None):
                 mses.append((scores.mse, len(cv_slice.test_targets)))
                 pearsons.append((scores.pearson_r, 1))
                 spears.append(scores.corr)
-                prot_wise_spearmans, mean_spearman, raw_corrs = util.calc_protein_wise_corr(
+                prot_wise_spearmans, mean_spearman, raw_corrs = calc_protein_wise_corr(
                     cv_slice.test_targets,
                     y_pred,
                     cv_slice.test_sample_ids,
@@ -393,13 +381,13 @@ def learn(config, effectRegressor=None, test_config=None):
                     scatterfile = "%s_%s.png" % (base_name, str(cv_counter))
                     hexbinfile = "%s_%s_hexbin.png" % (base_name, str(cv_counter))
 
-                    util.scatterplot(
+                    scatterplot(
                         y_pred,
                         cv_slice.test_targets,
                         config.target_values,
                         scatterfile
                     )
-                    util.hexbinplot(y_pred, cv_slice.test_targets, config.target_values, hexbinfile)
+                    hexbinplot(y_pred, cv_slice.test_targets, config.target_values, hexbinfile)
 
                 writeOutput(config, y_pred, cv_slice, samples, append=append)
                 if not append:  # Append is only False in the first loop iteration
@@ -407,8 +395,8 @@ def learn(config, effectRegressor=None, test_config=None):
 
         if config.regression:
             if config.verbosity >= 1:
-                util.printMean(mses, "MSE")
-                util.printMean(pearsons, "Pearson's correlation")
+                printMean(mses, "MSE")
+                printMean(pearsons, "Pearson's correlation")
             if len(accum_y_pred) > 0:
                 cum_spear, _ = stats.spearmanr(accum_y_pred, accum_true_vals)
             else:
@@ -420,9 +408,9 @@ def learn(config, effectRegressor=None, test_config=None):
 
             out_value = (cum_spear, mean_spear)
         else:
-            util.printMean(rocs, "auROC")
-            util.printMean(accs, "ACC")
-            util.printMean(fs, "F-Score")
+            printMean(rocs, "auROC")
+            printMean(accs, "ACC")
+            printMean(fs, "F-Score")
 
         if config.outfolder is not None and config.produce_scatterplot and config.regression:
             base_name = f"{config.outfolder}/{config.dataset_name}"
@@ -433,13 +421,13 @@ def learn(config, effectRegressor=None, test_config=None):
             # middle_value = (max(accum_y_pred) + min(accum_y_pred))/2.
             if len(accum_y_pred) > 0:
 
-                util.scatterplot(
+                scatterplot(
                     accum_y_pred,
                     accum_true_vals,
                     config.target_values,
                     scatterfile,
                 )
-                util.hexbinplot(accum_y_pred, accum_true_vals, config.target_values, hexbinfile)
+                hexbinplot(accum_y_pred, accum_true_vals, config.target_values, hexbinfile)
                 if config.crossValidation == "LOPO":
                     labels = []
                     values = []
@@ -449,7 +437,7 @@ def learn(config, effectRegressor=None, test_config=None):
                         values.append(pearson_r)
                     title = "Pearson's correlation"
                     radarfile = "%s_radar.png" % (base_name)
-                    util.radar(labels, values, title, radarfile)
+                    radar(labels, values, title, radarfile)
     elif (
         config.feature_selection == "confusion"
         or config.feature_selection == "confusion_and_regu"
@@ -461,7 +449,7 @@ def learn(config, effectRegressor=None, test_config=None):
         if crossValidation == "LOPO":
             cross_val_obj = sampleSpace.LOPO(samples, config)
         elif crossValidation == "DataSAIL":
-            cross_val_obj = sampleSpace.DataSAIL_cv(sampleSpace=samples, config=config)
+            cross_val_obj = sampleSpace.DataSAIL_cv(samples_store_id=samples_store_id, sampleSpace=samples, config=config)
         elif crossValidation == "specific":
             cross_val_obj = sampleSpace.Given_split(samples, config)
         else:
@@ -503,30 +491,6 @@ def learn(config, effectRegressor=None, test_config=None):
             storeCV(forests, config, cross_val_obj, cv_file)
 
     return out_value
-
-
-def load_data_for_pred(
-    config: Config,
-    impute_map,
-    booster_list,
-    extern_features
-):
-    t0 = time.time()
-    samples = featureGenerator.createTrainingSet(config, external_impute=impute_map, for_prediction=True, filter_synon=config.trace_decisions)
-    t1 = time.time()
-
-    config.logger.info(f"Time for loading dataset: {t1 - t0}")
-
-    for sample_id in samples.samples:
-        samples.samples[sample_id].testtrain = "test"
-
-    booster_specific_data = []
-    for _, feature_names in booster_list:
-        test_feature_matrix, test_targets, sample_id_list, feat_id_vec, cat_vec = samples.get_test_data_for_feature_list(feature_names, config, extern_features)
-        booster_specific_data.append((test_feature_matrix, test_targets, sample_id_list, feat_id_vec, cat_vec))
-
-    return samples, booster_specific_data
-
 
 def val_to_str(val):
     try:
@@ -643,7 +607,7 @@ def evaluate_dataset(config: Config):
     y_pred = trainForest.booster_list_predict(booster_list, test_feat_mats)
 
     if config.path_to_multi_savs_table is not None:
-        multi_savs = util.parse_multi_savs_table(config)
+        multi_savs = parse_multi_savs_table(config)
 
         effect_dict = {}
         mm_y_pred = []
@@ -677,7 +641,7 @@ def evaluate_dataset(config: Config):
             individual_effect_preds = []
             for aac in aacs:
                 individual_effect_preds.append(effect_dict[(prot_id, aac)])
-            combined_effect = util.combine_individual_effects(individual_effect_preds)
+            combined_effect = combine_individual_effects(individual_effect_preds)
 
             combined_test_targets.append(effect)
             combined_sample_id_list.append((prot_id, ":".join(aacs)))
@@ -741,8 +705,8 @@ def evaluate_dataset(config: Config):
             config.logger.info(f"Spearman correlation and p-value: {corr} {p_value}")
 
         if config.target_values is not None:
-            prot_wise_spearmans, mean_spearman, _ = util.calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.spearmanr)
-            prot_wise_pearsons, mean_pearson, _ = util.calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.pearsonr)
+            prot_wise_spearmans, mean_spearman, _ = calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.spearmanr)
+            prot_wise_pearsons, mean_pearson, _ = calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.pearsonr)
         else:
             prot_wise_spearmans = None
             mean_spearman = None
@@ -756,8 +720,8 @@ def evaluate_dataset(config: Config):
             config.logger.info(f"Prot-wise mean spearman: {mean_spearman}")
 
         if mm_y_pred is not None:
-            prot_wise_spearmans, mean_mm_spearman, _ = util.calc_protein_wise_corr(mm_test_targets, mm_y_pred, mm_sample_id_list, stats.spearmanr)
-            prot_wise_pearsons, mean_pearson, _ = util.calc_protein_wise_corr(mm_test_targets, mm_y_pred, mm_sample_id_list, stats.pearsonr)
+            prot_wise_spearmans, mean_mm_spearman, _ = calc_protein_wise_corr(mm_test_targets, mm_y_pred, mm_sample_id_list, stats.spearmanr)
+            prot_wise_pearsons, mean_pearson, _ = calc_protein_wise_corr(mm_test_targets, mm_y_pred, mm_sample_id_list, stats.pearsonr)
 
             if config.verbosity >= 1:
                 config.logger.info(f"Number of samples: {len(mm_sample_id_list)} {len(mm_test_targets)} {len(mm_y_pred)}")
@@ -765,13 +729,13 @@ def evaluate_dataset(config: Config):
                 config.logger.info(f"Prot-wise mean pearson for multi savs: {mean_pearson}")
                 config.logger.info(f"Prot-wise mean spearman for multi savs: {mean_mm_spearman}")
 
-            prot_wise_spearmans, mean_comb_spearman, _ = util.calc_protein_wise_corr(
+            prot_wise_spearmans, mean_comb_spearman, _ = calc_protein_wise_corr(
                 combined_test_targets,
                 combined_y_pred,
                 combined_sample_id_list,
                 stats.spearmanr,
             )
-            prot_wise_pearsons, mean_pearson, _ = util.calc_protein_wise_corr(
+            prot_wise_pearsons, mean_pearson, _ = calc_protein_wise_corr(
                 combined_test_targets,
                 combined_y_pred,
                 combined_sample_id_list,
@@ -809,7 +773,7 @@ def evaluate_dataset(config: Config):
                 plt.savefig(f"{config.outfolder}/beeswarm.png")
                 plt.clf()
 
-                cat_expl = util.cat_shap_full_matrix(explanation, extern_feature_names_list)
+                cat_expl = cat_shap_full_matrix(explanation, extern_feature_names_list)
 
                 cat_shap_expl = shap.Explanation(cat_expl[:,:-1], feature_names=feature_categories)
                 ax = shap.plots.beeswarm(cat_shap_expl, show=False, max_display = len(feature_categories))
@@ -822,7 +786,7 @@ def evaluate_dataset(config: Config):
                 # for pos, shap_val in enumerate(explanation[0][:-1]):
                 #    config.logger.info(f'{shap_val=} {extern_feature_names_list[pos]}')
 
-                # cat_exp, cat_shaps = util.categorize_shap_from_xgb(explanation[0][:-1], extern_feature_names_list)
+                # cat_exp, cat_shaps = categorize_shap_from_xgb(explanation[0][:-1], extern_feature_names_list)
 
                 # shap.plots.force(explanation[0][-1], cat_shaps, matplotlib=True, show=False, feature_names=feature_categories)
                 # shap.plots.force(explanation[0], matplotlib=True, show=False, feature_names=extern_feature_names_list)
@@ -969,7 +933,7 @@ def evaluate_dataset(config: Config):
 
                 if explanation is not None:
                     #print(f'{sample_id} {pos=} {len(explanation[pos][:-1])=} {len(extern_feature_names_list)=}')
-                    cat_exp, cat_shaps = util.categorize_shap_from_xgb(explanation[pos][:-1], extern_feature_names_list)
+                    cat_exp, cat_shaps = categorize_shap_from_xgb(explanation[pos][:-1], extern_feature_names_list)
                     if config.plot_sample_forces:
                         modified_feat_labels = []
                         cat_shaps = []
@@ -1056,18 +1020,18 @@ def evaluate_dataset(config: Config):
             scatterfile = f"{config.outfolder}/predicted_value_scatterplot.png"
             hexbinfile = f"{config.outfolder}/predicted_value_hexbinplot.png"
 
-            util.scatterplot(
+            scatterplot(
                 y_pred,
                 test_targets,
                 config.target_values,
                 scatterfile,
             )
-            util.hexbinplot(y_pred, test_targets, config.target_values, hexbinfile)
+            hexbinplot(y_pred, test_targets, config.target_values, hexbinfile)
 
             scatter_folder = f"{config.outfolder}/scatter_plots"
             if not os.path.isdir(scatter_folder):
                 os.makedirs(scatter_folder)
-            util.protein_wise_scatter_plot(test_targets, y_pred, combined_sample_id_list, scatter_folder, config.target_values)
+            protein_wise_scatter_plot(test_targets, y_pred, combined_sample_id_list, scatter_folder, config.target_values)
 
         return mean_spearman, combined_test_targets, combined_y_pred
     elif model_config.regression:
@@ -1078,7 +1042,7 @@ def evaluate_dataset(config: Config):
             else:
                 int_targets.append(0)
         total_roc_auc = roc_auc_score(int_targets, y_pred)
-        prot_wise_roc_aucs, mean_roc_auc, _ = util.calc_protein_wise_corr(
+        prot_wise_roc_aucs, mean_roc_auc, _ = calc_protein_wise_corr(
             int_targets,
             y_pred,
             sample_id_list,
@@ -1225,7 +1189,7 @@ def buildFinalModel(samples, samples_store_id, config, internal_cv=None, outfile
         gpu_share = config.multi_gpu
     else:
         gpu_share = None
-    booster_list, scores, full_slice, slice_slices = trainForest.trainForest(
+    booster_list, scores, full_slice = trainForest.trainForest(
         config,
         full_slice,
         samples.feat_corr_matrix,
