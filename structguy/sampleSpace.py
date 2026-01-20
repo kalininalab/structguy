@@ -1509,11 +1509,9 @@ class DataSAIL_cv(CrossValidation):
                 config, self.slices[cv_counter], samples_store_id, samples=sampleSpace, dummy_call=True
             )
 
-            subslices = [set([x]) for x in self.slices[cv_counter].train_prots]
-
             slice_slices = []
 
-            for i, subslice_test_proteins in enumerate(subslices):
+            for i, subslice_test_proteins in enumerate(self.slices[cv_counter].subslices):
                 try:
                     remaining_prots = set(self.slices[cv_counter].train_prots) - subslice_test_proteins
                 except TypeError:

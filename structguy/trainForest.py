@@ -365,23 +365,41 @@ def xgb_train_wrapper(
 @ray.remote
 def double_booster_remote(packed_slice_slice, store):
     config, filtered_features, cv_slice, skip_scoring, score_train, samples_store_id, retain_model = store
+    util.reset_logger_for_remotes(config)
+    times = []
+    ta = time.time()
+
     samples = unpack(ray.get(samples_store_id))
+    ta = add_to_times(times, ta)
     slice_slice = unpack(packed_slice_slice)
+    ta = add_to_times(times, ta)
     slice_slice.filterFeatures(filtered_features)
+    ta = add_to_times(times, ta)
 
     dtrain = slice_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor)
-    
+    ta = add_to_times(times, ta)
+
     dtest_feature_matrix = slice_slice.get_dtest(samples)
+    ta = add_to_times(times, ta)
 
     booster = xgb_train_wrapper(config, dtrain, dtest_feature_matrix)
+    ta = add_to_times(times, ta)
+
     if booster is None:
+        if config.verbosity >= 3:
+            print_times(times, label = 'double booster 1')
         return None
     
     y_pred = booster.predict(dtest_feature_matrix)
+    ta = add_to_times(times, ta)
 
     acc_feat_impacts, shap_times = shap_analysis(config, booster, dtest_feature_matrix, slice_slice.feature_names, y_pred, slice_slice.test_targets)
+    times.append(shap_times)
+    ta = add_to_times(times, ta)
 
     if acc_feat_impacts is None:
+        if config.verbosity >= 3:
+            print_times(times, label = 'double booster 2')
         return None
     
     feats_to_remove = filtered_features[:]
@@ -390,29 +408,45 @@ def double_booster_remote(packed_slice_slice, store):
             feats_to_remove.append(feat_name)
 
     if len(feats_to_remove) >= (len(cv_slice.feature_names)+ len(filtered_features)):
+        if config.verbosity >= 3:
+            print_times(times, label = 'double booster 3')
         return None
     
     slice_slice.filterFeatures(feats_to_remove)
+    ta = add_to_times(times, ta)
 
     dtrain = slice_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor)
+    ta = add_to_times(times, ta)
 
     dtest_feature_matrix = slice_slice.get_dtest(samples)
+    ta = add_to_times(times, ta)
 
     booster_2 = xgb_train_wrapper(config, dtrain, dtest_feature_matrix, second_round=True)
+    ta = add_to_times(times, ta)
     if booster_2 is None:
+        if config.verbosity >= 3:
+            print_times(times, label = 'double booster 4')
         return None
     
     if skip_scoring:
+        if config.verbosity >= 3:
+            print_times(times, label = 'double booster 5')
         return booster_2, slice_slice.feature_names[:]
 
     cv_slice.filterFeatures(feats_to_remove)
+    ta = add_to_times(times, ta)
 
     y_pred = booster_2.predict(cv_slice.get_dtest(samples))
+    ta = add_to_times(times, ta)
 
     if score_train:
         x_pred = booster_2.predict(cv_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor))
     else:
         x_pred = None
+    ta = add_to_times(times, ta)
+
+    if config.verbosity >= 3:
+        print_times(times, label = 'double booster 6')
 
     if retain_model:
         return y_pred, x_pred
