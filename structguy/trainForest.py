@@ -387,7 +387,7 @@ def double_booster_remote(packed_slice_slice, store):
 
     if booster is None:
         if config.verbosity >= 3:
-            print_times(times, label = 'double booster 1')
+            print_times(times, label = 'double booster 1', logger=config.logger)
         return None
     
     y_pred = booster.predict(dtest_feature_matrix)
@@ -399,7 +399,7 @@ def double_booster_remote(packed_slice_slice, store):
 
     if acc_feat_impacts is None:
         if config.verbosity >= 3:
-            print_times(times, label = 'double booster 2')
+            print_times(times, label = 'double booster 2', logger=config.logger)
         return None
     
     feats_to_remove = filtered_features[:]
@@ -409,7 +409,7 @@ def double_booster_remote(packed_slice_slice, store):
 
     if len(feats_to_remove) >= (len(cv_slice.feature_names)+ len(filtered_features)):
         if config.verbosity >= 3:
-            print_times(times, label = 'double booster 3')
+            print_times(times, label = 'double booster 3', logger=config.logger)
         return None
     
     slice_slice.filterFeatures(feats_to_remove)
@@ -425,12 +425,12 @@ def double_booster_remote(packed_slice_slice, store):
     ta = add_to_times(times, ta)
     if booster_2 is None:
         if config.verbosity >= 3:
-            print_times(times, label = 'double booster 4')
+            print_times(times, label = 'double booster 4', logger=config.logger)
         return None
     
     if skip_scoring:
         if config.verbosity >= 3:
-            print_times(times, label = 'double booster 5')
+            print_times(times, label = 'double booster 5', logger=config.logger)
         return booster_2, slice_slice.feature_names[:]
 
     cv_slice.filterFeatures(feats_to_remove)
@@ -446,7 +446,7 @@ def double_booster_remote(packed_slice_slice, store):
     ta = add_to_times(times, ta)
 
     if config.verbosity >= 3:
-        print_times(times, label = 'double booster 6')
+        print_times(times, label = 'double booster 6', logger=config.logger)
 
     if retain_model:
         return y_pred, x_pred
@@ -1099,8 +1099,8 @@ def trainForest(
         if get_first_scores:
             scores_obj = (first_scores, scores_obj)
 
-    if config.verbosity >= 2:
-        print_times(total_times, label = 'Train forest')
+    if config.verbosity >= 3:
+        print_times(total_times, label = 'Train forest', logger=config.logger)
 
     t1 = time.time()
     if config.verbosity >= 2:
