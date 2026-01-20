@@ -2162,6 +2162,8 @@ def cat_shap_full_matrix(explanations, feat_names):
         
 
 def reset_logger_for_remotes(config):
+    numba_logger = logging.getLogger('numba')
+    numba_logger.setLevel(logging.WARNING)
     main_logger = logging.getLogger(__name__)
     logging.basicConfig(filename=config.logfile, encoding='utf-8', level=logging.DEBUG)
     config.logger = main_logger
