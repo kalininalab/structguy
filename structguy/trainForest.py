@@ -364,24 +364,28 @@ def xgb_train_wrapper(
     return forest
 
 @ray.remote
-def double_booster_remote(packed_slice_slice, store):
+def double_booster_remote(packed_slice_slice, store, proc_id: int):
     config, filtered_features, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, retain_model = store
     util.reset_logger_for_remotes(config)
     times = []
     ta = time.time()
 
-    feat_pos_dict, features, sample_pos_dict, raw_feature_matrix = ray.get(raw_feature_matrix_store_id)
-
-    ta = add_to_times(times, ta)
     slice_slice = unpack(packed_slice_slice)
     ta = add_to_times(times, ta)
     slice_slice.filterFeatures(filtered_features)
     ta = add_to_times(times, ta)
 
-    dtrain = slice_slice.get_dtrain(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=config.sub_sample_factor)
-    ta = add_to_times(times, ta)
+    lock_file = f'remote_proc_{proc_id}.lock'
 
-    dtest_feature_matrix = slice_slice.get_dtest(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix)
+    with FileLock(lock_file):
+        feat_pos_dict, features, sample_pos_dict, raw_feature_matrix = ray.get(raw_feature_matrix_store_id)
+        dtrain = slice_slice.get_dtrain(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=config.sub_sample_factor)
+        dtest_feature_matrix = slice_slice.get_dtest(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix)
+        del feat_pos_dict
+        del features
+        del sample_pos_dict
+        del raw_feature_matrix
+
     ta = add_to_times(times, ta)
 
     booster = xgb_train_wrapper(config, dtrain, dtest_feature_matrix)
@@ -417,10 +421,15 @@ def double_booster_remote(packed_slice_slice, store):
     slice_slice.filterFeatures(feats_to_remove)
     ta = add_to_times(times, ta)
 
-    dtrain = slice_slice.get_dtrain(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=config.sub_sample_factor)
-    ta = add_to_times(times, ta)
+    with FileLock(lock_file):
+        feat_pos_dict, features, sample_pos_dict, raw_feature_matrix = ray.get(raw_feature_matrix_store_id)
+        dtrain = slice_slice.get_dtrain(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=config.sub_sample_factor)
+        dtest_feature_matrix = slice_slice.get_dtest(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix)
+        del feat_pos_dict
+        del features
+        del sample_pos_dict
+        del raw_feature_matrix
 
-    dtest_feature_matrix = slice_slice.get_dtest(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix)
     ta = add_to_times(times, ta)
 
     booster_2 = xgb_train_wrapper(config, dtrain, dtest_feature_matrix, second_round=True)
@@ -438,13 +447,28 @@ def double_booster_remote(packed_slice_slice, store):
     cv_slice.filterFeatures(feats_to_remove)
     ta = add_to_times(times, ta)
 
-    y_pred = booster_2.predict(cv_slice.get_dtest(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix))
-    ta = add_to_times(times, ta)
-
     if score_train:
-        x_pred = booster_2.predict(cv_slice.get_dtrain(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=config.sub_sample_factor))
+        with FileLock(lock_file):
+            feat_pos_dict, features, sample_pos_dict, raw_feature_matrix = ray.get(raw_feature_matrix_store_id)
+            dtrain_feature_matrix = cv_slice.get_dtrain(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=config.sub_sample_factor)
+            dtest_feature_matrix = cv_slice.get_dtest(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix)
+            del feat_pos_dict
+            del features
+            del sample_pos_dict
+            del raw_feature_matrix
+        y_pred = booster_2.predict(dtest_feature_matrix)
+        x_pred = booster_2.predict(dtrain_feature_matrix)
     else:
+        with FileLock(lock_file):
+            feat_pos_dict, features, sample_pos_dict, raw_feature_matrix = ray.get(raw_feature_matrix_store_id)
+            dtest_feature_matrix = cv_slice.get_dtest(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix)
+            del feat_pos_dict
+            del features
+            del sample_pos_dict
+            del raw_feature_matrix
+        y_pred = booster_2.predict(dtest_feature_matrix)
         x_pred = None
+
     ta = add_to_times(times, ta)
 
     if config.verbosity >= 3:
@@ -640,8 +664,8 @@ def trainRegressionForest(
             remote_proc_ids = []
             
             store = ray.put((config, feats_to_filter, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, remote))
-            for packed_slice_slice in cv_slice.slice_slices:
-                remote_proc_ids.append(remote_function.remote(packed_slice_slice, store))
+            for proc_id, packed_slice_slice in enumerate(cv_slice.slice_slices):
+                remote_proc_ids.append(remote_function.remote(packed_slice_slice, store, proc_id))
 
             results = ray.get(remote_proc_ids)
             y_preds = []

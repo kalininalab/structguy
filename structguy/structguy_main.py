@@ -275,6 +275,8 @@ def parse_arguments(argument_start = 2, manual_args = None):
 
     numba_logger = logging.getLogger('numba')
     numba_logger.setLevel(logging.WARNING)
+    fl_logger = logging.getLogger('filelock')
+    fl_logger.setLevel(logging.WARNING)
     main_logger = logging.getLogger(__name__)
 
     time_stamp = str(datetime.now()).replace(' ','_')
