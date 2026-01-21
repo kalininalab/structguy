@@ -636,7 +636,7 @@ def bayesian_optimisation(
 
     else:
         remote_processes = []
-        threads_per_gpu = 1
+        threads_per_gpu = 0.5
         para_number = min([config.proc_n , max([1,config.proc_n // (config.multi_gpu * threads_per_gpu)])])
         
         current_params_id = 0
@@ -1341,8 +1341,6 @@ def threeDimHyperOptimization(
                     )
                     if new_opti:
                         converged = False
-
-            cv_obj.reset_confusion_maps()
 
             if len(fs_parameters) > 1:
                 new_opti, best_scores, first_scores, cv_obj = bayesian_optimisation(
