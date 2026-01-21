@@ -74,13 +74,14 @@ def trainRegressionForestWrapper(
     score_train=True,
     gpu_share=None
 ):
-    config, feats_to_filter, samples_store_id, distance_map = store
+    config, feats_to_filter, samples_store_id, raw_feature_matrix_store_id, distance_map = store
     util.reset_logger_for_remotes(config)
     return trainRegressionForest(
         config,
         cv_slice,
         feats_to_filter,
         samples_store_id=samples_store_id,
+        raw_feature_matrix_store_id=raw_feature_matrix_store_id,
         distance_map=distance_map,
         print_out=print_out,
         skip_scoring=skip_scoring,
@@ -267,7 +268,7 @@ def booster_list_process_and_predict(booster_list, cv_slice: CrossValidationSlic
     y_preds = []
     for booster, feat_names in booster_list:
         cv_slice.set_to_features(feat_names)
-        test_feature_matrix = cv_slice.get_dtest(samples)
+        test_feature_matrix = cv_slice.get_dtest(samples.feat_pos_dict, samples.features, samples.sample_pos_dict, samples.raw_feature_matrix)
         y_preds.append(booster.predict(test_feature_matrix))
     y_pred = numpy.mean(y_preds, axis=0)
     return y_pred
@@ -364,22 +365,23 @@ def xgb_train_wrapper(
 
 @ray.remote
 def double_booster_remote(packed_slice_slice, store):
-    config, filtered_features, cv_slice, skip_scoring, score_train, samples_store_id, retain_model = store
+    config, filtered_features, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, retain_model = store
     util.reset_logger_for_remotes(config)
     times = []
     ta = time.time()
 
-    samples = unpack(ray.get(samples_store_id))
+    feat_pos_dict, features, sample_pos_dict, raw_feature_matrix = ray.get(raw_feature_matrix_store_id)
+
     ta = add_to_times(times, ta)
     slice_slice = unpack(packed_slice_slice)
     ta = add_to_times(times, ta)
     slice_slice.filterFeatures(filtered_features)
     ta = add_to_times(times, ta)
 
-    dtrain = slice_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor)
+    dtrain = slice_slice.get_dtrain(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=config.sub_sample_factor)
     ta = add_to_times(times, ta)
 
-    dtest_feature_matrix = slice_slice.get_dtest(samples)
+    dtest_feature_matrix = slice_slice.get_dtest(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix)
     ta = add_to_times(times, ta)
 
     booster = xgb_train_wrapper(config, dtrain, dtest_feature_matrix)
@@ -415,10 +417,10 @@ def double_booster_remote(packed_slice_slice, store):
     slice_slice.filterFeatures(feats_to_remove)
     ta = add_to_times(times, ta)
 
-    dtrain = slice_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor)
+    dtrain = slice_slice.get_dtrain(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=config.sub_sample_factor)
     ta = add_to_times(times, ta)
 
-    dtest_feature_matrix = slice_slice.get_dtest(samples)
+    dtest_feature_matrix = slice_slice.get_dtest(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix)
     ta = add_to_times(times, ta)
 
     booster_2 = xgb_train_wrapper(config, dtrain, dtest_feature_matrix, second_round=True)
@@ -436,11 +438,11 @@ def double_booster_remote(packed_slice_slice, store):
     cv_slice.filterFeatures(feats_to_remove)
     ta = add_to_times(times, ta)
 
-    y_pred = booster_2.predict(cv_slice.get_dtest(samples))
+    y_pred = booster_2.predict(cv_slice.get_dtest(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix))
     ta = add_to_times(times, ta)
 
     if score_train:
-        x_pred = booster_2.predict(cv_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor))
+        x_pred = booster_2.predict(cv_slice.get_dtrain(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=config.sub_sample_factor))
     else:
         x_pred = None
     ta = add_to_times(times, ta)
@@ -461,6 +463,7 @@ def trainRegressionForest(
     feats_to_filter: list[str],
     samples: SampleSpace | None =None,
     samples_store_id: ray.ObjectRef | None =None,
+    raw_feature_matrix_store_id: ray.ObjectRef | None =None,
     distance_map=None,
     print_out=True,
     skip_scoring=False,
@@ -636,7 +639,7 @@ def trainRegressionForest(
             remote_function = double_booster_remote.options(num_gpus = sub_share)
             remote_proc_ids = []
             
-            store = ray.put((config, feats_to_filter, cv_slice, skip_scoring, score_train, samples_store_id, remote))
+            store = ray.put((config, feats_to_filter, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, remote))
             for packed_slice_slice in cv_slice.slice_slices:
                 remote_proc_ids.append(remote_function.remote(packed_slice_slice, store))
 
@@ -669,9 +672,9 @@ def trainRegressionForest(
                 samples = unpack(ray.get(samples_store_id))
             for stored_slice_slice in cv_slice.slice_slices:
                 slice_slice = unpack(ray.get(stored_slice_slice))
-                dtrain = slice_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor)
+                dtrain = slice_slice.get_dtrain(samples.feat_pos_dict, samples.features, samples.sample_pos_dict, samples.raw_feature_matrix, sub_sampling=config.sub_sample_factor)
                 
-                dtest_feature_matrix = slice_slice.get_dtest(samples)
+                dtest_feature_matrix = slice_slice.get_dtest(samples.feat_pos_dict, samples.features, samples.sample_pos_dict, samples.raw_feature_matrix)
 
                 ta = add_to_times(times, ta) #6
 
@@ -720,14 +723,14 @@ def trainRegressionForest(
                 slice_slice.filterFeatures(feats_to_remove)
 
                 if not skip_scoring:
-                    test_feat_mats.append(cv_slice.get_dtest(samples))
-                    train_feat_mats.append(cv_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor))
+                    test_feat_mats.append(cv_slice.get_dtest(samples.feat_pos_dict, samples.features, samples.sample_pos_dict, samples.raw_feature_matrix))
+                    train_feat_mats.append(cv_slice.get_dtrain(samples.feat_pos_dict, samples.features, samples.sample_pos_dict, samples.raw_feature_matrix, sub_sampling=config.sub_sample_factor))
 
                 ta = add_to_times(times, ta) #11
 
-                dtrain = slice_slice.get_dtrain(samples, sub_sampling=config.sub_sample_factor)
+                dtrain = slice_slice.get_dtrain(samples.feat_pos_dict, samples.features, samples.sample_pos_dict, samples.raw_feature_matrix, sub_sampling=config.sub_sample_factor)
 
-                dtest_feature_matrix = slice_slice.get_dtest(samples)
+                dtest_feature_matrix = slice_slice.get_dtest(samples.feat_pos_dict, samples.features, samples.sample_pos_dict, samples.raw_feature_matrix)
 
                 booster_2 = xgb_train_wrapper(config, dtrain, dtest_feature_matrix, second_round=True)
                 if booster_2 is None:
@@ -854,6 +857,7 @@ def trainForest(
     feat_corr_matrix,
     feature_names,
     samples_store_id: ray.ObjectRef | None =None,
+    raw_feature_matrix_store_id: ray.ObjectRef | None=None,
     samples: SampleSpace | None =None,
     distance_map=None,
     repeat=1,
@@ -910,6 +914,7 @@ def trainForest(
                 cross_val_object,
                 feats_to_filter,
                 samples_store_id=samples_store_id,
+                raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                 samples=samples,
                 distance_map=distance_map,
                 print_out=print_out,
@@ -966,7 +971,7 @@ def trainForest(
             quota = gpu_share/len(cv_counters)
             remote_wrapper_function = trainRegressionForestWrapper
 
-            remote_store = ray.put((config, feats_to_filter, samples_store_id, distance_map))
+            remote_store = ray.put((config, feats_to_filter, samples_store_id, raw_feature_matrix_store_id, distance_map))
 
         cv_repeat_scores = []
         cv_repeat_first_scores = []
@@ -1010,6 +1015,7 @@ def trainForest(
                             feats_to_filter,
                             samples=samples,
                             samples_store_id=samples_store_id,
+                            raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                             distance_map=distance_map,
                             print_out=print_out,
                             cv_counter=cv_counter,

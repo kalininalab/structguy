@@ -151,11 +151,12 @@ def init_para_eval_store(
         cv_obj: DataSAIL_cv,
         parameters: list[Parameter],
         samples_store_id: ray.ObjectRef | None,
+        raw_feature_matrix_store_id: ray.ObjectRef | None,
         best_first_scores: util.Scores,
         samples: SampleSpace,
     ):
 
-    store = ray.put((config, cv_obj, parameters, samples_store_id, best_first_scores, samples.feat_corr_matrix, samples.feature_names))
+    store = ray.put((config, cv_obj, parameters, samples_store_id, raw_feature_matrix_store_id, best_first_scores, samples.feat_corr_matrix, samples.feature_names))
 
     return store
 
@@ -170,6 +171,7 @@ def bayes_random_init(
     distance_map,
     samples: SampleSpace | None =None,
     samples_store_id: ray.ObjectRef | None =None,
+    raw_feature_matrix_store_id: ray.ObjectRef | None =None,
     fix_cat=True,
     debug=False,
     store_params = False
@@ -215,7 +217,7 @@ def bayes_random_init(
     config.logger.info(f"Objective score: {best_scores.objective_value(config)}")
 
     if config.multi_gpu > 1:
-        store = init_para_eval_store(config, initial_cv_obj, parameters, samples_store_id, best_first_scores, samples)
+        store = init_para_eval_store(config, initial_cv_obj, parameters, samples_store_id, raw_feature_matrix_store_id, best_first_scores, samples)
         return x_list, y_list, bounds, n_params, best_scores, best_first_scores, best_params, initial_values, new_optimimum, len(fix_parameters_pos), param_names, integer_type_params, initial_cv_obj, store
     else:
         para_random_init = False
@@ -236,7 +238,7 @@ def bayes_random_init(
         if debug:
             config.logger.info(f"Init params: {init_params}")
 
-        store = init_para_eval_store(config, initial_cv_obj, parameters, samples_store_id, best_first_scores, samples)
+        store = init_para_eval_store(config, initial_cv_obj, parameters, samples_store_id, raw_feature_matrix_store_id, best_first_scores, samples)
 
         config.logger.info(f"after store init, samples is None: {samples is None}")
 
@@ -301,6 +303,7 @@ def bayes_random_init(
                     samples.feature_names,
                     samples=samples,
                     samples_store_id=samples_store_id,
+                    raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                     get_first_scores=True,
                     cv_interuption=(0.95, best_first_scores),
                     gpu_share=gpu_share
@@ -405,7 +408,8 @@ def bayesian_optimisation(
     best_first_scores: util.Scores,
     distance_map,
     samples: SampleSpace | None =None,
-    samples_store_id: ray.ObjectID | None =None,
+    samples_store_id: ray.ObjectRef | None =None,
+    raw_feature_matrix_store_id: ray.ObjectRef | None =None,
     n_pre_samples: int =5,
     gp_params=None,
     random_search=False,
@@ -458,6 +462,7 @@ def bayesian_optimisation(
         distance_map,
         samples=samples,
         samples_store_id=samples_store_id,
+        raw_feature_matrix_store_id=raw_feature_matrix_store_id,
         fix_cat=False,
         debug=debug,
         store_params = store_params
@@ -571,6 +576,7 @@ def bayesian_optimisation(
                 samples.feature_names,
                 samples=samples,
                 samples_store_id=samples_store_id,
+                raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                 debug=debug,
                 get_first_scores=True,
                 cv_interuption=(0.95, best_first_scores)
@@ -636,7 +642,7 @@ def bayesian_optimisation(
 
     else:
         remote_processes = []
-        threads_per_gpu = 0.5
+        threads_per_gpu = 1
         para_number = min([config.proc_n , max([1,config.proc_n // (config.multi_gpu * threads_per_gpu)])])
         
         current_params_id = 0
@@ -845,6 +851,7 @@ def twoDim(
         distance_map,
         samples=None,
         samples_store_id=None,
+        raw_feature_matrix_store_id=None,
         debug=False):
     cat_count = 0
     for p_type in [parameter_1.param_type, parameter_2.param_type]:
@@ -867,6 +874,7 @@ def twoDim(
                 distance_map,
                 samples=samples,
                 samples_store_id=samples_store_id,
+                raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                 debug=debug)
         elif parameter_2.param_type == "categorical":
             return bayesianAndCat(
@@ -880,6 +888,7 @@ def twoDim(
                 distance_map,
                 samples=samples,
                 samples_store_id=samples_store_id,
+                raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                 debug=debug)
 
     return bayesian_optimisation(
@@ -893,6 +902,7 @@ def twoDim(
         n_pre_samples=None,
         samples=samples,
         samples_store_id=samples_store_id,
+        raw_feature_matrix_store_id=raw_feature_matrix_store_id,
         debug=debug
     )
 
@@ -909,6 +919,7 @@ def threeDim(
         distance_map,
         samples=None,
         samples_store_id=None,
+        raw_feature_matrix_store_id=None,
         debug=False
         ):
     cat_count = 0
@@ -928,7 +939,8 @@ def threeDim(
             cv_obj,
             distance_map,
             samples=samples,
-            samples_store_id=samples_store_id
+            samples_store_id=samples_store_id,
+            raw_feature_matrix_store_id=raw_feature_matrix_store_id
         )
 
     if cat_count == 2:
@@ -947,6 +959,7 @@ def threeDim(
                 distance_map,
                 samples=samples,
                 samples_store_id=samples_store_id,
+                raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                 debug=debug,
             )
         elif parameter_2.param_type == "categorical":
@@ -961,6 +974,7 @@ def threeDim(
                 distance_map,
                 samples=samples,
                 samples_store_id=samples_store_id,
+                raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                 debug=debug,
             )
         elif parameter_3.param_type == "categorical":
@@ -975,6 +989,7 @@ def threeDim(
                 distance_map,
                 samples=samples,
                 samples_store_id=samples_store_id,
+                raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                 debug=debug,
             )
 
@@ -989,6 +1004,7 @@ def threeDim(
         n_pre_samples=None,
         samples=samples,
         samples_store_id=samples_store_id,
+        raw_feature_matrix_store_id=raw_feature_matrix_store_id,
         debug=debug,
     )
 
@@ -1005,6 +1021,7 @@ def bayesianAndCat(
         samples=None,
         debug=False,
         samples_store_id=None,
+        raw_feature_matrix_store_id=None,
         ):
     config.logger.info(f"bayesian optimization and Cat {parameter_1.name}")
 
@@ -1029,6 +1046,7 @@ def bayesianAndCat(
             n_pre_samples=None,
             samples=samples,
             samples_store_id=samples_store_id,
+            raw_feature_matrix_store_id=raw_feature_matrix_store_id,
             debug=debug,
         )
 
@@ -1048,7 +1066,7 @@ def bayesianAndCat(
     return new_optimimum, best_scores, first_scores, cv_obj
 
 
-def cat3D(parameter_1, parameter_2, parameter_3, best_scores, config, score_matrix, cv_obj, distance_map, samples=None, samples_store_id=None):
+def cat3D(parameter_1, parameter_2, parameter_3, best_scores, config, score_matrix, cv_obj, distance_map, samples=None, samples_store_id=None, raw_feature_matrix_store_id=None):
     # Todo when we get at least 3 categorical features
     return
 
@@ -1061,6 +1079,7 @@ def get_scores(
         feature_names,
         samples=None,
         samples_store_id=None,
+        raw_feature_matrix_store_id=None,
         remote=True,
         para_number=None,
         debug=False,
@@ -1080,6 +1099,7 @@ def get_scores(
         feature_names,
         samples=samples,
         samples_store_id=samples_store_id,
+        raw_feature_matrix_store_id=raw_feature_matrix_store_id,
         distance_map=distance_map,
         repeat=config.repeat_training,
         cv_repeat=config.cv_hpo,
@@ -1101,7 +1121,7 @@ def get_scores(
 
 @ray.remote
 def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_share):
-    (config, cv_obj, parameters, samples_store_id, best_first_scores, feat_corr_matrix, feature_names) = store
+    (config, cv_obj, parameters, samples_store_id, raw_feature_matrix_store_id, best_first_scores, feat_corr_matrix, feature_names) = store
     
     util.reset_logger_for_remotes(config)
     if config.verbosity >= 2:
@@ -1125,6 +1145,7 @@ def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_share)
             feat_corr_matrix,
             feature_names,
             samples_store_id=samples_store_id,
+            raw_feature_matrix_store_id=raw_feature_matrix_store_id,
             remote=True,
             para_number=para_number,
             get_first_scores=True,
@@ -1302,6 +1323,7 @@ def threeDimHyperOptimization(
     first_scores: util.Scores,
     samples: SampleSpace | None =None,
     samples_store_id: ray.ObjectRef | None =None,
+    raw_feature_matrix_store_id: ray.ObjectRef | None =None,
     distance_map=None,
     debug=False
 ):
@@ -1337,6 +1359,7 @@ def threeDimHyperOptimization(
                         distance_map,
                         samples=samples,
                         samples_store_id=samples_store_id,
+                        raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                         debug=debug,
                     )
                     if new_opti:
@@ -1353,6 +1376,7 @@ def threeDimHyperOptimization(
                     distance_map,
                     samples=samples,
                     samples_store_id=samples_store_id,
+                    raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                     n_pre_samples=None,
                     debug=debug,
                 )
@@ -1382,6 +1406,7 @@ def threeDimHyperOptimization(
                         distance_map,
                         samples=samples,
                         samples_store_id=samples_store_id,
+                        raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                         n_pre_samples=None,
                         debug=debug,
                     )
@@ -1402,6 +1427,7 @@ def threeDimHyperOptimization(
                         distance_map,
                         samples=samples,
                         samples_store_id=samples_store_id,
+                        raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                         debug=debug,
                     )
                     if new_opti:
@@ -1419,6 +1445,7 @@ def threeDimHyperOptimization(
                         distance_map,
                         samples=samples,
                         samples_store_id=samples_store_id,
+                        raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                         debug=debug,
                     )
                     if new_opti:
@@ -1443,6 +1470,7 @@ def threeDimHyperOptimization(
                         distance_map,
                         samples=samples,
                         samples_store_id=samples_store_id,
+                        raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                         n_pre_samples=None,
                         debug=debug,
                     )
@@ -1460,6 +1488,7 @@ def threeDimHyperOptimization(
                     distance_map,
                     samples=samples,
                     samples_store_id=samples_store_id,
+                    raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                     n_pre_samples=None,
                     debug=debug,
                 )
@@ -1475,6 +1504,7 @@ def threeDimHyperOptimization(
                     first_scores,
                     samples,
                     samples_store_id,
+                    raw_feature_matrix_store_id,
                     distance_map = distance_map)
 
                 converged, best_scores, first_scores, cv_obj = SDTree.ascend()
@@ -1496,6 +1526,7 @@ def bayesianComplete(
     best_scores: util.Scores,
     samples=None,
     samples_store_id=None,
+    raw_feature_matrix_store_id=None,
     distance_map=None,
     debug=False
     ):
@@ -1511,6 +1542,7 @@ def bayesianComplete(
         distance_map,
         samples=samples,
         samples_store_id=samples_store_id,
+        raw_feature_matrix_store_id=raw_feature_matrix_store_id,
         n_pre_samples=100,
         debug=debug,
         store_params = True
@@ -1550,6 +1582,7 @@ class SubdimensionNode:
                 self.tree.distance_map,
                 samples=self.tree.samples,
                 samples_store_id=self.tree.samples_store_id,
+                raw_feature_matrix_store_id=self.tree.raw_feature_matrix_store_id,
                 n_pre_samples=None,
                 get_bayes_tuple=True
             )
@@ -1592,6 +1625,7 @@ class SubdimensionNode:
                 self.tree.distance_map,
                 samples=self.tree.samples,
                 samples_store_id=self.tree.samples_store_id,
+                raw_feature_matrix_store_id=self.tree.raw_feature_matrix_store_id,
                 n_pre_samples=None,
                 get_bayes_tuple=True,
                 bayes_tuple = (combined_x, combined_y)
@@ -1614,6 +1648,7 @@ class SubdimensionTree:
             first_scores: util.Scores,
             samples,
             samples_store_id,
+            raw_feature_matrix_store_id,
             distance_map = None
             ):
         self.parameters = parameters
@@ -1623,6 +1658,7 @@ class SubdimensionTree:
         self.first_scores = first_scores
         self.samples = samples
         self.samples_store_id = samples_store_id
+        self.raw_feature_matrix_store_id = raw_feature_matrix_store_id
         self.distance_map = distance_map
         random.shuffle(param_names)
         self.root = SubdimensionNode(param_names, None, self)

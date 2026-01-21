@@ -8,7 +8,7 @@ import xgboost as xgb
 from scipy import stats
 
 from structguy import dicts
-from structguy.sanity_util import sanity_check_value_list
+from structguy.class_utils import get_feat_matrix_from_ids
 
 from structman.lib.sdsc.sdsc_utils import Slotted_obj
 
@@ -1058,7 +1058,9 @@ class CrossValidationSlice(Slotted_obj):
         return int_data
     
     def get_test_feature_matrix(self, samples):
-        feat_matrix = samples.get_feat_matrix_from_ids(self.test_sample_ids, self.feature_names)
+        feat_matrix = get_feat_matrix_from_ids(
+            samples.feat_pos_dict, samples.features, samples.sample_pos_dict, samples.raw_feature_matrix,
+            self.test_sample_ids, self.feature_names)
         return feat_matrix
     
     def get_encoded_test_prot_vec(self):
@@ -1075,8 +1077,10 @@ class CrossValidationSlice(Slotted_obj):
 
         return self.test_prot_vec
 
-    def get_dtest(self, samples):
-        feat_matrix, cat_vec = samples.get_feat_matrix_from_ids(self.test_sample_ids, self.feature_names, get_cat_vec=True)
+    def get_dtest(self, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix):
+        feat_matrix, cat_vec = get_feat_matrix_from_ids(
+            feat_pos_dict, features, sample_pos_dict, raw_feature_matrix,
+            self.test_sample_ids, self.feature_names, get_cat_vec=True)
         encoded_prot_vec = self.get_encoded_test_prot_vec()
         print(f'{len(self.test_sample_ids)=} {len(self.test_targets)=} {len(encoded_prot_vec)=} {numpy.array(feat_matrix).shape=} {len(self.feature_names)=}')
         dtest_feature_matrix = xgb.DMatrix(
@@ -1096,30 +1100,38 @@ class CrossValidationSlice(Slotted_obj):
         self.sub_sampled_train_targets = [self.train_targets[pos] for pos in sub_sampled_ids]
         self.sub_sampled_train_class_weight_vector = [self.train_class_weight_vector[pos] for pos in sub_sampled_ids]
 
-    def get_train_feature_matrix(self, samples, sub_sampling = 1.0, get_cat_vec=False) -> list[list[int | float | None]]:
+    def get_train_feature_matrix(self, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling = 1.0, get_cat_vec=False) -> list[list[int | float | None]]:
         if len(self.train_sample_ids) == 0:
             raise ValueError(f'No training samples in get_train_feature_matrix: {self.train_sample_ids=}')
         if len(self.feature_names) == 0:
             raise ValueError(f'No features in get_train_feature_matrix: {self.feature_names=}')
         if sub_sampling == 1.0:
             if get_cat_vec:
-                feat_matrix, cat_vec = samples.get_feat_matrix_from_ids(self.train_sample_ids, self.feature_names, get_cat_vec=get_cat_vec)
+                feat_matrix, cat_vec = get_feat_matrix_from_ids(
+                    feat_pos_dict, features, sample_pos_dict, raw_feature_matrix,
+                    self.train_sample_ids, self.feature_names, get_cat_vec=get_cat_vec)
             else:
-                feat_matrix: list[list[int | float | None]] = samples.get_feat_matrix_from_ids(self.train_sample_ids, self.feature_names, get_cat_vec=get_cat_vec)
+                feat_matrix: list[list[int | float | None]] = get_feat_matrix_from_ids(
+                    feat_pos_dict, features, sample_pos_dict, raw_feature_matrix,
+                    self.train_sample_ids, self.feature_names, get_cat_vec=get_cat_vec)
         else:
             if self.sub_sampled_train_ids is None:
                 self.set_sub_sampled_train_ids(sub_sampling)
             if get_cat_vec:
-                feat_matrix, cat_vec = samples.get_feat_matrix_from_ids(self.sub_sampled_train_ids, self.feature_names, get_cat_vec=get_cat_vec)
+                feat_matrix, cat_vec = get_feat_matrix_from_ids(
+                    feat_pos_dict, features, sample_pos_dict, raw_feature_matrix,
+                    self.sub_sampled_train_ids, self.feature_names, get_cat_vec=get_cat_vec)
             else:
-                feat_matrix: list[list[int | float | None]] = samples.get_feat_matrix_from_ids(self.sub_sampled_train_ids, self.feature_names, get_cat_vec=get_cat_vec)
+                feat_matrix: list[list[int | float | None]] = get_feat_matrix_from_ids(
+                    feat_pos_dict, features, sample_pos_dict, raw_feature_matrix,
+                    self.sub_sampled_train_ids, self.feature_names, get_cat_vec=get_cat_vec)
         if get_cat_vec:
             return feat_matrix, cat_vec
         return feat_matrix
     
-    def get_dtrain(self, samples, sub_sampling = 1.0) -> list[list[int | float | None]]:
+    def get_dtrain(self, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling = 1.0) -> list[list[int | float | None]]:
         train_feature_matrix: list[list[int | float | None]]
-        train_feature_matrix, cat_vec = self.get_train_feature_matrix(samples, sub_sampling=sub_sampling, get_cat_vec=True)
+        train_feature_matrix, cat_vec = self.get_train_feature_matrix(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=sub_sampling, get_cat_vec=True)
         if sub_sampling == 1.0:
             train_targets = self.train_targets
         else:
@@ -1150,6 +1162,8 @@ class CrossValidationSlice(Slotted_obj):
             test_pred_pairs[prot_id][0].append(self.test_sample_ids[sample_nr])
 
         for prot_id in test_pred_pairs:
-            feat_matrix = samples.get_feat_matrix_from_ids(test_pred_pairs[prot_id][0], self.feature_names)
+            feat_matrix = get_feat_matrix_from_ids(
+                samples.feat_pos_dict, samples.features, samples.sample_pos_dict, samples.raw_feature_matrix,
+                test_pred_pairs[prot_id][0], self.feature_names)
             test_pred_pairs[prot_id][0] = feat_matrix
         return test_pred_pairs

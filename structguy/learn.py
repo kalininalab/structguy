@@ -170,6 +170,7 @@ def learn(config: Config):
 
     if not config.skip_cv:
         samples_store_id = ray.put(pack(samples))
+        raw_feature_matrix_store_id = ray.put((samples.feat_pos_dict, samples.features, samples.sample_pos_dict, samples.raw_feature_matrix))
 
         if crossValidation == "LOPO":
             cross_val_obj = sampleSpace.LOPO(samples, config)
@@ -202,6 +203,7 @@ def learn(config: Config):
                 initial_training_input,
                 samples.feat_corr_matrix, samples.feature_names,
                 samples_store_id=samples_store_id,
+                raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                 samples=samples,
                 distance_map=distance_map,
                 repeat=config.repeat_training,
@@ -216,6 +218,7 @@ def learn(config: Config):
                 scores,
                 samples=samples,
                 samples_store_id=samples_store_id,
+                raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                 distance_map=distance_map,
                 debug=debug,
             )
@@ -229,6 +232,7 @@ def learn(config: Config):
                 initial_training_input,
                 samples.feat_corr_matrix, samples.feature_names,
                 samples_store_id=samples_store_id,
+                raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                 samples=samples,
                 repeat=config.repeat_training,
                 cv_repeat=config.cv_hpo,
@@ -246,6 +250,7 @@ def learn(config: Config):
                 first_scores,
                 samples=samples,
                 samples_store_id=samples_store_id,
+                raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                 distance_map=distance_map,
                 debug=debug,
             )
@@ -256,6 +261,7 @@ def learn(config: Config):
                     initial_training_input,
                     samples.feat_corr_matrix, samples.feature_names,
                     samples_store_id=samples_store_id,
+                    raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                     samples=samples,
                     distance_map=distance_map,
                     repeat=config.repeat_training,
@@ -309,6 +315,7 @@ def learn(config: Config):
                 samples.feature_names,
                 samples=samples,
                 samples_store_id=samples_store_id,
+                raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                 distance_map=distance_map,
                 repeat=config.repeat_training,
                 print_out=print_out,
@@ -479,6 +486,7 @@ def learn(config: Config):
             samples,
             samples_store_id,
             config,
+            raw_feature_matrix_store_id,
             internal_cv=cross_val_obj,
             outfile=modelfile,
             filtered_features_file=filtered_features_file,
@@ -1168,7 +1176,7 @@ def loadCV(fn):
     return forests, cross_val_object, config
 
 
-def buildFinalModel(samples, samples_store_id, config, internal_cv=None, outfile=None, filtered_features_file=None):
+def buildFinalModel(samples, samples_store_id, config, raw_feature_matrix_store_id, internal_cv=None, outfile=None, filtered_features_file=None):
     # Some feature selection strategies require an internal cross validation-like slicing
     # An example is the confusion-based feature section
 
@@ -1196,6 +1204,7 @@ def buildFinalModel(samples, samples_store_id, config, internal_cv=None, outfile
         samples.feature_names,
         samples=samples,
         samples_store_id=samples_store_id,
+        raw_feature_matrix_store_id=raw_feature_matrix_store_id,
         distance_map=samples.geometric_distance_map,
         print_out=print_out,
         skip_scoring=True,

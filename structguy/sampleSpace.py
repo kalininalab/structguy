@@ -18,6 +18,7 @@ from structguy.sequence_util import parseFromFasta
 from structguy.support_classes import CrossValidationSlice, Feature
 from structguy.util import median
 from structguy.prefiltering import detectBiasedFeaturesByMeanCorrelation
+from structguy.class_utils import get_feat_matrix_from_ids, get_feat_matrix
 
 from structman.base_utils.base_utils import pack, unpack
 from structman.lib.sdsc.sdsc_utils import Slotted_obj
@@ -391,7 +392,13 @@ class SampleSpace(Slotted_obj):
 
     def calc_subsamples_feat_corr_matrix(self, config, n_of_subsamples = 50_000) -> list[list[tuple[float, float, float, float, float, float, float]]]:
         subsamples = self.draw_subsamples(n_of_subsamples=n_of_subsamples)
-        feat_matrix = np.array(self.get_feat_matrix_from_ids(subsamples, self.feature_names))#, dtype=float)
+        feat_matrix = np.array(get_feat_matrix_from_ids(
+            self.feat_pos_dict,
+            self.features,
+            self. sample_pos_dict,
+            self.raw_feature_matrix,
+            subsamples,
+            self.feature_names))#, dtype=float)
         #feat_matrix = np.nan_to_num(feat_matrix, nan=-1_000_000)
         feat_matrix = feat_matrix.transpose()
         feats_per_process = len(self.feature_names) // config.proc_n
@@ -775,6 +782,7 @@ class SampleSpace(Slotted_obj):
                     self.raw_feature_matrix[sample_pos].append(self.feature_matrix_dict[sample_id][feat_name])
                 except KeyError:
                     self.raw_feature_matrix[sample_pos].append(0.)
+        self.raw_feature_matrix = np.array(self.raw_feature_matrix)
         self.feature_matrix_dict = None
 
 
@@ -795,24 +803,6 @@ class SampleSpace(Slotted_obj):
             feature_value_vector.append(self.raw_feature_matrix[sample_pos][feature_id])
 
         return feature_value_vector
-
-
-    def get_feat_matrix(self, feat_id_vec, sample_pos_vec) -> list[list[int | float | None]]:
-        feat_matrix: list[list[int | float| None]] = []
-        for sample_pos in sample_pos_vec:
-            feat_vec = []
-            for feat_id in feat_id_vec:
-                if feat_id == -1:
-                    feat_vec.append(0)
-                    continue
-                try:
-                    feat_vec.append(self.raw_feature_matrix[sample_pos][feat_id])
-                except KeyError:
-                    feat_vec.append(None)
-                except TypeError:
-                    feat_vec.append(None)
-            feat_matrix.append(feat_vec)
-        return feat_matrix
 
     def get_feat_matrix_from_feat_names(self, feat_names : list[str], config, get_feat_id_dict = False):
         feat_id_vec = []
@@ -835,37 +825,8 @@ class SampleSpace(Slotted_obj):
 
         sample_pos_vec = list(range(len(self.raw_feature_matrix)))
         if get_feat_id_dict:
-            return self.get_feat_matrix(feat_id_vec, sample_pos_vec), feat_id_vec, feat_id_dict
-        return self.get_feat_matrix(feat_id_vec, sample_pos_vec), feat_id_vec
-    
-    def get_feat_matrix_from_ids(
-            self,
-            sample_ids: list[str],
-            feat_names: list[str],
-            get_cat_vec = False
-            )-> list[list[int | float | None]]:
-        if len(feat_names) == 0:
-            raise ValueError(f'{len(feat_names)=}')
-        if get_cat_vec:
-            cat_vec = []
-        feat_id_vec = []
-        for feat_name in feat_names:
-            feat_id_vec.append(self.feat_pos_dict[feat_name])
-            if get_cat_vec:
-                if self.features[feat_name].f_type == 'categorical':
-                    cat_vec.append('c')
-                else:
-                    cat_vec.append('q')
-
-        sample_pos_vec = []
-        for sample_id in sample_ids:
-            try:
-                sample_pos_vec.append(self.sample_pos_dict[sample_id])
-            except KeyError:
-                sample_pos_vec.append(None)
-        if get_cat_vec:
-            return self.get_feat_matrix(feat_id_vec, sample_pos_vec), cat_vec
-        return self.get_feat_matrix(feat_id_vec, sample_pos_vec)
+            return get_feat_matrix(self.raw_feature_matrix, feat_id_vec, sample_pos_vec), feat_id_vec, feat_id_dict
+        return get_feat_matrix(self.raw_feature_matrix, feat_id_vec, sample_pos_vec), feat_id_vec
 
     def get_skewed_feat_matrices_from_ids(self, sample_ids, feat_names, thresh):
         feat_id_vec = []
@@ -887,7 +848,7 @@ class SampleSpace(Slotted_obj):
                 except KeyError:
                     sample_pos_vec_r.append(None)
 
-        return self.get_feat_matrix(feat_id_vec, sample_pos_vec_l), self.get_feat_matrix(feat_id_vec, sample_pos_vec_r)
+        return get_feat_matrix(self.raw_feature_matrix, feat_id_vec, sample_pos_vec_l), get_feat_matrix(self.raw_feature_matrix, feat_id_vec, sample_pos_vec_r)
 
     def setGeometricDistanceMap(self,config):
         if self.geometric_distance_map is not None and self.current_geometric_exponent == config.geometric_exponent:
@@ -1095,6 +1056,7 @@ class SampleSpace(Slotted_obj):
         if config.confusion_rank_threshold_bounds[-1] == 'max':
             config.confusion_rank_threshold_bounds[-1] = len(self.feature_names) -1
         return
+
 
 cv_slots = ['slices', 'slice_ids', 'cv_counter', 'isSlice', 'slice_slices']
 
