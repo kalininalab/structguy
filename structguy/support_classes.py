@@ -1077,18 +1077,19 @@ class CrossValidationSlice(Slotted_obj):
 
         return self.test_prot_vec
 
-    def get_dtest(self, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix):
+    def get_dtest(self, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, dtrain):
         feat_matrix, cat_vec = get_feat_matrix_from_ids(
             feat_pos_dict, features, sample_pos_dict, raw_feature_matrix,
             self.test_sample_ids, self.feature_names, get_cat_vec=True)
         encoded_prot_vec = self.get_encoded_test_prot_vec()
         print(f'{len(self.test_sample_ids)=} {len(self.test_targets)=} {len(encoded_prot_vec)=} {numpy.array(feat_matrix).shape=} {len(self.feature_names)=}')
-        dtest_feature_matrix = xgb.DMatrix(
+        dtest_feature_matrix = xgb.QuantileDMatrix(
             numpy.array(feat_matrix),
             label=numpy.array(self.test_targets),
             feature_types=cat_vec,
             enable_categorical=True,
-            feature_names = self.feature_names)
+            feature_names = self.feature_names,
+            ref=dtrain)
         dtest_feature_matrix.encoded_prot_vec = encoded_prot_vec
         return dtest_feature_matrix
 
@@ -1140,7 +1141,7 @@ class CrossValidationSlice(Slotted_obj):
         #for pos, feat_name in enumerate(self.feature_names):
         #    print(f'{feat_name=}, {cat_vec[pos]=}')
 
-        dtrain: xgb.DMatrix = xgb.DMatrix(
+        dtrain: xgb.DMatrix = xgb.QuantileDMatrix(
             numpy.array(train_feature_matrix),
             label= numpy.array(train_targets),
             feature_names = self.feature_names,

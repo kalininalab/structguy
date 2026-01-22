@@ -380,7 +380,7 @@ def double_booster_remote(packed_slice_slice, store, proc_id: int):
     with FileLock(lock_file):
         feat_pos_dict, features, sample_pos_dict, raw_feature_matrix = ray.get(raw_feature_matrix_store_id)
         dtrain = slice_slice.get_dtrain(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=config.sub_sample_factor)
-        dtest_feature_matrix = slice_slice.get_dtest(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix)
+        dtest_feature_matrix = slice_slice.get_dtest(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, dtrain)
         del feat_pos_dict
         del features
         del sample_pos_dict
@@ -424,7 +424,7 @@ def double_booster_remote(packed_slice_slice, store, proc_id: int):
     with FileLock(lock_file):
         feat_pos_dict, features, sample_pos_dict, raw_feature_matrix = ray.get(raw_feature_matrix_store_id)
         dtrain = slice_slice.get_dtrain(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=config.sub_sample_factor)
-        dtest_feature_matrix = slice_slice.get_dtest(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix)
+        dtest_feature_matrix = slice_slice.get_dtest(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, dtrain)
         del feat_pos_dict
         del features
         del sample_pos_dict
@@ -451,7 +451,7 @@ def double_booster_remote(packed_slice_slice, store, proc_id: int):
         with FileLock(lock_file):
             feat_pos_dict, features, sample_pos_dict, raw_feature_matrix = ray.get(raw_feature_matrix_store_id)
             dtrain_feature_matrix = cv_slice.get_dtrain(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=config.sub_sample_factor)
-            dtest_feature_matrix = cv_slice.get_dtest(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix)
+            dtest_feature_matrix = cv_slice.get_dtest(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, dtrain_feature_matrix)
             del feat_pos_dict
             del features
             del sample_pos_dict
@@ -461,7 +461,7 @@ def double_booster_remote(packed_slice_slice, store, proc_id: int):
     else:
         with FileLock(lock_file):
             feat_pos_dict, features, sample_pos_dict, raw_feature_matrix = ray.get(raw_feature_matrix_store_id)
-            dtest_feature_matrix = cv_slice.get_dtest(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix)
+            dtest_feature_matrix = cv_slice.get_dtest(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, dtrain)
             del feat_pos_dict
             del features
             del sample_pos_dict
@@ -698,7 +698,7 @@ def trainRegressionForest(
                 slice_slice = unpack(ray.get(stored_slice_slice))
                 dtrain = slice_slice.get_dtrain(samples.feat_pos_dict, samples.features, samples.sample_pos_dict, samples.raw_feature_matrix, sub_sampling=config.sub_sample_factor)
                 
-                dtest_feature_matrix = slice_slice.get_dtest(samples.feat_pos_dict, samples.features, samples.sample_pos_dict, samples.raw_feature_matrix)
+                dtest_feature_matrix = slice_slice.get_dtest(samples.feat_pos_dict, samples.features, samples.sample_pos_dict, samples.raw_feature_matrix, dtrain)
 
                 ta = add_to_times(times, ta) #6
 
