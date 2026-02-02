@@ -116,7 +116,7 @@ def shap_internal_loop(
     return acc_feat_impacts
 
 def shap_analysis(config, forest, d_feat_vecs: xgb.DMatrix, feature_names, prediction_vector, target_vector):
-    if config.verbosity >= 2:
+    if config.verbosity >= 3:
         config.logger.info(f'Call of shap_analysis: {config.gpu_mode=}')
     
     times = []
