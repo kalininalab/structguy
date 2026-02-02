@@ -166,11 +166,10 @@ def learn(config: Config):
         distance_map = None
 
     out_value = None
-    samples_store_id = None
-
+    samples_store_id = ray.put(pack(samples))
+    raw_feature_matrix_store_id = ray.put((samples.feat_pos_dict, samples.features, samples.sample_pos_dict, samples.raw_feature_matrix))
+    
     if not config.skip_cv:
-        samples_store_id = ray.put(pack(samples))
-        raw_feature_matrix_store_id = ray.put((samples.feat_pos_dict, samples.features, samples.sample_pos_dict, samples.raw_feature_matrix))
 
         if crossValidation == "LOPO":
             cross_val_obj = sampleSpace.LOPO(samples, config)
@@ -856,7 +855,7 @@ def evaluate_dataset(config: Config):
             combined_y_pred = y_pred
             combined_test_targets = test_targets
 
-        if isinstance(forest, RandomForestRegressor):
+        if isinstance(booster_list[0], RandomForestRegressor):
             header = "Protein ID\tSAV\tPredicted effect value\tTree-wise standard deviation\tFeature 1\tFeature 2\t Feature 3\t Feature 4\t Feature 5\n"
             lines = [header]
 

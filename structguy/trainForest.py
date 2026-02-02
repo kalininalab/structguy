@@ -370,7 +370,10 @@ def double_booster_remote(packed_slice_slice, store, proc_id: int):
     times = []
     ta = time.time()
 
-    slice_slice = unpack(packed_slice_slice)
+    if isinstance(packed_slice_slice, CrossValidationSlice):
+        slice_slice = packed_slice_slice
+    else:
+        slice_slice = unpack(packed_slice_slice)
     ta = add_to_times(times, ta)
     slice_slice.filterFeatures(filtered_features)
     ta = add_to_times(times, ta)
