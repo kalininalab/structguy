@@ -642,7 +642,7 @@ def bayesian_optimisation(
 
     else:
         remote_processes = []
-        threads_per_gpu = 1
+        threads_per_gpu = 4
         para_number = min([config.proc_n , max([1,config.proc_n // (config.multi_gpu * threads_per_gpu)])])
         
         current_params_id = 0
@@ -1278,22 +1278,22 @@ def initParameters(
             parameters["tree_depth"] = Parameter("tree_depth", "integer", half_step_limits=[1,31])
             parameters["num_of_trees"] = Parameter("num_of_trees", "integer", half_step_limits=[10,10_000])
             parameters["max_cat_to_onehot"] = Parameter("max_cat_to_onehot", "integer", half_step_limits=[1,500])
-            parameters["max_cat_threshold"] = Parameter("max_cat_threshold", "integer", half_step_limits=[1,100])
+            parameters["max_cat_threshold"] = Parameter("max_cat_threshold", "integer", half_step_limits=[1,500])
 
             parameters["max_sample_parameter_1"] = Parameter("max_sample_parameter_1", "real", half_step_limits=config.max_sample_half_step)
             parameters["early_stopping_1"] = Parameter("early_stopping_1", "integer", half_step_limits=[1, 1000])
-            parameters["min_child_weight_1"] = Parameter("min_child_weight_1", "real", half_step_limits=[0., 100.])
+            parameters["min_child_weight_1"] = Parameter("min_child_weight_1", "real", half_step_limits=[0., 500.])
             parameters["xgb_gamma_1"] = Parameter("xgb_gamma_1", "real", half_step_limits=[0.,10.])
             parameters["xgb_alpha_1"] = Parameter("xgb_alpha_1", "real", half_step_limits=[0.,5.])
             parameters["xgb_lambda_1"] = Parameter("xgb_lambda_1", "real", half_step_limits=[0.,5.])
             parameters["colsample_bytree_1"] = Parameter("colsample_bytree_1", "real", half_step_limits=[0.,1.])
             parameters["colsample_bylevel_1"] = Parameter("colsample_bylevel_1", "real", half_step_limits=[0.,1.])
             parameters["colsample_bynode_1"] = Parameter("colsample_bynode_1", "real", half_step_limits=[0.,1.])
-            parameters["max_delta_step_1"] = Parameter("max_delta_step_1", "real", half_step_limits=[0.,50.])
+            parameters["max_delta_step_1"] = Parameter("max_delta_step_1", "real", half_step_limits=[0.,200.])
             parameters["tree_depth_1"] = Parameter("tree_depth_1", "integer_1", half_step_limits=[1,31])
             parameters["num_of_trees_1"] = Parameter("num_of_trees_1", "integer_1", half_step_limits=[10,10_000])
             parameters["max_cat_to_onehot_1"] = Parameter("max_cat_to_onehot_1", "integer", half_step_limits=[1,500])
-            parameters["max_cat_threshold_1"] = Parameter("max_cat_threshold_1", "integer", half_step_limits=[1,100])
+            parameters["max_cat_threshold_1"] = Parameter("max_cat_threshold_1", "integer", half_step_limits=[1,500])
 
         if not config.regression:
             parameters["criterion"] = Parameter("criterion", "categorical", possible_values=config.criteria, classification_specific=True)
