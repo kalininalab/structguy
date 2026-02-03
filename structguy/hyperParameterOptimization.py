@@ -216,7 +216,7 @@ def bayes_random_init(
     best_first_scores.printOut(config=config)
     config.logger.info(f"Objective score: {best_scores.objective_value(config)}")
 
-    if config.multi_gpu > 1:
+    if config.multi_gpu > 0:
         store = init_para_eval_store(config, initial_cv_obj, parameters, samples_store_id, raw_feature_matrix_store_id, best_first_scores, samples)
         return x_list, y_list, bounds, n_params, best_scores, best_first_scores, best_params, initial_values, new_optimimum, len(fix_parameters_pos), param_names, integer_type_params, initial_cv_obj, store
     else:
@@ -642,7 +642,7 @@ def bayesian_optimisation(
 
     else:
         remote_processes = []
-        threads_per_gpu = 4
+        threads_per_gpu = config.threads_per_gpu
         para_number = min([config.proc_n , max([1,config.proc_n // (config.multi_gpu * threads_per_gpu)])])
         
         current_params_id = 0

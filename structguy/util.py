@@ -111,6 +111,7 @@ class Config:
                 self.mmseqs_search_db_ref90 = f'{arg}/uniref90_search_db'
 
         self.mmseqs_tmp_folder = ''
+        self.tmp_folder = None
 
         self.msa_db = ''
 
@@ -325,6 +326,8 @@ class Config:
 
             elif opt == 'mmseqs_tmp_folder':
                 self.mmseqs_tmp_folder = arg
+            elif opt == 'tmp_folder':
+                self.tmp_folder = arg
 
             elif opt == 'mmseqs_search_db_ref50':
                 self.mmseqs_search_db_ref50 = arg

@@ -129,6 +129,7 @@ class Iterator(xgb.DataIter):
 
         self._file_paths = file_paths
         self._it = 0
+        self._ext_dat = None
         # XGBoost will generate some cache files under the current directory with the
         # prefix "cache"
         super().__init__(cache_prefix=os.path.join(".", "cache"))
@@ -149,8 +150,12 @@ class Iterator(xgb.DataIter):
 
         assert X.shape[0] == y.shape[0]
 
-        with open(ext_path, 'rb') as inp:
-            feat_names, cat_vec = pickle.load(inp)
+        if self._ext_dat is None:
+            with open(ext_path, 'rb') as inp:
+                feat_names, cat_vec = pickle.load(inp)
+            self._ext_dat = feat_names, cat_vec
+        else:
+            feat_names, cat_vec = self._ext_dat
 
         return X, y, feat_names, cat_vec
 
@@ -1172,14 +1177,16 @@ class CrossValidationSlice(Slotted_obj):
             features,
             sample_pos_dict,
             raw_feature_matrix,
-            dtrain: xgb.DMatrix
+            dtrain: xgb.DMatrix,
+            sub_share: float
             ) -> xgb.ExtMemQuantileDMatrix:
         file_paths, encoded_prot_vec = self.prepare_test_ext_mem_qdmatrix(
             dump_precursor,
             feat_pos_dict,
             features,
             sample_pos_dict,
-            raw_feature_matrix
+            raw_feature_matrix,
+            sub_share
             )
         
         # It's important to use RMM for GPU-based external memory to improve performance.
@@ -1269,6 +1276,7 @@ class CrossValidationSlice(Slotted_obj):
             features,
             sample_pos_dict,
             raw_feature_matrix,
+            sub_share: float,
             sub_sampling: float = 1.0
             ) -> xgb.ExtMemQuantileDMatrix:
         file_paths = self.prepare_ext_mem_qdmatrix(
@@ -1277,6 +1285,7 @@ class CrossValidationSlice(Slotted_obj):
             features,
             sample_pos_dict,
             raw_feature_matrix,
+            sub_share,
             sub_sampling = sub_sampling
             )
         
@@ -1302,6 +1311,7 @@ class CrossValidationSlice(Slotted_obj):
             features,
             sample_pos_dict,
             raw_feature_matrix,
+            sub_share: float,
             sub_sampling: float = 1.0,
             ) -> list[tuple[str, str, str]]:
         train_feature_matrix: list[list[int | float | None]]
@@ -1315,7 +1325,9 @@ class CrossValidationSlice(Slotted_obj):
         file_paths: list[tuple[str, str, str]] = []
 
         gmem = get_gpu_memory()[0]
-        num_of_batches = max([1, int((len(train_feature_matrix)/gmem) * 128)])
+        num_of_batches = max([1, int((len(train_feature_matrix)/(gmem*sub_share)) * 30)])
+
+        print(f'{num_of_batches=} {sub_share=} {len(train_feature_matrix)=}')
 
         batch_size = len(train_feature_matrix) // num_of_batches
         if len(train_feature_matrix) % num_of_batches != 0:
@@ -1349,6 +1361,7 @@ class CrossValidationSlice(Slotted_obj):
             features,
             sample_pos_dict,
             raw_feature_matrix,
+            sub_share
             ) -> list[tuple[str, str, str]]:
         feat_matrix, cat_vec = get_feat_matrix_from_ids(
             feat_pos_dict, features, sample_pos_dict, raw_feature_matrix,
@@ -1358,7 +1371,7 @@ class CrossValidationSlice(Slotted_obj):
         file_paths: list[tuple[str, str, str]] = []
 
         gmem = get_gpu_memory()[0]
-        num_of_batches = max([1, int((len(feat_matrix)/ gmem) * 128)])
+        num_of_batches = max([1, int((len(feat_matrix)/ (gmem*sub_share)) * 30)])
 
         batch_size = len(feat_matrix) // num_of_batches
         if len(feat_matrix) % num_of_batches != 0:

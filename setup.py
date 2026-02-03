@@ -48,9 +48,6 @@ setup(
         "matplotlib==3.10.6",
         'cupy-cuda12x>=12',
         'rmm-cu12==25.12.0'
-        #"dask>=2025.5.0",
-        #"dask-cudf-cu11>=24.6.0",
-        #"dask-cuda"
     ],
 
     package_data = {

@@ -45,7 +45,8 @@ def parse_arguments(argument_start = 2, manual_args = None):
                 'gpu=',
                 'sd',
                 'repeat=',
-                'select_samples'
+                'select_samples',
+                'tpgpu='
             ]
             opts, args = getopt.getopt(argv, "i:n:m:d", long_paras)
 
@@ -89,6 +90,7 @@ def parse_arguments(argument_start = 2, manual_args = None):
     skip_fshpo = False
 
     multi_gpu = 0
+    threads_per_gpu = 4
     repeat = None
 
     for opt, arg in opts:
@@ -173,6 +175,9 @@ def parse_arguments(argument_start = 2, manual_args = None):
         if opt == '--gpu':
             multi_gpu = int(arg)
 
+        if opt == '--tpgpu':
+            threads_per_gpu = int(arg)
+
         if opt == '--repeat':
             repeat = int(arg)
 
@@ -204,6 +209,7 @@ def parse_arguments(argument_start = 2, manual_args = None):
     config.penalize_train_test_gap = penalize_train_test_gap
 
     config.multi_gpu = multi_gpu
+    config.threads_per_gpu = threads_per_gpu
 
     if repeat is not None:
         config.repeat_training = repeat

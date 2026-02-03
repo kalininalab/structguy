@@ -19,7 +19,7 @@ from scipy import stats
 import xgboost as xgb
 from ray.train.xgboost import XGBoostTrainer, RayTrainReportCallback
 
-from filelock import FileLock
+from filelock import FileLock, Timeout
 from structguy import featureSelection, util
 from structman.base_utils.base_utils import pack, unpack, add_to_times, print_times, aggregate_times
 from structguy.support_classes import CrossValidationSlice
@@ -365,8 +365,51 @@ def xgb_train_wrapper(
 
     return forest
 
-@ray.remote
-def double_booster_remote(packed_slice_slice, store, proc_id: str):
+def retrieve_dmatrix(
+        lock_file: str,
+        dump_precursor: str,
+        config: util.Config,
+        raw_feature_matrix_store_id: ray.ObjectRef,
+        cv_slice: CrossValidationSlice,
+        sub_share: float,
+        only_test: bool =False
+        ):
+
+    lock = FileLock(lock_file)
+    n_timeouts = 0
+
+    done = False
+    while not done:
+        try:
+            with lock.acquire(timeout=10):
+                feat_pos_dict, features, sample_pos_dict, raw_feature_matrix = ray.get(raw_feature_matrix_store_id)
+                try:
+                    if not only_test:
+                        dtrain, t_file_paths = cv_slice.get_extmem_dtrain(dump_precursor, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_share, sub_sampling=config.sub_sample_factor)
+                    else:
+                        dtrain = None
+                        t_file_paths = None
+                    dtest_feature_matrix, te_file_paths = cv_slice.get_extmem_dtest(dump_precursor, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, dtrain, sub_share)
+                    
+                    del feat_pos_dict
+                    del features
+                    del sample_pos_dict
+                    del raw_feature_matrix
+                    done = True
+                except MemoryError | RuntimeError:
+                    done = False
+            
+        except Timeout:
+            n_timeouts += 1
+            if n_timeouts > 3:
+                lock.release(force=True)
+        finally:
+            lock.release()
+
+    return dtrain, dtest_feature_matrix, t_file_paths, te_file_paths
+
+@ray.remote(max_retries=0)
+def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: float):
     config: util.Config
     config, filtered_features, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, retain_model = store
     util.reset_logger_for_remotes(config)
@@ -386,18 +429,22 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str):
     dump_precursor = f'{config.mmseqs_tmp_folder}/ext_mem_data_{proc_id}'
 
     if config.verbosity >= 3:
-        config.logger.info(f'Call of doouble_booster_remote: {lock_file=} {dump_precursor=}')
+        config.logger.info(f'Call of double_booster_remote: {lock_file=} {dump_precursor=}')
 
-    with FileLock(lock_file):
-        feat_pos_dict, features, sample_pos_dict, raw_feature_matrix = ray.get(raw_feature_matrix_store_id)
-        dtrain, t_file_paths = slice_slice.get_extmem_dtrain(dump_precursor, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=config.sub_sample_factor)
-        dtest_feature_matrix, te_file_paths = slice_slice.get_extmem_dtest(dump_precursor, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, dtrain)
-        del feat_pos_dict
-        del features
-        del sample_pos_dict
-        del raw_feature_matrix
+    dtrain, dtest_feature_matrix, t_file_paths, te_file_paths = retrieve_dmatrix(
+        lock_file,
+        dump_precursor,
+        config,
+        raw_feature_matrix_store_id,
+        slice_slice,
+        sub_share
+        )
 
     ta = add_to_times(times, ta)
+
+    if config.verbosity >= 3:
+        config.logger.info(f'Reached after first data retrieval in double_booster_remote {proc_id}')
+
 
     booster = xgb_train_wrapper(config, dtrain, dtest_feature_matrix)
     ta = add_to_times(times, ta)
@@ -405,7 +452,7 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str):
     util.remove_files(t_file_paths)
 
     if config.verbosity >= 3:
-        config.logger.info('Reached after first training in doouble_booster_remote')
+        config.logger.info(f'Reached after first training in double_booster_remote {proc_id}')
 
     if booster is None:
         util.remove_files(te_file_paths)
@@ -423,7 +470,7 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str):
     util.remove_files(te_file_paths)
 
     if config.verbosity >= 3:
-        config.logger.info('Reached after shap analysis in doouble_booster_remote')
+        config.logger.info(f'Reached after shap analysis in double_booster_remote {proc_id}')
 
     if acc_feat_impacts is None:
         if config.verbosity >= 4:
@@ -443,14 +490,14 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str):
     slice_slice.filterFeatures(feats_to_remove)
     ta = add_to_times(times, ta)
 
-    with FileLock(lock_file):
-        feat_pos_dict, features, sample_pos_dict, raw_feature_matrix = ray.get(raw_feature_matrix_store_id)
-        dtrain, t_file_paths = slice_slice.get_extmem_dtrain(dump_precursor, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=config.sub_sample_factor)
-        dtest_feature_matrix, te_file_paths = slice_slice.get_extmem_dtest(dump_precursor, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, dtrain)
-        del feat_pos_dict
-        del features
-        del sample_pos_dict
-        del raw_feature_matrix
+    dtrain, dtest_feature_matrix, t_file_paths, te_file_paths = retrieve_dmatrix(
+        lock_file,
+        dump_precursor,
+        config,
+        raw_feature_matrix_store_id,
+        slice_slice,
+        sub_share
+        )
 
     ta = add_to_times(times, ta)
 
@@ -461,7 +508,7 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str):
     util.remove_files(te_file_paths)
 
     if config.verbosity >= 3:
-        config.logger.info('Reached after second training in doouble_booster_remote')
+        config.logger.info(f'Reached after second training in double_booster_remote {proc_id}')
 
     if booster_2 is None:
         if config.verbosity >= 4:
@@ -476,34 +523,44 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str):
     cv_slice.filterFeatures(feats_to_remove)
     ta = add_to_times(times, ta)
 
+    if config.verbosity >= 3:
+        config.logger.info(f'Reached after cv_slice feat filter in double_booster_remote {proc_id}')
+
     if score_train:
-        with FileLock(lock_file):
-            feat_pos_dict, features, sample_pos_dict, raw_feature_matrix = ray.get(raw_feature_matrix_store_id)
-            dtrain_feature_matrix, t_file_paths = cv_slice.get_extmem_dtrain(dump_precursor, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=config.sub_sample_factor)
-            dtest_feature_matrix, te_file_paths = cv_slice.get_extmem_dtest(dump_precursor, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, dtrain_feature_matrix)
-            del feat_pos_dict
-            del features
-            del sample_pos_dict
-            del raw_feature_matrix
+        dtrain_feature_matrix, dtest_feature_matrix, t_file_paths, te_file_paths = retrieve_dmatrix(
+        lock_file,
+        dump_precursor,
+        config,
+        raw_feature_matrix_store_id,
+        cv_slice,
+        sub_share
+        )
+        
         y_pred = booster_2.predict(dtest_feature_matrix)
         x_pred = booster_2.predict(dtrain_feature_matrix)
 
         util.remove_files(t_file_paths)
         util.remove_files(te_file_paths)
     else:
-        with FileLock(lock_file):
-            feat_pos_dict, features, sample_pos_dict, raw_feature_matrix = ray.get(raw_feature_matrix_store_id)
-            dtest_feature_matrix, te_file_paths = cv_slice.get_extmem_dtest(dump_precursor, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, dtrain)
-            del feat_pos_dict
-            del features
-            del sample_pos_dict
-            del raw_feature_matrix
+        _, dtest_feature_matrix, _, te_file_paths = retrieve_dmatrix(
+        lock_file,
+        dump_precursor,
+        config,
+        raw_feature_matrix_store_id,
+        cv_slice,
+        sub_share,
+        only_test = True
+        )
+        
         y_pred = booster_2.predict(dtest_feature_matrix)
         x_pred = None
 
         util.remove_files(te_file_paths)
 
     ta = add_to_times(times, ta)
+
+    if config.verbosity >= 3:
+        config.logger.info(f'Reached the end of double_booster_remote {proc_id}')
 
     if config.verbosity >= 4:
         print_times(times, label = 'double booster 6', logger=config.logger)
@@ -700,28 +757,42 @@ def trainRegressionForest(
             
             store = ray.put((config, feats_to_filter, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, remote))
             for nested_proc_id, packed_slice_slice in enumerate(cv_slice.slice_slices):
-                remote_proc_ids.append(remote_function.remote(packed_slice_slice, store, f'{proc_id}_{nested_proc_id}'))
+                remote_proc_ids.append(remote_function.remote(packed_slice_slice, store, f'{proc_id}_{nested_proc_id}', sub_share))
 
-            results = ray.get(remote_proc_ids)
+            done = False
             y_preds = []
             x_preds = []
             booster_2_list = []
-            for res in results:
-                if res is None:
-                    if config.verbosity >= 1:
-                        config.logger.info('double_booster_remote returned None')
-                    return return_zero(zero_return, remote, cv_slice)
-                if skip_scoring:
-                    booster_2_list.append(res)
-                elif not remote:
-                    booster, sl_sl_feat_names, y_pred, x_pred = res
-                    booster_2_list.append((booster, sl_sl_feat_names))
-                    y_preds.append(y_pred)
-                    x_preds.append(x_pred)
-                else:
-                    y_pred, x_pred = res
-                    y_preds.append(y_pred)
-                    x_preds.append(x_pred)
+
+            while not done:
+                ready, not_ready = ray.wait(remote_proc_ids, timeout = 1)
+
+                if len(ready) > 0:
+                    if config.verbosity >= 4:
+                        config.logger.info(f'Double booster returned {len(ready)=}')
+                    results = ray.get(ready)
+                    
+                    for res in results:
+                        if res is None:
+                            if config.verbosity >= 1:
+                                config.logger.info('double_booster_remote returned None')
+                            return return_zero(zero_return, remote, cv_slice)
+                        if skip_scoring:
+                            booster_2_list.append(res)
+                        elif not remote:
+                            booster, sl_sl_feat_names, y_pred, x_pred = res
+                            booster_2_list.append((booster, sl_sl_feat_names))
+                            y_preds.append(y_pred)
+                            x_preds.append(x_pred)
+                        else:
+                            y_pred, x_pred = res
+                            y_preds.append(y_pred)
+                            x_preds.append(x_pred)
+
+                remote_proc_ids = not_ready
+                if len(remote_proc_ids) == 0:
+                    done = True
+
             if not skip_scoring:
                 y_pred = numpy.mean(y_preds, axis=0)
                 if score_train:
