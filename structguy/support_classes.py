@@ -1315,7 +1315,7 @@ class CrossValidationSlice(Slotted_obj):
         file_paths: list[tuple[str, str, str]] = []
 
         gmem = get_gpu_memory()[0]
-        num_of_batches = int(gmem / len(train_feature_matrix)) * 32
+        num_of_batches = max([1, int((len(train_feature_matrix)/gmem) * 128)])
 
         batch_size = len(train_feature_matrix) // num_of_batches
         if len(train_feature_matrix) % num_of_batches != 0:
@@ -1358,7 +1358,7 @@ class CrossValidationSlice(Slotted_obj):
         file_paths: list[tuple[str, str, str]] = []
 
         gmem = get_gpu_memory()[0]
-        num_of_batches = int(gmem / len(feat_matrix)) * 32
+        num_of_batches = max([1, int((len(feat_matrix)/ gmem) * 128)])
 
         batch_size = len(feat_matrix) // num_of_batches
         if len(feat_matrix) % num_of_batches != 0:
