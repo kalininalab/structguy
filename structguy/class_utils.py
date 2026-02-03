@@ -1,5 +1,5 @@
 def get_feat_matrix_from_ids(
-        feat_pos_dict,
+        feat_pos_dict: dict[str, int],
         features,
         sample_pos_dict,
         raw_feature_matrix,
@@ -11,7 +11,7 @@ def get_feat_matrix_from_ids(
         raise ValueError(f'{len(feat_names)=}')
     if get_cat_vec:
         cat_vec = []
-    feat_id_vec = []
+    feat_id_vec: list[int] = []
     for feat_name in feat_names:
         feat_id_vec.append(feat_pos_dict[feat_name])
         if get_cat_vec:
@@ -30,7 +30,7 @@ def get_feat_matrix_from_ids(
         return get_feat_matrix(raw_feature_matrix, feat_id_vec, sample_pos_vec), cat_vec
     return get_feat_matrix(raw_feature_matrix, feat_id_vec, sample_pos_vec)
 
-def get_feat_matrix(raw_feature_matrix, feat_id_vec, sample_pos_vec) -> list[list[int | float | None]]:
+def get_feat_matrix(raw_feature_matrix, feat_id_vec: list[int], sample_pos_vec) -> list[list[int | float | None]]:
     feat_matrix: list[list[int | float| None]] = []
     for sample_pos in sample_pos_vec:
         feat_vec = []

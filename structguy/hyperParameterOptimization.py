@@ -246,12 +246,12 @@ def bayes_random_init(
 
         current_params_id = 0
         remote_processes = []
-        for gpu_id in range(config.multi_gpu):
+        for proc_id in range(config.multi_gpu):
             com_queue = Queue()
             out_queue = Queue()
             com_queue.put((randomized_parameters[current_params_id]))
             current_params_id += 1
-            proc_id = para_eval.remote(com_queue, out_queue, store, para_number, 1.0)
+            proc_id = para_eval.remote(com_queue, out_queue, store, para_number, 1.0, proc_id)
             remote_processes.append((com_queue, out_queue, proc_id))
 
         config.logger.info(f"Para random init started: # of packages: {len(para_eval_ret_ids)} # of subthreads: {para_number} {len(remote_processes)=}")
@@ -652,7 +652,7 @@ def bayesian_optimisation(
         gpu_share = 1/threads_per_gpu
         remote_function = para_eval #.options(num_gpus = gpu_share)
         
-        for _ in range(number_of_procs):
+        for p in range(number_of_procs):
             next_sample = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
 
             com_queue = Queue()
@@ -660,7 +660,7 @@ def bayesian_optimisation(
             com_queue.put(next_sample)
             n_of_sent_hpo_sets += 1
             
-            proc_id = remote_function.remote(com_queue, out_queue, store, para_number, gpu_share)
+            proc_id = remote_function.remote(com_queue, out_queue, store, para_number, gpu_share, p)
             remote_processes.append((com_queue, out_queue, proc_id))
 
         if config.verbosity >= 1:
@@ -1085,7 +1085,8 @@ def get_scores(
         debug=False,
         get_first_scores=False,
         cv_interuption=None,
-        gpu_share = None
+        gpu_share = None,
+        proc_id = 0
         ):
     
     if config.verbosity >= 2:
@@ -1108,7 +1109,8 @@ def get_scores(
         debug=debug,
         get_first_scores=get_first_scores,
         cv_interuption=cv_interuption,
-        gpu_share=gpu_share
+        gpu_share=gpu_share,
+        proc_id=proc_id
     )
     t1 = time.time()
     config.logger.info(f"Time for training forest in get_scores: {t1 - t0}")
@@ -1120,7 +1122,7 @@ def get_scores(
 
 
 @ray.remote
-def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_share):
+def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_share, proc_id):
     (config, cv_obj, parameters, samples_store_id, raw_feature_matrix_store_id, best_first_scores, feat_corr_matrix, feature_names) = store
     
     util.reset_logger_for_remotes(config)
@@ -1150,7 +1152,7 @@ def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_share)
             para_number=para_number,
             get_first_scores=True,
             cv_interuption=(0.95, best_first_scores),
-            gpu_share=gpu_share)
+            gpu_share=gpu_share, proc_id=proc_id)
         
         out_queue.put((scores, params, first_scores))
     return

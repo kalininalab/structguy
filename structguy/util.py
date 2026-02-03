@@ -8,13 +8,14 @@ import numpy as np
 from psutil import virtual_memory
 from scipy import stats
 import math
-
+import subprocess as sp
 import pickle
 import matplotlib
 # Force matplotlib to not use any Xwindows backend.
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import xgboost as xgb
+
 from structguy.scripts import radarplot
 from structman.base_utils.base_utils import Errorlog, resolve_path, pack, unpack
 from structguy.consts import feat_name_category_dict, feature_categories
@@ -2169,3 +2170,27 @@ def reset_logger_for_remotes(config):
     main_logger = logging.getLogger(__name__)
     logging.basicConfig(filename=config.logfile, encoding='utf-8', level=logging.DEBUG)
     config.logger = main_logger
+
+def count_dtypes(mat):
+    typedict = {}
+    for row in mat:
+        for ent in row:
+            t = type(ent)
+            if t not in typedict:
+                typedict[t] = 1
+            else:
+                typedict[t] += 1
+
+    print(f'{typedict=}')
+
+def remove_files(file_paths: list[str]):
+    for filename_tuple in file_paths:
+        for fi in filename_tuple:
+            if os.path.exists(fi):
+                os.remove(fi)
+
+def get_gpu_memory():
+    command = "nvidia-smi --query-gpu=memory.total --format=csv"
+    memory_free_info = sp.check_output(command.split()).decode('ascii').split('\n')[:-1][1:]
+    memory_free_values = [int(x.split()[0]) for i, x in enumerate(memory_free_info)]
+    return memory_free_values

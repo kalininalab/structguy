@@ -72,7 +72,8 @@ def trainRegressionForestWrapper(
     overwrite_proc_n=None,
     skip_feature_selection=False,
     score_train=True,
-    gpu_share=None
+    gpu_share=None,
+    proc_id=0
 ):
     config, feats_to_filter, samples_store_id, raw_feature_matrix_store_id, distance_map = store
     util.reset_logger_for_remotes(config)
@@ -91,7 +92,8 @@ def trainRegressionForestWrapper(
         skip_feature_selection=skip_feature_selection,
         overwrite_proc_n=overwrite_proc_n,
         score_train=score_train,
-        sub_gpu_share=gpu_share
+        sub_gpu_share=gpu_share,
+        proc_id=proc_id
     )
 
 
@@ -364,7 +366,8 @@ def xgb_train_wrapper(
     return forest
 
 @ray.remote
-def double_booster_remote(packed_slice_slice, store, proc_id: int):
+def double_booster_remote(packed_slice_slice, store, proc_id: str):
+    config: util.Config
     config, filtered_features, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, retain_model = store
     util.reset_logger_for_remotes(config)
     times = []
@@ -378,12 +381,17 @@ def double_booster_remote(packed_slice_slice, store, proc_id: int):
     slice_slice.filterFeatures(filtered_features)
     ta = add_to_times(times, ta)
 
-    lock_file = f'remote_proc_{proc_id}.lock'
+    lock_file = f'remote_proc_{proc_id.split('_')[0]}.lock'
+
+    dump_precursor = f'{config.mmseqs_tmp_folder}/ext_mem_data_{proc_id}'
+
+    if config.verbosity >= 3:
+        config.logger.info(f'Call of doouble_booster_remote: {lock_file=} {dump_precursor=}')
 
     with FileLock(lock_file):
         feat_pos_dict, features, sample_pos_dict, raw_feature_matrix = ray.get(raw_feature_matrix_store_id)
-        dtrain = slice_slice.get_dtrain(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=config.sub_sample_factor)
-        dtest_feature_matrix = slice_slice.get_dtest(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, dtrain)
+        dtrain, t_file_paths = slice_slice.get_extmem_dtrain(dump_precursor, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=config.sub_sample_factor)
+        dtest_feature_matrix, te_file_paths = slice_slice.get_extmem_dtest(dump_precursor, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, dtrain)
         del feat_pos_dict
         del features
         del sample_pos_dict
@@ -394,7 +402,10 @@ def double_booster_remote(packed_slice_slice, store, proc_id: int):
     booster = xgb_train_wrapper(config, dtrain, dtest_feature_matrix)
     ta = add_to_times(times, ta)
 
+    util.remove_files(t_file_paths)
+
     if booster is None:
+        util.remove_files(te_file_paths)
         if config.verbosity >= 3:
             print_times(times, label = 'double booster 1', logger=config.logger)
         return None
@@ -405,6 +416,8 @@ def double_booster_remote(packed_slice_slice, store, proc_id: int):
     acc_feat_impacts, shap_times = shap_analysis(config, booster, dtest_feature_matrix, slice_slice.feature_names, y_pred, slice_slice.test_targets)
     times.append(shap_times)
     ta = add_to_times(times, ta)
+
+    util.remove_files(te_file_paths)
 
     if acc_feat_impacts is None:
         if config.verbosity >= 3:
@@ -426,8 +439,8 @@ def double_booster_remote(packed_slice_slice, store, proc_id: int):
 
     with FileLock(lock_file):
         feat_pos_dict, features, sample_pos_dict, raw_feature_matrix = ray.get(raw_feature_matrix_store_id)
-        dtrain = slice_slice.get_dtrain(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=config.sub_sample_factor)
-        dtest_feature_matrix = slice_slice.get_dtest(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, dtrain)
+        dtrain, t_file_paths = slice_slice.get_extmem_dtrain(dump_precursor, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=config.sub_sample_factor)
+        dtest_feature_matrix, te_file_paths = slice_slice.get_extmem_dtest(dump_precursor, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, dtrain)
         del feat_pos_dict
         del features
         del sample_pos_dict
@@ -437,6 +450,10 @@ def double_booster_remote(packed_slice_slice, store, proc_id: int):
 
     booster_2 = xgb_train_wrapper(config, dtrain, dtest_feature_matrix, second_round=True)
     ta = add_to_times(times, ta)
+
+    util.remove_files(t_file_paths)
+    util.remove_files(te_file_paths)
+
     if booster_2 is None:
         if config.verbosity >= 3:
             print_times(times, label = 'double booster 4', logger=config.logger)
@@ -453,24 +470,29 @@ def double_booster_remote(packed_slice_slice, store, proc_id: int):
     if score_train:
         with FileLock(lock_file):
             feat_pos_dict, features, sample_pos_dict, raw_feature_matrix = ray.get(raw_feature_matrix_store_id)
-            dtrain_feature_matrix = cv_slice.get_dtrain(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=config.sub_sample_factor)
-            dtest_feature_matrix = cv_slice.get_dtest(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, dtrain_feature_matrix)
+            dtrain_feature_matrix, t_file_paths = cv_slice.get_extmem_dtrain(dump_precursor, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=config.sub_sample_factor)
+            dtest_feature_matrix, te_file_paths = cv_slice.get_extmem_dtest(dump_precursor, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, dtrain_feature_matrix)
             del feat_pos_dict
             del features
             del sample_pos_dict
             del raw_feature_matrix
         y_pred = booster_2.predict(dtest_feature_matrix)
         x_pred = booster_2.predict(dtrain_feature_matrix)
+
+        util.remove_files(t_file_paths)
+        util.remove_files(te_file_paths)
     else:
         with FileLock(lock_file):
             feat_pos_dict, features, sample_pos_dict, raw_feature_matrix = ray.get(raw_feature_matrix_store_id)
-            dtest_feature_matrix = cv_slice.get_dtest(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, dtrain)
+            dtest_feature_matrix, te_file_paths = cv_slice.get_extmem_dtest(dump_precursor, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, dtrain)
             del feat_pos_dict
             del features
             del sample_pos_dict
             del raw_feature_matrix
         y_pred = booster_2.predict(dtest_feature_matrix)
         x_pred = None
+
+        util.remove_files(te_file_paths)
 
     ta = add_to_times(times, ta)
 
@@ -501,6 +523,7 @@ def trainRegressionForest(
     debug=False,
     skip_feature_selection=False,
     sub_gpu_share=None,
+    proc_id=0
 ):
     times = []
     t_start = ta = time.time()
@@ -667,8 +690,8 @@ def trainRegressionForest(
             remote_proc_ids = []
             
             store = ray.put((config, feats_to_filter, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, remote))
-            for proc_id, packed_slice_slice in enumerate(cv_slice.slice_slices):
-                remote_proc_ids.append(remote_function.remote(packed_slice_slice, store, proc_id))
+            for nested_proc_id, packed_slice_slice in enumerate(cv_slice.slice_slices):
+                remote_proc_ids.append(remote_function.remote(packed_slice_slice, store, f'{proc_id}_{nested_proc_id}'))
 
             results = ray.get(remote_proc_ids)
             y_preds = []
@@ -898,7 +921,8 @@ def trainForest(
     score_train=True,
     get_first_scores=False,
     cv_interuption=None,
-    gpu_share=None
+    gpu_share=None,
+    proc_id=0
 ) -> tuple[RandomForestRegressor | None, util.Scores, CrossValidationSlice | DataSAIL_cv, None | list[CrossValidationSlice] | dict[int, list[CrossValidationSlice]]]:
     # if cv_repeat is False, the cross_val_object is a cross validation slice object instead
     zero_scores_obj = util.Scores(zero=True)
@@ -950,7 +974,8 @@ def trainForest(
                 skip_feature_selection=skip_feature_selection,
                 overwrite_proc_n=para_number,
                 score_train=score_train,
-                sub_gpu_share=gpu_share
+                sub_gpu_share=gpu_share,
+                proc_id=proc_id
             )
             total_times = aggregate_times(total_times, reg_forest_times)
 
@@ -1028,7 +1053,8 @@ def trainForest(
                             overwrite_proc_n=para_number,
                             skip_scoring=skip_scoring,
                             score_train=score_train,
-                            gpu_share=quota
+                            gpu_share=quota,
+                            proc_id = f'{proc_id}_{cv_id}'
                         )
                     )
                     
@@ -1051,7 +1077,8 @@ def trainForest(
                             skip_feature_selection=skip_feature_selection,
                             skip_scoring=skip_scoring,
                             score_train=score_train,
-                            sub_gpu_share=gpu_share
+                            sub_gpu_share=gpu_share,
+                            proc_id = proc_id
                         )
                     )
                     if cv_interuption is not None and len(slice_result_ids) == 1:

@@ -1,13 +1,21 @@
 import ray
 import sys
+import os
 import traceback
 import time
 import random
+import pickle
 import numpy
+import cupy as cp
 import xgboost as xgb
 from scipy import stats
+from rmm.allocators.cupy import rmm_cupy_allocator
+from rmm.mr import PoolMemoryResource, CudaAsyncMemoryResource, set_current_device_resource
+
+from typing import Callable
 
 from structguy import dicts
+from structguy.util import get_gpu_memory
 from structguy.class_utils import get_feat_matrix_from_ids
 
 from structman.lib.sdsc.sdsc_utils import Slotted_obj
@@ -110,6 +118,65 @@ class Feature(Slotted_obj):
         else:
             return str(self.category_backmap[value])
             #return str(value)
+
+class Iterator(xgb.DataIter):
+    """A custom iterator for loading files in batches."""
+
+    def __init__(
+        self, file_paths: list[tuple[str, str, str]], device: str = 'cuda'
+    ) -> None:
+        self.device = device
+
+        self._file_paths = file_paths
+        self._it = 0
+        # XGBoost will generate some cache files under the current directory with the
+        # prefix "cache"
+        super().__init__(cache_prefix=os.path.join(".", "cache"))
+
+    def load_file(self) -> tuple[numpy.ndarray, numpy.ndarray, list[str], list[str]]:
+        """Load a single batch of data."""
+        X_path, y_path, ext_path = self._file_paths[self._it]
+        # When the `ExtMemQuantileDMatrix` is used, the device must match. GPU cannot
+        # consume CPU input data and vice-versa.
+        if self.device == "cpu":
+            X = numpy.load(X_path)
+            y = numpy.load(y_path)
+        else:
+            import cupy as cp
+            X = numpy.load(X_path, allow_pickle=True)
+            X = cp.array(X)
+            y = cp.load(y_path, allow_pickle=True)
+
+        assert X.shape[0] == y.shape[0]
+
+        with open(ext_path, 'rb') as inp:
+            feat_names, cat_vec = pickle.load(inp)
+
+        return X, y, feat_names, cat_vec
+
+    def next(self, input_data: Callable) -> bool:
+        """Advance the iterator by 1 step and pass the data to XGBoost.  This function
+        is called by XGBoost during the construction of ``DMatrix``
+
+        """
+        if self._it == len(self._file_paths):
+            # return False to let XGBoost know this is the end of iteration
+            return False
+
+        # input_data is a keyword-only function passed in by XGBoost and has the similar
+        # signature to the ``DMatrix`` constructor.
+        X, y, feat_names, cat_vec = self.load_file()
+        input_data(data=X,
+            label=y,
+            feature_names = feat_names,
+            feature_types=cat_vec
+            )
+        self._it += 1
+        return True
+
+    def reset(self) -> None:
+        """Reset the iterator to its beginning"""
+        self._it = 0
 
 class CrossValidationSlice(Slotted_obj):
     __slots__ = [
@@ -1077,7 +1144,13 @@ class CrossValidationSlice(Slotted_obj):
 
         return self.test_prot_vec
 
-    def get_dtest(self, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, dtrain):
+    def get_dtest(self,
+            feat_pos_dict: dict[str, int],
+            features,
+            sample_pos_dict,
+            raw_feature_matrix,
+            dtrain: xgb.DMatrix
+            ):
         feat_matrix, cat_vec = get_feat_matrix_from_ids(
             feat_pos_dict, features, sample_pos_dict, raw_feature_matrix,
             self.test_sample_ids, self.feature_names, get_cat_vec=True)
@@ -1093,6 +1166,39 @@ class CrossValidationSlice(Slotted_obj):
         dtest_feature_matrix.encoded_prot_vec = encoded_prot_vec
         return dtest_feature_matrix
 
+    def get_extmem_dtest(self,
+            dump_precursor: str,
+            feat_pos_dict: dict[str, int],
+            features,
+            sample_pos_dict,
+            raw_feature_matrix,
+            dtrain: xgb.DMatrix
+            ) -> xgb.ExtMemQuantileDMatrix:
+        file_paths, encoded_prot_vec = self.prepare_test_ext_mem_qdmatrix(
+            dump_precursor,
+            feat_pos_dict,
+            features,
+            sample_pos_dict,
+            raw_feature_matrix
+            )
+        
+        # It's important to use RMM for GPU-based external memory to improve performance.
+        # If XGBoost is not built with RMM support, a warning will be raised.
+        # We use the pool memory resource here for simplicity, you can also try the
+        # `ArenaMemoryResource` for improved memory fragmentation handling.
+        mr = PoolMemoryResource(CudaAsyncMemoryResource())
+        set_current_device_resource(mr)
+        # Set the allocator for cupy as well.
+        cp.cuda.set_allocator(rmm_cupy_allocator)
+        # Make sure XGBoost is using RMM for all allocations.
+        with xgb.config_context(use_rmm=True):
+            it = Iterator(device="cuda", file_paths=file_paths)
+
+            ext_dtrain = xgb.ExtMemQuantileDMatrix(it, ref=dtrain, enable_categorical=True)
+        
+            ext_dtrain.encoded_prot_vec = encoded_prot_vec
+
+        return ext_dtrain, file_paths
 
     def set_sub_sampled_train_ids(self, sub_sampling_factor: float):
         k = int(len(self.train_sample_ids)*sub_sampling_factor)
@@ -1101,7 +1207,9 @@ class CrossValidationSlice(Slotted_obj):
         self.sub_sampled_train_targets = [self.train_targets[pos] for pos in sub_sampled_ids]
         self.sub_sampled_train_class_weight_vector = [self.train_class_weight_vector[pos] for pos in sub_sampled_ids]
 
-    def get_train_feature_matrix(self, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling = 1.0, get_cat_vec=False) -> list[list[int | float | None]]:
+    def get_train_feature_matrix(self,
+            feat_pos_dict: dict[str, int],
+            features, sample_pos_dict, raw_feature_matrix, sub_sampling = 1.0, get_cat_vec=False) -> list[list[int | float | None]]:
         if len(self.train_sample_ids) == 0:
             raise ValueError(f'No training samples in get_train_feature_matrix: {self.train_sample_ids=}')
         if len(self.feature_names) == 0:
@@ -1130,7 +1238,13 @@ class CrossValidationSlice(Slotted_obj):
             return feat_matrix, cat_vec
         return feat_matrix
     
-    def get_dtrain(self, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling = 1.0) -> list[list[int | float | None]]:
+    def get_dtrain(self,
+            feat_pos_dict: dict[str, int],
+            features,
+            sample_pos_dict,
+            raw_feature_matrix,
+            sub_sampling: float = 1.0
+            ) -> list[list[int | float | None]]:
         train_feature_matrix: list[list[int | float | None]]
         train_feature_matrix, cat_vec = self.get_train_feature_matrix(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=sub_sampling, get_cat_vec=True)
         if sub_sampling == 1.0:
@@ -1148,6 +1262,130 @@ class CrossValidationSlice(Slotted_obj):
             feature_types=cat_vec,
             enable_categorical=True)
         return dtrain
+    
+    def get_extmem_dtrain(self,
+            dump_precursor: str,
+            feat_pos_dict: dict[str, int],
+            features,
+            sample_pos_dict,
+            raw_feature_matrix,
+            sub_sampling: float = 1.0
+            ) -> xgb.ExtMemQuantileDMatrix:
+        file_paths = self.prepare_ext_mem_qdmatrix(
+            dump_precursor,
+            feat_pos_dict,
+            features,
+            sample_pos_dict,
+            raw_feature_matrix,
+            sub_sampling = sub_sampling
+            )
+        
+        # It's important to use RMM for GPU-based external memory to improve performance.
+        # If XGBoost is not built with RMM support, a warning will be raised.
+        # We use the pool memory resource here for simplicity, you can also try the
+        # `ArenaMemoryResource` for improved memory fragmentation handling.
+        mr = PoolMemoryResource(CudaAsyncMemoryResource())
+        set_current_device_resource(mr)
+        # Set the allocator for cupy as well.
+        cp.cuda.set_allocator(rmm_cupy_allocator)
+        # Make sure XGBoost is using RMM for all allocations.
+        with xgb.config_context(use_rmm=True):
+            it = Iterator(device="cuda", file_paths=file_paths)
+
+            ext_dtrain = xgb.ExtMemQuantileDMatrix(it, enable_categorical=True)
+        
+        return ext_dtrain, file_paths
+
+    def prepare_ext_mem_qdmatrix(self,
+            dump_precursor: str,
+            feat_pos_dict: dict[str, int],
+            features,
+            sample_pos_dict,
+            raw_feature_matrix,
+            sub_sampling: float = 1.0,
+            ) -> list[tuple[str, str, str]]:
+        train_feature_matrix: list[list[int | float | None]]
+        train_feature_matrix, cat_vec = self.get_train_feature_matrix(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=sub_sampling, get_cat_vec=True)
+        
+        if sub_sampling == 1.0:
+            train_targets = self.train_targets
+        else:
+            train_targets = self.sub_sampled_train_targets
+
+        file_paths: list[tuple[str, str, str]] = []
+
+        gmem = get_gpu_memory()[0]
+        num_of_batches = int(gmem / len(train_feature_matrix)) * 32
+
+        batch_size = len(train_feature_matrix) // num_of_batches
+        if len(train_feature_matrix) % num_of_batches != 0:
+            batch_size += 1
+
+        extra_data_path = f'{dump_precursor}_ext.dump'
+        with open(extra_data_path, 'wb') as outf:
+            pickle.dump((self.feature_names, cat_vec), outf)
+
+        for batch_nr in range(num_of_batches):
+            batch = numpy.array(train_feature_matrix[batch_nr*batch_size:(batch_nr+1)*batch_size], dtype=numpy.float32)
+            if len(batch) == 0:
+                continue
+            
+            y_batch = numpy.array(train_targets[batch_nr*batch_size:(batch_nr+1)*batch_size])
+
+            batch_path = f'{dump_precursor}_X_{batch_nr}.npy'
+            batch.dump(batch_path)
+            #cp.save(batch_path, batch)
+
+            y_batch_path = f'{dump_precursor}_y_{batch_nr}.npy'
+            y_batch.dump(y_batch_path)
+
+            file_paths.append((batch_path, y_batch_path, extra_data_path))
+            
+        return file_paths
+    
+    def prepare_test_ext_mem_qdmatrix(self,
+            dump_precursor: str,
+            feat_pos_dict: dict[str, int],
+            features,
+            sample_pos_dict,
+            raw_feature_matrix,
+            ) -> list[tuple[str, str, str]]:
+        feat_matrix, cat_vec = get_feat_matrix_from_ids(
+            feat_pos_dict, features, sample_pos_dict, raw_feature_matrix,
+            self.test_sample_ids, self.feature_names, get_cat_vec=True)
+        encoded_prot_vec = self.get_encoded_test_prot_vec()
+
+        file_paths: list[tuple[str, str, str]] = []
+
+        gmem = get_gpu_memory()[0]
+        num_of_batches = int(gmem / len(feat_matrix)) * 32
+
+        batch_size = len(feat_matrix) // num_of_batches
+        if len(feat_matrix) % num_of_batches != 0:
+            batch_size += 1
+
+        extra_data_path = f'{dump_precursor}_ext_test.dump'
+        with open(extra_data_path, 'wb') as outf:
+            pickle.dump((self.feature_names, cat_vec), outf)
+
+        for batch_nr in range(num_of_batches):
+            batch = numpy.array(feat_matrix[batch_nr*batch_size:(batch_nr+1)*batch_size], dtype=numpy.float32)
+            if len(batch) == 0:
+                continue
+            
+            y_batch = numpy.array(self.test_targets[batch_nr*batch_size:(batch_nr+1)*batch_size])
+
+            batch_path = f'{dump_precursor}_X_{batch_nr}_test.npy'
+            batch.dump(batch_path)
+            #cp.save(batch_path, batch)
+
+            y_batch_path = f'{dump_precursor}_y_{batch_nr}_test.npy'
+            y_batch.dump(y_batch_path)
+
+            file_paths.append((batch_path, y_batch_path, extra_data_path))
+            
+        return file_paths, encoded_prot_vec
+
 
     def get_skewed_feat_matrices(self, samples, thresh):
         feat_matrices = samples.get_skewed_feat_matrices_from_ids(self.train_sample_ids, self.feature_names, thresh)
