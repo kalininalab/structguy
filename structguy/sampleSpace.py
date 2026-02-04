@@ -16,9 +16,9 @@ from datasail.sail import datasail
 
 from structguy.sequence_util import parseFromFasta
 from structguy.support_classes import CrossValidationSlice, Feature
-from structguy.util import median
+from structguy.util import median, get_gpu_memory, Config
 from structguy.prefiltering import detectBiasedFeaturesByMeanCorrelation
-from structguy.class_utils import get_feat_matrix_from_ids, get_feat_matrix
+from structguy.class_utils import get_feat_matrix_from_ids, get_feat_matrix, get_raw_feat_matrix_from_sample_ids
 
 from structman.base_utils.base_utils import pack, unpack
 from structman.lib.sdsc.sdsc_utils import Slotted_obj
@@ -285,7 +285,7 @@ class SampleSpace(Slotted_obj):
         self.samples = {}
         self.features: dict[str, Feature] = {}
         self.feature_matrix_dict = {}
-        self.raw_feature_matrix = []
+        self.raw_feature_matrix: np.ndarray = np.array([])
         self.sample_nr = 0
         self.feature_names = []
         self.feat_pos_dict = {}
@@ -768,21 +768,21 @@ class SampleSpace(Slotted_obj):
                 del self.raw_feature_matrix[pos]
 
     def transform_matrix_dict(self):
-        self.raw_feature_matrix = []
+        raw_feature_matrix = []
         fixed_feat_names = []
         for sample_pos, sample_id in enumerate(self.feature_matrix_dict):
             self.sample_pos_dict[sample_id] = sample_pos
-            self.raw_feature_matrix.append([])
+            raw_feature_matrix.append([])
             if sample_pos == 0:
                 for feat_pos, feat_name in enumerate(self.feature_matrix_dict[sample_id]):
                     self.feat_pos_dict[feat_name] = feat_pos
                     fixed_feat_names.append(feat_name)
             for feat_name in fixed_feat_names:
                 try:
-                    self.raw_feature_matrix[sample_pos].append(self.feature_matrix_dict[sample_id][feat_name])
+                    raw_feature_matrix[sample_pos].append(self.feature_matrix_dict[sample_id][feat_name])
                 except KeyError:
-                    self.raw_feature_matrix[sample_pos].append(0.)
-        self.raw_feature_matrix = np.array(self.raw_feature_matrix)
+                    raw_feature_matrix[sample_pos].append(0.)
+        self.raw_feature_matrix = np.array(raw_feature_matrix)
         self.feature_matrix_dict = None
 
 
@@ -1410,7 +1410,7 @@ class DataSAIL_cv(CrossValidation):
 
         train_test_pairs = {}
         for cv_counter in range(config.crossValidation_fold):
-            train_test_pairs[cv_counter] = [[], [], {}]
+            train_test_pairs[cv_counter] = [[], [], {}] #train - test - subslices test 
 
         for prot_id in datasail_splits:
             split_name = datasail_splits[prot_id]
@@ -1453,9 +1453,17 @@ class DataSAIL_cv(CrossValidation):
         if config.verbosity >= 2:
             config.logger.info(f'Time for init DataSAIL_cv Part 5: {t5-t4}')
 
+        file_path_dict = {}
+
         for cv_counter, cv_slice in init_results:
 
             self.slices[cv_counter] = unpack(cv_slice)
+            self.slices[cv_counter].test_slice_id = cv_counter
+            self.slices[cv_counter].train_slice_ids = []
+            for train_cv_counter in range(config.crossValidation_fold):
+                if train_cv_counter != cv_counter:
+                    self.slices[cv_counter].train_slice_ids.append(train_cv_counter)
+
             if config.verbosity >= 5:
                 cv_slice = self.slices[cv_counter]
                 #config.logger.info(f'Features of slice {cv_slice.name}:\n{cv_slice.features}')
@@ -1463,17 +1471,24 @@ class DataSAIL_cv(CrossValidation):
 
             self.slice_ids.append(cv_counter)
             if train_test_pairs[cv_counter][2] is not None:
-                self.slices[cv_counter].subslices = []
+                self.slices[cv_counter].subslices = {}
                 for subslice_counter in train_test_pairs[cv_counter][2]:
-                    self.slices[cv_counter].subslices.append(train_test_pairs[cv_counter][2][subslice_counter])
+                    self.slices[cv_counter].subslices[subslice_counter] = (train_test_pairs[cv_counter][2][subslice_counter])
 
             detectBiasedFeaturesByMeanCorrelation(
                 config, self.slices[cv_counter], samples_store_id, samples=sampleSpace, dummy_call=True
             )
 
+            dump_precursor = f'{config.mmseqs_tmp_folder}/ext_mem_data_{cv_counter}'
+
+            file_paths = put_data_to_tmp_storage(dump_precursor, self.slices[cv_counter], sampleSpace, config)
+
+            file_path_dict[cv_counter] = file_paths
+
             slice_slices = []
 
-            for i, subslice_test_proteins in enumerate(self.slices[cv_counter].subslices):
+            for i, subslice_test_id in enumerate(self.slices[cv_counter].subslices.keys()):
+                subslice_test_proteins = self.slices[cv_counter].subslices[subslice_test_id]
                 try:
                     remaining_prots = set(self.slices[cv_counter].train_prots) - subslice_test_proteins
                 except TypeError:
@@ -1496,12 +1511,56 @@ class DataSAIL_cv(CrossValidation):
                     feature_names=self.slices[cv_counter].feature_names,
                 )
                 
+                cv_slice_slice.test_slice_id = subslice_test_id
+                cv_slice_slice.train_slice_ids = []
+                for train_cv_counter in range(config.crossValidation_fold):
+                    if train_cv_counter == cv_counter:
+                        continue
+                    if train_cv_counter == subslice_test_id:
+                        continue
+                    cv_slice_slice.train_slice_ids.append(train_cv_counter)
+
                 slice_slices.append(ray.put(pack(cv_slice_slice)))
 
             self.slices[cv_counter].slice_slices = slice_slices
+
+        config.file_path_dict = file_path_dict
 
         t6 = time.time()
         if config.verbosity >= 2:
             config.logger.info(f'Time for init DataSAIL_cv Part 6: {t6-t5}')
 
 
+def put_data_to_tmp_storage(dump_precursor: str, cv_slice: CrossValidationSlice, samples: SampleSpace, config: Config):
+
+    feat_matrix = get_raw_feat_matrix_from_sample_ids(cv_slice.test_sample_ids, samples.sample_pos_dict, samples.raw_feature_matrix)
+
+    file_paths: list[tuple[str, str]] = []
+
+    gmem = get_gpu_memory()[0]
+    sub_share = config.multi_gpu / (config.threads_per_gpu * config.crossValidation_fold * (config.crossValidation_fold-1))
+    num_of_batches = max([1, int((len(feat_matrix)/ (gmem*sub_share)) * 25)])
+
+    batch_size = len(feat_matrix) // num_of_batches
+    if len(feat_matrix) % num_of_batches != 0:
+        batch_size += 1
+
+    config.logger.info(f'{gmem=} {sub_share=} {num_of_batches=} {batch_size=}')
+
+    for batch_nr in range(num_of_batches):
+        batch = np.array(feat_matrix[batch_nr*batch_size:(batch_nr+1)*batch_size], dtype=np.float32)
+        if len(batch) == 0:
+            continue
+        
+        y_batch = np.array(cv_slice.test_targets[batch_nr*batch_size:(batch_nr+1)*batch_size])
+
+        batch_path = f'{dump_precursor}_X_{batch_nr}_test.npy'
+        batch.dump(batch_path)
+        #cp.save(batch_path, batch)
+
+        y_batch_path = f'{dump_precursor}_y_{batch_nr}_test.npy'
+        y_batch.dump(y_batch_path)
+
+        file_paths.append((batch_path, y_batch_path))
+
+    return file_paths

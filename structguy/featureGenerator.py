@@ -3,7 +3,7 @@ import sys
 import traceback
 import time
 import ray
-
+import numpy as np
 from structguy import consts
 from structguy.sampleSpace import SampleSpace
 from structguy import sequence_feature_generation as seqfg
@@ -294,7 +294,7 @@ def createTrainingSet(
     if config.verbosity >= 2:
         config.logger.info(f"Call of createTrainingSet: {external_impute is None=} {for_prediction=} {config.path_to_processed_features_file=}")
 
-    samples = SampleSpace(config)
+    samples: SampleSpace = SampleSpace(config)
 
     if config.path_to_processed_features_file is not None and not config.overwrite:
         if config.path_to_processed_features_file[-5:] == '.dump':
@@ -305,6 +305,8 @@ def createTrainingSet(
             samples = unpack(packed_samples)
             samples.reactivate_slot_mask(bu_slotmask)
             config.n_of_features = len(samples.feature_names)
+            if isinstance(samples.raw_feature_matrix, tuple):
+                samples.raw_feature_matrix = np.array(samples.raw_feature_matrix)
             return samples 
 
     # strfg.initFeatures(samples)

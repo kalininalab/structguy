@@ -167,7 +167,8 @@ def learn(config: Config):
 
     out_value = None
     samples_store_id = ray.put(pack(samples))
-    raw_feature_matrix_store_id = ray.put((samples.feat_pos_dict, samples.features, samples.sample_pos_dict, samples.raw_feature_matrix))
+
+    raw_feature_matrix_store_id = ray.put((samples.feat_pos_dict, samples.features))
     
     if not config.skip_cv:
 

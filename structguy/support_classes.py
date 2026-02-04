@@ -15,8 +15,8 @@ from rmm.mr import PoolMemoryResource, CudaAsyncMemoryResource, set_current_devi
 from typing import Callable
 
 from structguy import dicts
-from structguy.util import get_gpu_memory
-from structguy.class_utils import get_feat_matrix_from_ids
+from structguy.util import get_gpu_memory, Config
+from structguy.class_utils import get_feat_matrix_from_ids, get_raw_feat_matrix_from_ids, get_feat_id_vec
 
 from structman.lib.sdsc.sdsc_utils import Slotted_obj
 
@@ -137,6 +137,14 @@ class Iterator(xgb.DataIter):
     def load_file(self) -> tuple[numpy.ndarray, numpy.ndarray, list[str], list[str]]:
         """Load a single batch of data."""
         X_path, y_path, ext_path = self._file_paths[self._it]
+
+        if self._ext_dat is None:
+            with open(ext_path, 'rb') as inp:
+                feat_names, cat_vec, feat_id_vec = pickle.load(inp)
+            self._ext_dat = feat_names, cat_vec, feat_id_vec
+        else:
+            feat_names, cat_vec, feat_id_vec = self._ext_dat
+
         # When the `ExtMemQuantileDMatrix` is used, the device must match. GPU cannot
         # consume CPU input data and vice-versa.
         if self.device == "cpu":
@@ -145,17 +153,12 @@ class Iterator(xgb.DataIter):
         else:
             import cupy as cp
             X = numpy.load(X_path, allow_pickle=True)
-            X = cp.array(X)
             y = cp.load(y_path, allow_pickle=True)
 
-        assert X.shape[0] == y.shape[0]
+            #trim down to selected features
+            X = cp.array(X[:, feat_id_vec])
 
-        if self._ext_dat is None:
-            with open(ext_path, 'rb') as inp:
-                feat_names, cat_vec = pickle.load(inp)
-            self._ext_dat = feat_names, cat_vec
-        else:
-            feat_names, cat_vec = self._ext_dat
+        assert X.shape[0] == y.shape[0]
 
         return X, y, feat_names, cat_vec
 
@@ -200,7 +203,7 @@ class CrossValidationSlice(Slotted_obj):
         'confusion_map',                'train_class_weight_vector',    'test_class_weight_vector',
         'fused_confusion_map',          'raw_confusion_map',            'loss_map',
         'sub_sampled_train_ids',        'sub_sampled_train_targets',    'sub_sampled_train_class_weight_vector',
-        'test_prot_vec'
+        'test_prot_vec',                'test_slice_id',                'train_slice_ids'
         ]
     
     slot_mask = [
@@ -219,7 +222,7 @@ class CrossValidationSlice(Slotted_obj):
         True, True, True,
         True, True, True,
         True, True, True,
-        False
+        False,True, True,
     ]
 
     def __init__(self, test_ids = None, train_ids = None, raw_feature_names = None, sample_dict = None, geometric_distance_map = None, config = None, name = '', train_prots = None, test_prots = None, train_equal_test = False, para_number = None, feature_names = None, raw_init = False):
@@ -1130,7 +1133,7 @@ class CrossValidationSlice(Slotted_obj):
         return int_data
     
     def get_test_feature_matrix(self, samples):
-        feat_matrix = get_feat_matrix_from_ids(
+        feat_matrix, _ = get_feat_matrix_from_ids(
             samples.feat_pos_dict, samples.features, samples.sample_pos_dict, samples.raw_feature_matrix,
             self.test_sample_ids, self.feature_names)
         return feat_matrix
@@ -1173,20 +1176,16 @@ class CrossValidationSlice(Slotted_obj):
 
     def get_extmem_dtest(self,
             dump_precursor: str,
+            config: Config,
             feat_pos_dict: dict[str, int],
             features,
-            sample_pos_dict,
-            raw_feature_matrix,
-            dtrain: xgb.DMatrix,
-            sub_share: float
+            dtrain: xgb.DMatrix
             ) -> xgb.ExtMemQuantileDMatrix:
         file_paths, encoded_prot_vec = self.prepare_test_ext_mem_qdmatrix(
             dump_precursor,
+            config,
             feat_pos_dict,
-            features,
-            sample_pos_dict,
-            raw_feature_matrix,
-            sub_share
+            features
             )
         
         # It's important to use RMM for GPU-based external memory to improve performance.
@@ -1216,35 +1215,50 @@ class CrossValidationSlice(Slotted_obj):
 
     def get_train_feature_matrix(self,
             feat_pos_dict: dict[str, int],
-            features, sample_pos_dict, raw_feature_matrix, sub_sampling = 1.0, get_cat_vec=False) -> list[list[int | float | None]]:
+            features,
+            sample_pos_dict,
+            raw_feature_matrix,
+            sub_sampling = 1.0) -> list[list[int | float | None]]:
         if len(self.train_sample_ids) == 0:
             raise ValueError(f'No training samples in get_train_feature_matrix: {self.train_sample_ids=}')
         if len(self.feature_names) == 0:
             raise ValueError(f'No features in get_train_feature_matrix: {self.feature_names=}')
-        if sub_sampling == 1.0:
-            if get_cat_vec:
-                feat_matrix, cat_vec = get_feat_matrix_from_ids(
-                    feat_pos_dict, features, sample_pos_dict, raw_feature_matrix,
-                    self.train_sample_ids, self.feature_names, get_cat_vec=get_cat_vec)
-            else:
-                feat_matrix: list[list[int | float | None]] = get_feat_matrix_from_ids(
-                    feat_pos_dict, features, sample_pos_dict, raw_feature_matrix,
-                    self.train_sample_ids, self.feature_names, get_cat_vec=get_cat_vec)
-        else:
+        if not sub_sampling == 1.0:
             if self.sub_sampled_train_ids is None:
                 self.set_sub_sampled_train_ids(sub_sampling)
-            if get_cat_vec:
-                feat_matrix, cat_vec = get_feat_matrix_from_ids(
-                    feat_pos_dict, features, sample_pos_dict, raw_feature_matrix,
-                    self.sub_sampled_train_ids, self.feature_names, get_cat_vec=get_cat_vec)
-            else:
-                feat_matrix: list[list[int | float | None]] = get_feat_matrix_from_ids(
-                    feat_pos_dict, features, sample_pos_dict, raw_feature_matrix,
-                    self.sub_sampled_train_ids, self.feature_names, get_cat_vec=get_cat_vec)
-        if get_cat_vec:
-            return feat_matrix, cat_vec
-        return feat_matrix
+            sample_ids = self.sub_sampled_train_ids
+        else:
+            sample_ids = self.train_sample_ids
+
+        feat_matrix, cat_vec = get_feat_matrix_from_ids(
+            feat_pos_dict, features, sample_pos_dict, raw_feature_matrix,
+            sample_ids, self.feature_names, get_cat_vec=True)
+
+        return feat_matrix, cat_vec
     
+    def get_raw_train_feature_matrix(self,
+            feat_pos_dict: dict[str, int],
+            features,
+            sample_pos_dict,
+            raw_feature_matrix: numpy.ndarray,
+            sub_sampling = 1.0) -> list[list[int | float | None]]:
+        if len(self.train_sample_ids) == 0:
+            raise ValueError(f'No training samples in get_train_feature_matrix: {self.train_sample_ids=}')
+        if len(self.feature_names) == 0:
+            raise ValueError(f'No features in get_train_feature_matrix: {self.feature_names=}')
+        if not sub_sampling == 1.0:
+            if self.sub_sampled_train_ids is None:
+                self.set_sub_sampled_train_ids(sub_sampling)
+            sample_ids = self.sub_sampled_train_ids
+        else:
+            sample_ids = self.train_sample_ids
+
+        raw_feat_matrix, cat_vec, feat_id_vec = get_raw_feat_matrix_from_ids(
+            feat_pos_dict, features, sample_pos_dict, raw_feature_matrix,
+            sample_ids, self.feature_names, get_cat_vec=True)
+
+        return raw_feat_matrix, cat_vec, feat_id_vec
+
     def get_dtrain(self,
             feat_pos_dict: dict[str, int],
             features,
@@ -1253,7 +1267,7 @@ class CrossValidationSlice(Slotted_obj):
             sub_sampling: float = 1.0
             ) -> list[list[int | float | None]]:
         train_feature_matrix: list[list[int | float | None]]
-        train_feature_matrix, cat_vec = self.get_train_feature_matrix(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=sub_sampling, get_cat_vec=True)
+        train_feature_matrix, cat_vec = self.get_train_feature_matrix(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=sub_sampling)
         if sub_sampling == 1.0:
             train_targets = self.train_targets
         else:
@@ -1272,21 +1286,15 @@ class CrossValidationSlice(Slotted_obj):
     
     def get_extmem_dtrain(self,
             dump_precursor: str,
+            config: Config,
             feat_pos_dict: dict[str, int],
-            features,
-            sample_pos_dict,
-            raw_feature_matrix,
-            sub_share: float,
-            sub_sampling: float = 1.0
+            features
             ) -> xgb.ExtMemQuantileDMatrix:
         file_paths = self.prepare_ext_mem_qdmatrix(
             dump_precursor,
+            config,
             feat_pos_dict,
-            features,
-            sample_pos_dict,
-            raw_feature_matrix,
-            sub_share,
-            sub_sampling = sub_sampling
+            features
             )
         
         # It's important to use RMM for GPU-based external memory to improve performance.
@@ -1307,95 +1315,41 @@ class CrossValidationSlice(Slotted_obj):
 
     def prepare_ext_mem_qdmatrix(self,
             dump_precursor: str,
+            config: Config,
             feat_pos_dict: dict[str, int],
-            features,
-            sample_pos_dict,
-            raw_feature_matrix,
-            sub_share: float,
-            sub_sampling: float = 1.0,
+            features
             ) -> list[tuple[str, str, str]]:
-        train_feature_matrix: list[list[int | float | None]]
-        train_feature_matrix, cat_vec = self.get_train_feature_matrix(feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_sampling=sub_sampling, get_cat_vec=True)
         
-        if sub_sampling == 1.0:
-            train_targets = self.train_targets
-        else:
-            train_targets = self.sub_sampled_train_targets
-
+        feat_id_vec, cat_vec = get_feat_id_vec(self.feature_names, feat_pos_dict, features, get_cat_vec = True)
+        
         file_paths: list[tuple[str, str, str]] = []
-
-        gmem = get_gpu_memory()[0]
-        num_of_batches = max([1, int((len(train_feature_matrix)/(gmem*sub_share)) * 30)])
-
-        print(f'{num_of_batches=} {sub_share=} {len(train_feature_matrix)=}')
-
-        batch_size = len(train_feature_matrix) // num_of_batches
-        if len(train_feature_matrix) % num_of_batches != 0:
-            batch_size += 1
 
         extra_data_path = f'{dump_precursor}_ext.dump'
         with open(extra_data_path, 'wb') as outf:
-            pickle.dump((self.feature_names, cat_vec), outf)
+            pickle.dump((self.feature_names, cat_vec, feat_id_vec), outf)
 
-        for batch_nr in range(num_of_batches):
-            batch = numpy.array(train_feature_matrix[batch_nr*batch_size:(batch_nr+1)*batch_size], dtype=numpy.float32)
-            if len(batch) == 0:
-                continue
-            
-            y_batch = numpy.array(train_targets[batch_nr*batch_size:(batch_nr+1)*batch_size])
-
-            batch_path = f'{dump_precursor}_X_{batch_nr}.npy'
-            batch.dump(batch_path)
-            #cp.save(batch_path, batch)
-
-            y_batch_path = f'{dump_precursor}_y_{batch_nr}.npy'
-            y_batch.dump(y_batch_path)
-
-            file_paths.append((batch_path, y_batch_path, extra_data_path))
-            
+        for train_cv_id in self.train_slice_ids:
+            for tr_fp, te_fp in config.file_path_dict[train_cv_id]:
+                file_paths.append((tr_fp, te_fp, extra_data_path))
         return file_paths
     
     def prepare_test_ext_mem_qdmatrix(self,
             dump_precursor: str,
+            config: Config,
             feat_pos_dict: dict[str, int],
-            features,
-            sample_pos_dict,
-            raw_feature_matrix,
-            sub_share
+            features
             ) -> list[tuple[str, str, str]]:
-        feat_matrix, cat_vec = get_feat_matrix_from_ids(
-            feat_pos_dict, features, sample_pos_dict, raw_feature_matrix,
-            self.test_sample_ids, self.feature_names, get_cat_vec=True)
+        feat_id_vec, cat_vec = get_feat_id_vec(self.feature_names, feat_pos_dict, features, get_cat_vec = True)
         encoded_prot_vec = self.get_encoded_test_prot_vec()
 
         file_paths: list[tuple[str, str, str]] = []
 
-        gmem = get_gpu_memory()[0]
-        num_of_batches = max([1, int((len(feat_matrix)/ (gmem*sub_share)) * 30)])
-
-        batch_size = len(feat_matrix) // num_of_batches
-        if len(feat_matrix) % num_of_batches != 0:
-            batch_size += 1
-
         extra_data_path = f'{dump_precursor}_ext_test.dump'
         with open(extra_data_path, 'wb') as outf:
-            pickle.dump((self.feature_names, cat_vec), outf)
+            pickle.dump((self.feature_names, cat_vec, feat_id_vec), outf)
 
-        for batch_nr in range(num_of_batches):
-            batch = numpy.array(feat_matrix[batch_nr*batch_size:(batch_nr+1)*batch_size], dtype=numpy.float32)
-            if len(batch) == 0:
-                continue
-            
-            y_batch = numpy.array(self.test_targets[batch_nr*batch_size:(batch_nr+1)*batch_size])
-
-            batch_path = f'{dump_precursor}_X_{batch_nr}_test.npy'
-            batch.dump(batch_path)
-            #cp.save(batch_path, batch)
-
-            y_batch_path = f'{dump_precursor}_y_{batch_nr}_test.npy'
-            y_batch.dump(y_batch_path)
-
-            file_paths.append((batch_path, y_batch_path, extra_data_path))
+        for tr_fp, te_fp in config.file_path_dict[self.test_slice_id]:
+            file_paths.append((tr_fp, te_fp, extra_data_path))
             
         return file_paths, encoded_prot_vec
 
@@ -1414,7 +1368,7 @@ class CrossValidationSlice(Slotted_obj):
             test_pred_pairs[prot_id][0].append(self.test_sample_ids[sample_nr])
 
         for prot_id in test_pred_pairs:
-            feat_matrix = get_feat_matrix_from_ids(
+            feat_matrix, _ = get_feat_matrix_from_ids(
                 samples.feat_pos_dict, samples.features, samples.sample_pos_dict, samples.raw_feature_matrix,
                 test_pred_pairs[prot_id][0], self.feature_names)
             test_pred_pairs[prot_id][0] = feat_matrix

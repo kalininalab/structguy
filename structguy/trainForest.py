@@ -366,47 +366,42 @@ def xgb_train_wrapper(
     return forest
 
 def retrieve_dmatrix(
-        lock_file: str,
         dump_precursor: str,
         config: util.Config,
         raw_feature_matrix_store_id: ray.ObjectRef,
         cv_slice: CrossValidationSlice,
-        sub_share: float,
         only_test: bool =False
         ):
 
-    lock = FileLock(lock_file)
-    n_timeouts = 0
-
     done = False
+    err_count = 0
     while not done:
-        try:
-            with lock.acquire(timeout=10):
-                feat_pos_dict, features, sample_pos_dict, raw_feature_matrix = ray.get(raw_feature_matrix_store_id)
-                try:
-                    if not only_test:
-                        dtrain, t_file_paths = cv_slice.get_extmem_dtrain(dump_precursor, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, sub_share, sub_sampling=config.sub_sample_factor)
-                    else:
-                        dtrain = None
-                        t_file_paths = None
-                    dtest_feature_matrix, te_file_paths = cv_slice.get_extmem_dtest(dump_precursor, feat_pos_dict, features, sample_pos_dict, raw_feature_matrix, dtrain, sub_share)
-                    
-                    del feat_pos_dict
-                    del features
-                    del sample_pos_dict
-                    del raw_feature_matrix
-                    done = True
-                except MemoryError | RuntimeError:
-                    done = False
-            
-        except Timeout:
-            n_timeouts += 1
-            if n_timeouts > 3:
-                lock.release(force=True)
-        finally:
-            lock.release()
 
-    return dtrain, dtest_feature_matrix, t_file_paths, te_file_paths
+        times = []
+        ta = time.time()
+        feat_pos_dict, features = ray.get(raw_feature_matrix_store_id)
+        ta = add_to_times(times, ta)
+        try:
+            if not only_test:
+                dtrain, t_file_paths = cv_slice.get_extmem_dtrain(dump_precursor, config, feat_pos_dict, features)
+            else:
+                dtrain = None
+                t_file_paths = None
+            ta = add_to_times(times, ta)
+            dtest_feature_matrix, te_file_paths = cv_slice.get_extmem_dtest(dump_precursor, config, feat_pos_dict, features, dtrain)
+            ta = add_to_times(times, ta)
+            del feat_pos_dict
+            del features
+            ta = add_to_times(times, ta)
+            done = True
+        except (MemoryError, RuntimeError, xgb.core.XGBoostError):
+            err_count += 1
+            time.sleep(0.1*err_count)
+            if err_count == 10:
+                config.logger.info(f'Catched err 10 times: {dump_precursor}')
+            done = False
+        
+    return dtrain, dtest_feature_matrix, t_file_paths, te_file_paths, times
 
 @ray.remote(max_retries=0)
 def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: float):
@@ -420,9 +415,9 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
         slice_slice = packed_slice_slice
     else:
         slice_slice = unpack(packed_slice_slice)
-    ta = add_to_times(times, ta)
+    ta = add_to_times(times, ta) #0
     slice_slice.filterFeatures(filtered_features)
-    ta = add_to_times(times, ta)
+    ta = add_to_times(times, ta) #1
 
     lock_file = f'remote_proc_{proc_id.split('_')[0]}.lock'
 
@@ -431,43 +426,36 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
     if config.verbosity >= 3:
         config.logger.info(f'Call of double_booster_remote: {lock_file=} {dump_precursor=}')
 
-    dtrain, dtest_feature_matrix, t_file_paths, te_file_paths = retrieve_dmatrix(
-        lock_file,
+    dtrain, dtest_feature_matrix, t_file_paths, te_file_paths, ret_times = retrieve_dmatrix(
         dump_precursor,
         config,
         raw_feature_matrix_store_id,
-        slice_slice,
-        sub_share
+        slice_slice
         )
-
-    ta = add_to_times(times, ta)
+    times.append(ret_times)
+    ta = add_to_times(times, ta) #2
 
     if config.verbosity >= 3:
         config.logger.info(f'Reached after first data retrieval in double_booster_remote {proc_id}')
 
 
     booster = xgb_train_wrapper(config, dtrain, dtest_feature_matrix)
-    ta = add_to_times(times, ta)
-
-    util.remove_files(t_file_paths)
+    ta = add_to_times(times, ta) #3
 
     if config.verbosity >= 3:
         config.logger.info(f'Reached after first training in double_booster_remote {proc_id}')
 
     if booster is None:
-        util.remove_files(te_file_paths)
         if config.verbosity >= 4:
             print_times(times, label = 'double booster 1', logger=config.logger)
         return None
     
     y_pred = booster.predict(dtest_feature_matrix)
-    ta = add_to_times(times, ta)
+    ta = add_to_times(times, ta) #4
 
     acc_feat_impacts, shap_times = shap_analysis(config, booster, dtest_feature_matrix, slice_slice.feature_names, y_pred, slice_slice.test_targets)
-    times.append(shap_times)
-    ta = add_to_times(times, ta)
-
-    util.remove_files(te_file_paths)
+    times.append(shap_times) #5
+    ta = add_to_times(times, ta) #6
 
     if config.verbosity >= 3:
         config.logger.info(f'Reached after shap analysis in double_booster_remote {proc_id}')
@@ -488,24 +476,19 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
         return None
     
     slice_slice.filterFeatures(feats_to_remove)
-    ta = add_to_times(times, ta)
+    ta = add_to_times(times, ta) #7
 
-    dtrain, dtest_feature_matrix, t_file_paths, te_file_paths = retrieve_dmatrix(
-        lock_file,
+    dtrain, dtest_feature_matrix, t_file_paths, te_file_paths, ret_times = retrieve_dmatrix(
         dump_precursor,
         config,
         raw_feature_matrix_store_id,
-        slice_slice,
-        sub_share
+        slice_slice
         )
-
-    ta = add_to_times(times, ta)
+    times.append(ret_times)
+    ta = add_to_times(times, ta) #8
 
     booster_2 = xgb_train_wrapper(config, dtrain, dtest_feature_matrix, second_round=True)
-    ta = add_to_times(times, ta)
-
-    util.remove_files(t_file_paths)
-    util.remove_files(te_file_paths)
+    ta = add_to_times(times, ta) #9
 
     if config.verbosity >= 3:
         config.logger.info(f'Reached after second training in double_booster_remote {proc_id}')
@@ -521,43 +504,36 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
         return booster_2, slice_slice.feature_names[:]
 
     cv_slice.filterFeatures(feats_to_remove)
-    ta = add_to_times(times, ta)
+    ta = add_to_times(times, ta) #10
 
     if config.verbosity >= 3:
         config.logger.info(f'Reached after cv_slice feat filter in double_booster_remote {proc_id}')
 
     if score_train:
-        dtrain_feature_matrix, dtest_feature_matrix, t_file_paths, te_file_paths = retrieve_dmatrix(
-        lock_file,
+        dtrain_feature_matrix, dtest_feature_matrix, t_file_paths, te_file_paths, ret_times = retrieve_dmatrix(
         dump_precursor,
         config,
         raw_feature_matrix_store_id,
-        cv_slice,
-        sub_share
+        cv_slice
         )
-        
+        times.append(ret_times)
         y_pred = booster_2.predict(dtest_feature_matrix)
         x_pred = booster_2.predict(dtrain_feature_matrix)
 
-        util.remove_files(t_file_paths)
-        util.remove_files(te_file_paths)
     else:
-        _, dtest_feature_matrix, _, te_file_paths = retrieve_dmatrix(
-        lock_file,
+        _, dtest_feature_matrix, _, te_file_paths, ret_times = retrieve_dmatrix(
         dump_precursor,
         config,
         raw_feature_matrix_store_id,
         cv_slice,
-        sub_share,
         only_test = True
         )
-        
+        times.append(ret_times)
         y_pred = booster_2.predict(dtest_feature_matrix)
         x_pred = None
 
-        util.remove_files(te_file_paths)
-
-    ta = add_to_times(times, ta)
+    
+    ta = add_to_times(times, ta) #11
 
     if config.verbosity >= 3:
         config.logger.info(f'Reached the end of double_booster_remote {proc_id}')
