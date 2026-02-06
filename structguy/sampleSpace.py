@@ -767,19 +767,37 @@ class SampleSpace(Slotted_obj):
                 self.raw_feature_matrix = list(self.raw_feature_matrix)
                 del self.raw_feature_matrix[pos]
 
-    def transform_matrix_dict(self):
+    def transform_matrix_dict(self, exclude_feats = None):
         raw_feature_matrix = []
         fixed_feat_names = []
-        for sample_pos, sample_id in enumerate(self.feature_matrix_dict):
+        
+        if self.feature_matrix_dict is not None:
+            feature_matrix_dict = self.feature_matrix_dict
+        else:
+            feature_matrix_dict = {}
+            for sample_id in self.sample_pos_dict:
+                sample_pos = self.sample_pos_dict[sample_id]
+                feature_matrix_dict[sample_id] = {}
+                for featname in self.feat_pos_dict:
+                    feat_pos = self.feat_pos_dict[featname]
+                    feature_matrix_dict[sample_id][featname] = self.raw_feature_matrix[sample_pos][feat_pos]
+                    
+        self.feat_pos_dict = {}
+        self.sample_pos_dict = {}
+
+        for sample_pos, sample_id in enumerate(feature_matrix_dict):
             self.sample_pos_dict[sample_id] = sample_pos
             raw_feature_matrix.append([])
             if sample_pos == 0:
-                for feat_pos, feat_name in enumerate(self.feature_matrix_dict[sample_id]):
-                    self.feat_pos_dict[feat_name] = feat_pos
+                for feat_name in feature_matrix_dict[sample_id]:
+                    if exclude_feats is not None:
+                        if feat_name in exclude_feats:
+                            continue
+                    self.feat_pos_dict[feat_name] = len(self.feat_pos_dict)
                     fixed_feat_names.append(feat_name)
             for feat_name in fixed_feat_names:
                 try:
-                    raw_feature_matrix[sample_pos].append(self.feature_matrix_dict[sample_id][feat_name])
+                    raw_feature_matrix[sample_pos].append(feature_matrix_dict[sample_id][feat_name])
                 except KeyError:
                     raw_feature_matrix[sample_pos].append(0.)
         self.raw_feature_matrix = np.array(raw_feature_matrix)
@@ -1479,7 +1497,7 @@ class DataSAIL_cv(CrossValidation):
                 config, self.slices[cv_counter], samples_store_id, samples=sampleSpace, dummy_call=True
             )
 
-            dump_precursor = f'{config.mmseqs_tmp_folder}/ext_mem_data_{cv_counter}'
+            dump_precursor = f'{config.tmp_folder}/ext_mem_data_{cv_counter}'
 
             file_paths = put_data_to_tmp_storage(dump_precursor, self.slices[cv_counter], sampleSpace, config)
 
@@ -1539,7 +1557,7 @@ def put_data_to_tmp_storage(dump_precursor: str, cv_slice: CrossValidationSlice,
 
     gmem = get_gpu_memory()[0]
     sub_share = config.multi_gpu / (config.threads_per_gpu * config.crossValidation_fold * (config.crossValidation_fold-1))
-    num_of_batches = max([1, int((len(feat_matrix)/ (gmem*sub_share)) * 25)])
+    num_of_batches = max([1, int(1 * (len(feat_matrix)/ (20 * gmem*sub_share)))])
 
     batch_size = len(feat_matrix) // num_of_batches
     if len(feat_matrix) % num_of_batches != 0:

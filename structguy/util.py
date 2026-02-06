@@ -292,7 +292,7 @@ class Config:
 
         self.list_ranking_thresh_bounds = [0, 'max']
         self.confusion_goodwill_bounds = [0., 1.0]
-        self.corr_thresh_bounds = [0.5, 1.0]
+        self.corr_thresh_bounds = [0.5, 0.97]
 
         self.tvmb_rank_half_step = [0, 'max']
         self.tvpmb_rank_half_step = [0, 'max']

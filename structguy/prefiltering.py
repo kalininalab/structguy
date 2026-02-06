@@ -30,7 +30,10 @@ def dummy_featureTargetCorr(train_targets, feat_name, feature_value_vector):
 
 
 def dummy_addToTvmbMap(train_sample_ids, train_targets, feat_name, samples, config, name):
-    feature_value_vector = samples.get_feature_value_vector(train_sample_ids, feat_name)
+    try:
+        feature_value_vector = samples.get_feature_value_vector(train_sample_ids, feat_name)
+    except KeyError:
+        return True
 
     try:
         target_corr, target_p_val = dummy_featureTargetCorr(train_targets, feat_name, feature_value_vector)

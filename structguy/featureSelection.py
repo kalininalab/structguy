@@ -655,9 +655,14 @@ def regu_fs(config, cv_slice, samples, print_out=False, pre_filter=None, debug=F
 def filterCorrelatedFeats(
     config: Config,
     feat_corr_matrix,
-    feature_names
+    feature_names,
+    custom_tresh = None
 ):
 
+    if custom_tresh is None:
+        thresh = config.corr_thresh
+    else:
+        thresh = custom_tresh
     feats_to_filter = set()
     for feat_nr_a, feat_name_a in enumerate(feature_names):
         if feat_name_a in feats_to_filter:
@@ -673,7 +678,7 @@ def filterCorrelatedFeats(
             feat_score_a = cov_a * abs(tv_corr_a)
             feat_score_b = cov_b * abs(tv_corr_b)
 
-            if abs(corr) > config.corr_thresh and cov_both > 0.01:
+            if abs(corr) > thresh and cov_both > 0.01:
                 
                 if feat_score_a > feat_score_b:
                     feats_to_filter.add(feat_name_b)
@@ -681,7 +686,7 @@ def filterCorrelatedFeats(
                     feats_to_filter.add(feat_name_b)
 
     if config.verbosity >= 3:
-        print(f'Filtering correlated features {config.corr_thresh=} {len(feats_to_filter)=}')
+        print(f'Filtering correlated features {thresh=} {len(feats_to_filter)=}')
 
     return list(feats_to_filter)
 

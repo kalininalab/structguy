@@ -22,6 +22,7 @@ from supertree import SuperTree
 from structman.base_utils.base_utils import pack
 
 from structguy import featureAnalysis, featureGenerator, sampleSpace, trainForest
+from structguy.featureSelection import filterCorrelatedFeats
 from structguy.featureGenerator import load_data_for_pred
 from structguy import hyperParameterOptimization as hpo
 from structguy.results_analysis import Results, write_protein_wise_performances
@@ -152,6 +153,9 @@ def learn(config: Config):
 
     t_0 = time.time()
     config.logger.info(f"Time for loading dataset: {t_0 - t0} {config.n_of_features=} {config.select_samples=}")
+
+    feats_to_filter = set(filterCorrelatedFeats(config, samples.feat_corr_matrix, samples.feature_names, custom_tresh=0.97))
+    samples.transform_matrix_dict(exclude_feats=feats_to_filter)
 
     if config.select_samples:
         feat_coverage_file = f"{config.outfolder}/prot_wise_feat_coverage.tsv"

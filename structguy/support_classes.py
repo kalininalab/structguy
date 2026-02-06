@@ -9,8 +9,6 @@ import numpy
 import cupy as cp
 import xgboost as xgb
 from scipy import stats
-from rmm.allocators.cupy import rmm_cupy_allocator
-from rmm.mr import PoolMemoryResource, CudaAsyncMemoryResource, set_current_device_resource
 
 from typing import Callable
 
@@ -19,6 +17,8 @@ from structguy.util import get_gpu_memory, Config
 from structguy.class_utils import get_feat_matrix_from_ids, get_raw_feat_matrix_from_ids, get_feat_id_vec
 
 from structman.lib.sdsc.sdsc_utils import Slotted_obj
+
+MAX_QUANTILE_BATCHES = 256
 
 def calculate_chunksizes(n_of_chunks, n_of_items):
     small_chunksize = n_of_items // n_of_chunks
@@ -461,7 +461,7 @@ class CrossValidationSlice(Slotted_obj):
             prot_bins = {}
             for pos,(u_ac,aac) in enumerate(self.train_sample_ids):
                 target = self.train_targets[pos]
-                if not u_ac in prot_bins:
+                if u_ac not in prot_bins:
                     prot_bins[u_ac] = [{},{}]
                 if target < config.binary_thresh:#split samples of a protein into left and right of threshold
                     prot_bins[u_ac][0][aac] = target
@@ -519,9 +519,9 @@ class CrossValidationSlice(Slotted_obj):
             balance_map = {}
             for pos,(u_ac,aac) in enumerate(self.train_sample_ids):
                 target = self.train_targets[pos]
-                if not u_ac in balance_map:
+                if u_ac not in balance_map:
                     balance_map[u_ac] = {}
-                if not target in balance_map[u_ac]:
+                if target not in balance_map[u_ac]:
                     balance_map[u_ac][target] = set()
                 balance_map[u_ac][target].add(aac)
 
@@ -532,10 +532,10 @@ class CrossValidationSlice(Slotted_obj):
                 max_n = None
                 for label in balance_map[u_ac]:
                     label_n = len(balance_map[u_ac][label])
-                    if min_label == None or min_n > label_n:
+                    if min_label is None or min_n > label_n:
                         min_label = label
                         min_n = label_n
-                    if max_label == None or max_n < label_n:
+                    if max_label is None or max_n < label_n:
                         max_label = label
                         max_n = label_n
                 if min_label == max_label: #pure proteins
@@ -558,7 +558,7 @@ class CrossValidationSlice(Slotted_obj):
         self.filtered_samples = []
         kept_pos = []
         for pos,sample_id in enumerate(self.train_sample_ids):
-            if not sample_id in train_sub_sample_ids:
+            if sample_id not in train_sub_sample_ids:
                 self.filtered_samples.append(sample_id)
             else:
                 kept_pos.append(pos)
@@ -586,7 +586,7 @@ class CrossValidationSlice(Slotted_obj):
             return
         balance_map = {}
         for ttv in self.train_targets:
-            if not ttv in balance_map:
+            if ttv not in balance_map:
                 balance_map[ttv] = 0
             balance_map[ttv] += 1
         config.logger.info('Train set balance: ',balance_map)
@@ -601,13 +601,13 @@ class CrossValidationSlice(Slotted_obj):
                 self.int_map[tv_1] = 0 
         balance_map = {}
         for ttv in self.test_targets:
-            if not ttv in balance_map:
+            if ttv not in balance_map:
                 balance_map[ttv] = 0
             balance_map[ttv] += 1
         config.logger.info('Test set balance: ',balance_map)
 
     def getGeometricDistanceMap(self,config):
-        if self.geometric_distance_map != None:
+        if self.geometric_distance_map is not None:
             return self.geometric_distance_map
         self.geometric_distance_map = {}
         targets = self.train_targets + self.test_targets
@@ -1021,7 +1021,7 @@ class CrossValidationSlice(Slotted_obj):
     def reactivateFeature(self,feat_name, print_out = False):
         if print_out:
             print('Slice:',self.name,'Reactivate feature:',feat_name)
-        if not feat_name in self.deactivated_features:
+        if feat_name not in self.deactivated_features:
             return
         try:
             self.feature_names.append(feat_name)
@@ -1179,8 +1179,13 @@ class CrossValidationSlice(Slotted_obj):
             config: Config,
             feat_pos_dict: dict[str, int],
             features,
+            sub_share: float,
             dtrain: xgb.DMatrix
             ) -> xgb.ExtMemQuantileDMatrix:
+        
+        if config.verbosity >= 4:
+            config.logger.info(f'Call of get_extmem_dtest: {dump_precursor}')
+
         file_paths, encoded_prot_vec = self.prepare_test_ext_mem_qdmatrix(
             dump_precursor,
             config,
@@ -1188,19 +1193,17 @@ class CrossValidationSlice(Slotted_obj):
             features
             )
         
-        # It's important to use RMM for GPU-based external memory to improve performance.
-        # If XGBoost is not built with RMM support, a warning will be raised.
-        # We use the pool memory resource here for simplicity, you can also try the
-        # `ArenaMemoryResource` for improved memory fragmentation handling.
-        mr = PoolMemoryResource(CudaAsyncMemoryResource())
-        set_current_device_resource(mr)
-        # Set the allocator for cupy as well.
-        cp.cuda.set_allocator(rmm_cupy_allocator)
+        if config.verbosity >= 4:
+            config.logger.info(f'After prep in get_extmem_dtest: {dump_precursor} {sub_share=} {len(file_paths)=}')
+
         # Make sure XGBoost is using RMM for all allocations.
         with xgb.config_context(use_rmm=True):
             it = Iterator(device="cuda", file_paths=file_paths)
 
-            ext_dtrain = xgb.ExtMemQuantileDMatrix(it, ref=dtrain, enable_categorical=True)
+            if config.verbosity >= 4:
+                config.logger.info(f'Iterator is setup in get_extmem_dtrain: {dump_precursor}')
+
+            ext_dtrain = xgb.ExtMemQuantileDMatrix(it, ref=dtrain, enable_categorical=True, max_bin=256, max_quantile_batches = MAX_QUANTILE_BATCHES)
         
             ext_dtrain.encoded_prot_vec = encoded_prot_vec
 
@@ -1288,8 +1291,13 @@ class CrossValidationSlice(Slotted_obj):
             dump_precursor: str,
             config: Config,
             feat_pos_dict: dict[str, int],
-            features
+            features,
+            sub_share: float
             ) -> xgb.ExtMemQuantileDMatrix:
+        
+        if config.verbosity >= 4:
+            config.logger.info(f'Call of get_extmem_dtrain: {dump_precursor}')
+
         file_paths = self.prepare_ext_mem_qdmatrix(
             dump_precursor,
             config,
@@ -1297,19 +1305,14 @@ class CrossValidationSlice(Slotted_obj):
             features
             )
         
-        # It's important to use RMM for GPU-based external memory to improve performance.
-        # If XGBoost is not built with RMM support, a warning will be raised.
-        # We use the pool memory resource here for simplicity, you can also try the
-        # `ArenaMemoryResource` for improved memory fragmentation handling.
-        mr = PoolMemoryResource(CudaAsyncMemoryResource())
-        set_current_device_resource(mr)
-        # Set the allocator for cupy as well.
-        cp.cuda.set_allocator(rmm_cupy_allocator)
         # Make sure XGBoost is using RMM for all allocations.
         with xgb.config_context(use_rmm=True):
             it = Iterator(device="cuda", file_paths=file_paths)
 
-            ext_dtrain = xgb.ExtMemQuantileDMatrix(it, enable_categorical=True)
+            if config.verbosity >= 4:
+                config.logger.info(f'Iterator is setup in get_extmem_dtrain: {dump_precursor}')
+
+            ext_dtrain = xgb.ExtMemQuantileDMatrix(it, enable_categorical=True, max_bin=256, max_quantile_batches = MAX_QUANTILE_BATCHES)
         
         return ext_dtrain, file_paths
 
