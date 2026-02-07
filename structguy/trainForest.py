@@ -121,13 +121,49 @@ def shap_internal_loop(
 
     return acc_feat_impacts
 
+def ext_shap_analysis(
+        feature_names: list[str],
+        booster: xgb.Booster,
+        sliced_test_emd_matrices: list[xgb.ExtMemQuantileDMatrix]):
+
+    times = []
+    ta = time.time()
+
+    acc_feat_impacts = None
+
+    n_samples = 0
+
+    for dmatrix in sliced_test_emd_matrices:
+        n_samples += dmatrix.num_row()
+        explanation = booster.predict(dmatrix, pred_contribs=True)
+
+        pred_vector = booster.predict(dmatrix)
+
+        acc_feat_impacts_slice = shap_internal_loop(
+            len(feature_names),
+            explanation,
+            pred_vector,
+            dmatrix.get_label()
+            )
+        
+        if acc_feat_impacts is None:
+            acc_feat_impacts = acc_feat_impacts_slice
+        else:
+            acc_feat_impacts += acc_feat_impacts_slice
+
+    ta = add_to_times(times, ta)
+
+    acc_feat_impacts = sorted(zip(feature_names, [x/n_samples for x in acc_feat_impacts]), key=lambda x:x[1], reverse=True)
+    ta = add_to_times(times, ta)
+    return acc_feat_impacts, times
+
 def shap_analysis(config, forest, d_feat_vecs: xgb.DMatrix, feature_names, prediction_vector, target_vector):
     if config.verbosity >= 3:
         config.logger.info(f'Call of shap_analysis: {config.gpu_mode=}')
     
     times = []
     ta = time.time()
-    
+
     explanation = forest.predict(d_feat_vecs, pred_contribs=True)
 
     """
@@ -155,6 +191,7 @@ def shap_analysis(config, forest, d_feat_vecs: xgb.DMatrix, feature_names, predi
             config.logger.info(f'Catched XGBoost Error, try again {n}')
             time.sleep(n**2)
     """
+                
     ta = add_to_times(times, ta)
 
     acc_feat_impacts = shap_internal_loop(
@@ -395,6 +432,7 @@ def retrieve_dmatrix(
         raw_feature_matrix_store_id: ray.ObjectRef,
         cv_slice: CrossValidationSlice,
         sub_share: float,
+        get_sliced_test_matrices: bool=False,
         only_test: bool =False
         ):
 
@@ -406,7 +444,7 @@ def retrieve_dmatrix(
         setup_memory_resources(config, sub_share)
         dtrain, t_file_paths = cv_slice.get_extmem_dtrain(dump_precursor, config, feat_pos_dict, features, sub_share)
         ta = add_to_times(times, ta)
-        dtest_feature_matrix, te_file_paths = cv_slice.get_extmem_dtest(dump_precursor, config, feat_pos_dict, features, sub_share, dtrain)
+        dtest_feature_matrix, te_file_paths, sliced_test_matrices = cv_slice.get_extmem_dtest(dump_precursor, config, feat_pos_dict, features, sub_share, dtrain, get_sliced_test_matrices = get_sliced_test_matrices)
         ta = add_to_times(times, ta)
         del feat_pos_dict
         del features
@@ -414,6 +452,8 @@ def retrieve_dmatrix(
     except (MemoryError, RuntimeError, xgb.core.XGBoostError) as err:
         raise err
         
+    if get_sliced_test_matrices:
+        return dtrain, dtest_feature_matrix, sliced_test_matrices, t_file_paths, te_file_paths, times
     return dtrain, dtest_feature_matrix, t_file_paths, te_file_paths, times
 
 @ray.remote
@@ -439,12 +479,13 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
     if config.verbosity >= 3:
         config.logger.info(f'Call of double_booster_remote: {lock_file=} {dump_precursor=} {retain_model=}')
 
-    dtrain, dtest_feature_matrix, t_file_paths, te_file_paths, ret_times = retrieve_dmatrix(
+    dtrain, dtest_feature_matrix, sliced_test_emd_matrices, t_file_paths, te_file_paths, ret_times = retrieve_dmatrix(
         dump_precursor,
         config,
         raw_feature_matrix_store_id,
         slice_slice,
-        sub_share
+        sub_share,
+        get_sliced_test_matrices = True
         )
     times.append(ret_times)
     ta = add_to_times(times, ta) #2
@@ -466,13 +507,18 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
         del dtest_feature_matrix
         return None
     
+    acc_feat_impacts, shap_times = ext_shap_analysis(slice_slice.feature_names, booster, sliced_test_emd_matrices)
+
+    """
     y_pred = booster.predict(dtest_feature_matrix)
     ta = add_to_times(times, ta) #4
 
     acc_feat_impacts, shap_times = shap_analysis(config, booster, dtest_feature_matrix, slice_slice.feature_names, y_pred, slice_slice.test_targets)
+    
+    """
     times.append(shap_times) #5
     ta = add_to_times(times, ta) #6
-
+    
     del booster
 
     if config.verbosity >= 3:

@@ -1180,7 +1180,8 @@ class CrossValidationSlice(Slotted_obj):
             feat_pos_dict: dict[str, int],
             features,
             sub_share: float,
-            dtrain: xgb.DMatrix
+            dtrain: xgb.DMatrix,
+            get_sliced_test_matrices: bool=False
             ) -> xgb.ExtMemQuantileDMatrix:
         
         if config.verbosity >= 4:
@@ -1203,11 +1204,21 @@ class CrossValidationSlice(Slotted_obj):
             if config.verbosity >= 4:
                 config.logger.info(f'Iterator is setup in get_extmem_dtrain: {dump_precursor}')
 
-            ext_dtrain = xgb.ExtMemQuantileDMatrix(it, ref=dtrain, enable_categorical=True, max_bin=256, max_quantile_batches = MAX_QUANTILE_BATCHES)
+            ext_dtest = xgb.ExtMemQuantileDMatrix(it, ref=dtrain, enable_categorical=True, max_bin=256, max_quantile_batches = MAX_QUANTILE_BATCHES)
         
-            ext_dtrain.encoded_prot_vec = encoded_prot_vec
+            ext_dtest.encoded_prot_vec = encoded_prot_vec
 
-        return ext_dtrain, file_paths
+            if get_sliced_test_matrices:
+                ext_test_matrices = []
+                for fp_tuple in file_paths:
+                    it = Iterator(device="cuda", file_paths=[fp_tuple])
+
+                    ext_dtest_slice = xgb.ExtMemQuantileDMatrix(it, ref=dtrain, enable_categorical=True, max_bin=256, max_quantile_batches = 1)
+                    ext_test_matrices.append(ext_dtest_slice)
+            else:
+                ext_test_matrices = None
+
+        return ext_dtest, file_paths, ext_test_matrices
 
     def set_sub_sampled_train_ids(self, sub_sampling_factor: float):
         k = int(len(self.train_sample_ids)*sub_sampling_factor)
