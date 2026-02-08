@@ -17,6 +17,7 @@ from structguy.util import get_gpu_memory, Config
 from structguy.class_utils import get_feat_matrix_from_ids, get_raw_feat_matrix_from_ids, get_feat_id_vec
 
 from structman.lib.sdsc.sdsc_utils import Slotted_obj
+from structman.lib.serializedPipeline import sizeof_fmt
 
 MAX_QUANTILE_BATCHES = 256
 
@@ -212,8 +213,8 @@ class CrossValidationSlice(Slotted_obj):
         True, True, True,
         True, True, True,
         True, True, True,
-        True, True, True,
-        True, True, True,
+        True, True, False,
+        False, False, True,
         True, True, True,
         True, True, True,
         True, True, True,
@@ -404,6 +405,18 @@ class CrossValidationSlice(Slotted_obj):
         t8 = time.time()
         if config.verbosity >= 3:
             print(f'Init CV slice part 8: {t8-t7}')
+
+
+    def log_attr_sizes(self, logger):
+        tup_list = []
+        for attr_name in self.__slots__:
+            obj = self.__getattribute__(attr_name)
+            size = sys.getsizeof(obj)
+            tup_list.append((attr_name, size))
+
+        tup_list = sorted(tup_list, key= lambda x :x[1], reverse=True)
+        for attr_name, size in tup_list[:10]:
+            logger.info(f'{attr_name} {sizeof_fmt(size)}')
 
 
     def featureSanityCheck(self, verbose = False):  
@@ -804,6 +817,10 @@ class CrossValidationSlice(Slotted_obj):
         return True
 
     def setProteinBias(self, config):
+        if self.slice_specific_feature_map is None:
+            self.slice_specific_feature_map = {}
+            self.slice_specific_feature_names = []
+            self.slice_specific_features = {}
         if 'Protein bias' not in self.slice_specific_feature_map:
             self.slice_specific_feature_map['Protein bias'] = len(self.slice_specific_feature_names)
             try:
@@ -823,7 +840,7 @@ class CrossValidationSlice(Slotted_obj):
         for pos,target_value in enumerate(self.train_targets):
             u_ac,aac = self.train_sample_ids[pos]
             target_value = self.train_targets[pos]
-            if not u_ac in bias_map:
+            if u_ac not in bias_map:
                 bias_map[u_ac] = []
 
             if not config.regression:

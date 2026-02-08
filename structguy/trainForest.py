@@ -26,6 +26,7 @@ from rmm.mr import PoolMemoryResource, CudaAsyncMemoryResource, set_current_devi
 from filelock import FileLock, Timeout
 from structguy import featureSelection, util
 from structman.base_utils.base_utils import pack, unpack, add_to_times, print_times, aggregate_times
+from structman.lib.serializedPipeline import sizeof_fmt
 from structguy.support_classes import CrossValidationSlice
 from structguy.sampleSpace import DataSAIL_cv, SampleSpace
 import numpy
@@ -478,6 +479,7 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
 
     if config.verbosity >= 3:
         config.logger.info(f'Call of double_booster_remote: {lock_file=} {dump_precursor=} {retain_model=}')
+        slice_slice.log_attr_sizes(config.logger)
 
     dtrain, dtest_feature_matrix, sliced_test_emd_matrices, t_file_paths, te_file_paths, ret_times = retrieve_dmatrix(
         dump_precursor,
@@ -489,6 +491,10 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
         )
     times.append(ret_times)
     ta = add_to_times(times, ta) #2
+
+    if config.verbosity >= 3:
+        for name, size in sorted(((name, sys.getsizeof(value)) for name, value in locals().items()), key=lambda x: -x[1])[:10]:
+            config.logger.info("{:>30}: {:>8}".format(name, sizeof_fmt(size)))
 
     if config.verbosity >= 3:
         config.logger.info(f'Reached after first data retrieval in double_booster_remote {proc_id}')
@@ -796,6 +802,10 @@ def trainRegressionForest(
         config.logger.info(
             f"Train regression {config.forest_type} forest, call of fit with # of features: {len(cv_slice.feature_names)}, skip feature selection {skip_feature_selection}, skip scoring {skip_scoring}"
         )
+
+    if config.verbosity >= 3:
+        for name, size in sorted(((name, sys.getsizeof(value)) for name, value in locals().items()), key=lambda x: -x[1])[:10]:
+            config.logger.info("{:>30}: {:>8}".format(name, sizeof_fmt(size)))
 
     ta = add_to_times(times, ta) #5
     
