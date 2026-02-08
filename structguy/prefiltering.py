@@ -95,7 +95,7 @@ def detectBiasedFeaturesByMeanCorrelation(
     if config.verbosity >= 5:
         cv_slice.featureSanityCheck(verbose=True)
 
-    if "Protein bias" not in cv_slice.slice_specific_feature_map and not dummy_call:
+    if (cv_slice.slice_specific_feature_map is None or "Protein bias" not in cv_slice.slice_specific_feature_map) and not dummy_call:
         cv_slice.setProteinBias(config)
 
         if config.verbosity >= 5:
