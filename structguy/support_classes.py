@@ -357,7 +357,10 @@ class CrossValidationSlice(Slotted_obj):
             if train_equal_test:
                 self.test_targets.append(sample.targetValue)
 
-        self.sub_sampled_train_targets = self.train_targets
+        self.train_targets = numpy.array(self.train_targets)
+        self.test_targets = numpy.array(self.test_targets)
+
+        self.sub_sampled_train_targets = []
 
         t3 = time.time()
         if config.verbosity >= 3:
@@ -405,18 +408,6 @@ class CrossValidationSlice(Slotted_obj):
         t8 = time.time()
         if config.verbosity >= 3:
             print(f'Init CV slice part 8: {t8-t7}')
-
-
-    def log_attr_sizes(self, logger):
-        tup_list = []
-        for attr_name in self.__slots__:
-            obj = self.__getattribute__(attr_name)
-            size = sys.getsizeof(obj)
-            tup_list.append((attr_name, size))
-
-        tup_list = sorted(tup_list, key= lambda x :x[1], reverse=True)
-        for attr_name, size in tup_list[:10]:
-            logger.info(f'{attr_name} {sizeof_fmt(size)}')
 
 
     def featureSanityCheck(self, verbose = False):  
@@ -576,14 +567,8 @@ class CrossValidationSlice(Slotted_obj):
             else:
                 kept_pos.append(pos)
 
-        train_targets = []
-        train_sample_ids = []
-        for pos in kept_pos:
-            train_targets.append(self.train_targets[pos])
-            train_sample_ids.append(self.train_sample_ids[pos])
-
-        self.train_targets = train_targets
-        self.train_sample_ids = train_sample_ids
+        self.train_targets = self.train_targets[kept_pos]
+        self.train_sample_ids = self.train_sample_ids[kept_pos]
 
         return
 

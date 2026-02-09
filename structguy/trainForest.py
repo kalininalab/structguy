@@ -12,6 +12,7 @@ from sklearn.metrics import matthews_corrcoef
 import time
 import sys
 import os
+import signal
 import traceback
 import ray
 import contextlib
@@ -27,6 +28,7 @@ from filelock import FileLock, Timeout
 from structguy import featureSelection, util
 from structman.base_utils.base_utils import pack, unpack, add_to_times, print_times, aggregate_times
 from structman.lib.serializedPipeline import sizeof_fmt
+from structman.lib.sdsc.sdsc_utils import deep_get_size_of
 from structguy.support_classes import CrossValidationSlice
 from structguy.sampleSpace import DataSAIL_cv, SampleSpace
 import numpy
@@ -457,13 +459,15 @@ def retrieve_dmatrix(
         return dtrain, dtest_feature_matrix, sliced_test_matrices, t_file_paths, te_file_paths, times
     return dtrain, dtest_feature_matrix, t_file_paths, te_file_paths, times
 
-@ray.remote
+@ray.remote(max_retries=0)
 def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: float):
     config: util.Config
     config, filtered_features, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, retain_model = store
     util.reset_logger_for_remotes(config)
     times = []
     ta = time.time()
+
+    p_id = os.getpid()
 
     if isinstance(packed_slice_slice, CrossValidationSlice):
         slice_slice = packed_slice_slice
@@ -477,9 +481,11 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
 
     dump_precursor = f'{config.tmp_folder}/ext_mem_data_{proc_id}'
 
-    if config.verbosity >= 3:
+    if config.verbosity >= 4:
         config.logger.info(f'Call of double_booster_remote: {lock_file=} {dump_precursor=} {retain_model=}')
         slice_slice.log_attr_sizes(config.logger)
+
+        config.logger.info(f'{p_id=} {ray.get_runtime_context().get()=}')
 
     dtrain, dtest_feature_matrix, sliced_test_emd_matrices, t_file_paths, te_file_paths, ret_times = retrieve_dmatrix(
         dump_precursor,
@@ -491,10 +497,6 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
         )
     times.append(ret_times)
     ta = add_to_times(times, ta) #2
-
-    if config.verbosity >= 3:
-        for name, size in sorted(((name, sys.getsizeof(value)) for name, value in locals().items()), key=lambda x: -x[1])[:10]:
-            config.logger.info("{:>30}: {:>8}".format(name, sizeof_fmt(size)))
 
     if config.verbosity >= 3:
         config.logger.info(f'Reached after first data retrieval in double_booster_remote {proc_id}')
@@ -511,9 +513,13 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
             print_times(times, label = 'double booster 1', logger=config.logger)
         del dtrain
         del dtest_feature_matrix
-        return None
+        return p_id
     
     acc_feat_impacts, shap_times = ext_shap_analysis(slice_slice.feature_names, booster, sliced_test_emd_matrices)
+
+    if config.verbosity >= 4:
+        for name, size in sorted(((name, deep_get_size_of(value)) for name, value in locals().items()), key=lambda x: -x[1])[:10]:
+            config.logger.info("In dbr: {:>30}: {:>8}".format(name, sizeof_fmt(size)))
 
     """
     y_pred = booster.predict(dtest_feature_matrix)
@@ -535,7 +541,7 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
             print_times(times, label = 'double booster 2', logger=config.logger)
         del dtrain
         del dtest_feature_matrix
-        return None
+        return p_id
     
     feats_to_remove = filtered_features[:]
     for feat_name, feat_impact in acc_feat_impacts:
@@ -547,7 +553,7 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
             print_times(times, label = 'double booster 3', logger=config.logger)
         del dtrain
         del dtest_feature_matrix
-        return None
+        return p_id
     
     slice_slice.filterFeatures(feats_to_remove)
     ta = add_to_times(times, ta) #7
@@ -573,14 +579,14 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
             print_times(times, label = 'double booster 4', logger=config.logger)
         del dtrain
         del dtest_feature_matrix
-        return None
+        return p_id
     
     if skip_scoring:
         if config.verbosity >= 4:
             print_times(times, label = 'double booster 5', logger=config.logger)
         del dtrain
         del dtest_feature_matrix
-        return booster_2, slice_slice.feature_names[:]
+        return booster_2, slice_slice.feature_names[:], p_id
 
     cv_slice.filterFeatures(feats_to_remove)
     ta = add_to_times(times, ta) #10
@@ -627,9 +633,9 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
 
     if retain_model:
         del booster_2
-        return y_pred, x_pred
+        return y_pred, x_pred, p_id
     else:
-        return booster_2, slice_slice.feature_names[:], y_pred, x_pred
+        return booster_2, slice_slice.feature_names[:], y_pred, x_pred, p_id
 
 
 
@@ -803,9 +809,14 @@ def trainRegressionForest(
             f"Train regression {config.forest_type} forest, call of fit with # of features: {len(cv_slice.feature_names)}, skip feature selection {skip_feature_selection}, skip scoring {skip_scoring}"
         )
 
-    if config.verbosity >= 3:
-        for name, size in sorted(((name, sys.getsizeof(value)) for name, value in locals().items()), key=lambda x: -x[1])[:10]:
+    if config.verbosity >= 4:
+        for name, size in sorted(((name, deep_get_size_of(value)) for name, value in locals().items()), key=lambda x: -x[1])[:10]:
             config.logger.info("{:>30}: {:>8}".format(name, sizeof_fmt(size)))
+
+        config.logger.info('CV slice attributes:')
+        cv_slice.log_attr_sizes(config.logger)
+        config.logger.info('Config attributes:')
+        config.log_attr_sizes()
 
     ta = add_to_times(times, ta) #5
     
@@ -838,24 +849,26 @@ def trainRegressionForest(
                     results = ray.get(ready)
                     
                     for res in results:
-                        if res is None:
+                        if isinstance(res, int):
                             if config.verbosity >= 1:
                                 config.logger.info('double_booster_remote returned None')
+
+                            os.kill(res, signal.SIGTERM)
                             return return_zero(zero_return, remote, cv_slice)
                         if skip_scoring:
-                            booster_2_list.append(res)
+                            booster, sl_sl_feat_names, db_p_id = res
+                            booster_2_list.append((booster, sl_sl_feat_names))
                         elif not remote:
-                            booster, sl_sl_feat_names, y_pred, x_pred = res
+                            booster, sl_sl_feat_names, y_pred, x_pred, db_p_id = res
                             booster_2_list.append((booster, sl_sl_feat_names))
                             y_preds.append(y_pred)
                             x_preds.append(x_pred)
                         else:
-                            y_pred, x_pred = res
+                            y_pred, x_pred, db_p_id = res
                             y_preds.append(y_pred)
                             x_preds.append(x_pred)
 
-                    for proc in ready:
-                        ray.cancel(proc, force=True)
+                        os.kill(db_p_id, signal.SIGTERM)
 
                 remote_proc_ids = not_ready
                 if len(remote_proc_ids) == 0:
