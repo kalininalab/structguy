@@ -18,6 +18,7 @@ import xgboost as xgb
 
 from structguy.scripts import radarplot
 from structman.base_utils.base_utils import Errorlog, resolve_path, pack, unpack
+from structman.lib.sdsc.sdsc_utils import deep_get_size_of, sizeof_fmt
 from structguy.consts import feat_name_category_dict, feature_categories
 
 class OutputCapture:
@@ -206,7 +207,7 @@ class Config:
 
         self.feature_penalty = None#0.00001
 
-        self.auto_weighting = True
+        self.auto_weighting = False
         self.forest_type = 'random'
 
         #Forest hyperparameters
@@ -969,7 +970,17 @@ class Config:
         f.close()
 
 
+    def log_attr_sizes(self):
+        tup_list = []
+        attrs = [a for a in dir(self) if not a.startswith('__') and not callable(getattr(self, a))]
+        for attr_name in attrs:
+            obj = self.__getattribute__(attr_name)            
+            size = deep_get_size_of(obj)
+            tup_list.append((attr_name, size))
 
+        tup_list = sorted(tup_list, key= lambda x :x[1], reverse=True)
+        for attr_name, size in tup_list[:10]:
+            self.logger.info(f'{attr_name} {sizeof_fmt(size)}')
 
 def tags_to_effect(config, tags):
     if config.target_values is not None:

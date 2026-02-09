@@ -459,7 +459,7 @@ def retrieve_dmatrix(
         return dtrain, dtest_feature_matrix, sliced_test_matrices, t_file_paths, te_file_paths, times
     return dtrain, dtest_feature_matrix, t_file_paths, te_file_paths, times
 
-@ray.remote
+@ray.remote(max_retries=0)
 def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: float):
     config: util.Config
     config, filtered_features, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, retain_model = store
@@ -498,10 +498,6 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
     times.append(ret_times)
     ta = add_to_times(times, ta) #2
 
-    if config.verbosity >= 4:
-        for name, size in sorted(((name, deep_get_size_of(value)) for name, value in locals().items()), key=lambda x: -x[1])[:10]:
-            config.logger.info("{:>30}: {:>8}".format(name, sizeof_fmt(size)))
-
     if config.verbosity >= 3:
         config.logger.info(f'Reached after first data retrieval in double_booster_remote {proc_id}')
 
@@ -520,6 +516,10 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
         return p_id
     
     acc_feat_impacts, shap_times = ext_shap_analysis(slice_slice.feature_names, booster, sliced_test_emd_matrices)
+
+    if config.verbosity >= 4:
+        for name, size in sorted(((name, deep_get_size_of(value)) for name, value in locals().items()), key=lambda x: -x[1])[:10]:
+            config.logger.info("In dbr: {:>30}: {:>8}".format(name, sizeof_fmt(size)))
 
     """
     y_pred = booster.predict(dtest_feature_matrix)
@@ -812,6 +812,11 @@ def trainRegressionForest(
     if config.verbosity >= 4:
         for name, size in sorted(((name, deep_get_size_of(value)) for name, value in locals().items()), key=lambda x: -x[1])[:10]:
             config.logger.info("{:>30}: {:>8}".format(name, sizeof_fmt(size)))
+
+        config.logger.info('CV slice attributes:')
+        cv_slice.log_attr_sizes(config.logger)
+        config.logger.info('Config attributes:')
+        config.log_attr_sizes()
 
     ta = add_to_times(times, ta) #5
     

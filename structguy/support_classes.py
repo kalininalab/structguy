@@ -357,7 +357,10 @@ class CrossValidationSlice(Slotted_obj):
             if train_equal_test:
                 self.test_targets.append(sample.targetValue)
 
-        self.sub_sampled_train_targets = self.train_targets
+        self.train_targets = numpy.array(self.train_targets)
+        self.test_targets = numpy.array(self.test_targets)
+
+        self.sub_sampled_train_targets = []
 
         t3 = time.time()
         if config.verbosity >= 3:
@@ -564,14 +567,8 @@ class CrossValidationSlice(Slotted_obj):
             else:
                 kept_pos.append(pos)
 
-        train_targets = []
-        train_sample_ids = []
-        for pos in kept_pos:
-            train_targets.append(self.train_targets[pos])
-            train_sample_ids.append(self.train_sample_ids[pos])
-
-        self.train_targets = train_targets
-        self.train_sample_ids = train_sample_ids
+        self.train_targets = self.train_targets[kept_pos]
+        self.train_sample_ids = self.train_sample_ids[kept_pos]
 
         return
 
