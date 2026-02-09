@@ -407,18 +407,6 @@ class CrossValidationSlice(Slotted_obj):
             print(f'Init CV slice part 8: {t8-t7}')
 
 
-    def log_attr_sizes(self, logger):
-        tup_list = []
-        for attr_name in self.__slots__:
-            obj = self.__getattribute__(attr_name)
-            size = sys.getsizeof(obj)
-            tup_list.append((attr_name, size))
-
-        tup_list = sorted(tup_list, key= lambda x :x[1], reverse=True)
-        for attr_name, size in tup_list[:10]:
-            logger.info(f'{attr_name} {sizeof_fmt(size)}')
-
-
     def featureSanityCheck(self, verbose = False):  
             
         return
