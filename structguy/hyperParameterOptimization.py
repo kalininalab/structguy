@@ -13,6 +13,8 @@ from sklearn.preprocessing import MinMaxScaler
 from structguy import util, trainForest
 from structguy.sampleSpace import DataSAIL_cv, CrossValidationSlice, SampleSpace
 from structman.base_utils.base_utils import pack, unpack
+from structman.lib.sdsc.sdsc_utils import deep_get_size_of, sizeof_fmt
+
 
 from ray.util.queue import Queue
 
@@ -1129,6 +1131,11 @@ def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_share,
     if config.verbosity >= 2:
         config.logger.info(f"Call of para_eval: {com_queue.empty()=}")
       
+    if config.verbosity >= 4:
+        for name, size in sorted(((name, deep_get_size_of(value)) for name, value in locals().items()), key=lambda x: -x[1])[:10]:
+            config.logger.info("In para_eval: {:>30}: {:>8}".format(name, sizeof_fmt(size)))
+
+
     not_done = True
     while not_done:
         if com_queue.empty():

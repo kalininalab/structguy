@@ -1058,7 +1058,7 @@ class Scores:
                     self, mse = None, r2 = None, corr = None, acc = None, roc = None, precision = None,
                     recall = None, f1 = None, mcc = None, pearson_r = None, zero = False, wmse = None,
                     wr2 = None, optimal = False, n_of_features = None, mean_spearman = None, 
-                    mean_pearson = None, feature_penalty = None, runtime_penalty = 0., mean_spear_repeat_std= None
+                    mean_pearson = None, feature_penalty = None, runtime_penalty = None, mean_spear_repeat_std= None
                 ):
         self.n_of_features = n_of_features
         self.feature_penalty = feature_penalty
@@ -1214,10 +1214,10 @@ class Scores:
             return self.roc
 
 
-def calc_protein_wise_corr(y_test, y_pred, sample_ids, corr_function, mono_return_score_function = False):
+def calc_protein_wise_corr(y_test, y_pred, prot_id_vec, corr_function, mono_return_score_function = False):
     test_pred_pairs = {}
     for sample_nr, yt_value in enumerate(y_test):
-        prot_id, _ = sample_ids[sample_nr]
+        prot_id = prot_id_vec[sample_nr]
         if prot_id not in test_pred_pairs:
             test_pred_pairs[prot_id] = [], []
         test_pred_pairs[prot_id][0].append(yt_value)
@@ -1326,7 +1326,7 @@ def get_objective_score(config: Config, scores: Scores, feature_penalty = None):
     else:
         raise 'Unknown objective function'
 
-    if feature_penalty is not None and scores.n_of_features is not None and score is not None:
+    if feature_penalty is not None and scores.n_of_features is not None and score is not None and scores.runtime_penalty is not None:
         scores.feature_penalty = scores.n_of_features*feature_penalty
         rp = math.log(max([1.0,(scores.runtime_penalty/3600.)]))*0.001
         if greater_is_better:

@@ -204,15 +204,16 @@ class CrossValidationSlice(Slotted_obj):
         'confusion_map',                'train_class_weight_vector',    'test_class_weight_vector',
         'fused_confusion_map',          'raw_confusion_map',            'loss_map',
         'sub_sampled_train_ids',        'sub_sampled_train_targets',    'sub_sampled_train_class_weight_vector',
-        'test_prot_vec',                'test_slice_id',                'train_slice_ids'
+        'test_prot_vec',                'test_slice_id',                'train_slice_ids',
+        'code_map'
         ]
     
     slot_mask = [
+        True, False, False,
+        False, False, True,
         True, True, True,
-        True, True, True,
-        True, True, True,
-        True, True, True,
-        True, True, True,
+        True, True, False,
+        True, False, True,
         True, True, False,
         False, False, True,
         True, True, True,
@@ -224,6 +225,7 @@ class CrossValidationSlice(Slotted_obj):
         True, True, True,
         True, True, True,
         False,True, True,
+        False
     ]
 
     def __init__(self, test_ids = None, train_ids = None, raw_feature_names = None, sample_dict = None, geometric_distance_map = None, config = None, name = '', train_prots = None, test_prots = None, train_equal_test = False, para_number = None, feature_names = None, raw_init = False):
@@ -281,6 +283,7 @@ class CrossValidationSlice(Slotted_obj):
 
         self.test_prots = test_prots
         self.test_prot_vec = None
+        self.code_map = {}
 
         self.train_equal_test = train_equal_test
 
@@ -876,7 +879,7 @@ class CrossValidationSlice(Slotted_obj):
         for sample_pos,target_value in enumerate(self.train_targets):
             u_ac,aac = self.train_sample_ids[sample_pos]
             pos = int(aac[1:-1])
-            if not (u_ac,pos) in bias_map:
+            if (u_ac,pos) not in bias_map:
                 bias_map[(u_ac,pos)] = []
 
             if not config.regression:
@@ -1141,13 +1144,14 @@ class CrossValidationSlice(Slotted_obj):
         return feat_matrix
     
     def get_encoded_test_prot_vec(self):
+        if self.code_map is None:
+            self.code_map = {}
         if self.test_prot_vec is None:
-            code_map = {}
             code_vec = []
             for prot_id, _ in self.test_sample_ids:
-                if prot_id not in code_map:
-                    code_map[prot_id] = len(code_map)
-                code = code_map[prot_id]
+                if prot_id not in self.code_map:
+                    self.code_map[prot_id] = len(self.code_map)
+                code = self.code_map[prot_id]
                 code_vec.append(code)
             code_vec = numpy.array(code_vec)
             self.test_prot_vec = code_vec
@@ -1311,7 +1315,7 @@ class CrossValidationSlice(Slotted_obj):
         if config.verbosity >= 4:
             config.logger.info(f'Call of get_extmem_dtrain: {dump_precursor}')
 
-        file_paths = self.prepare_ext_mem_qdmatrix(
+        file_paths, prot_id_vec = self.prepare_ext_mem_qdmatrix(
             dump_precursor,
             config,
             feat_pos_dict,
@@ -1326,7 +1330,8 @@ class CrossValidationSlice(Slotted_obj):
                 config.logger.info(f'Iterator is setup in get_extmem_dtrain: {dump_precursor}')
 
             ext_dtrain = xgb.ExtMemQuantileDMatrix(it, enable_categorical=True, max_bin=256, max_quantile_batches = MAX_QUANTILE_BATCHES)
-        
+            ext_dtrain.encoded_prot_vec = prot_id_vec
+
         return ext_dtrain, file_paths
 
     def prepare_ext_mem_qdmatrix(self,
@@ -1344,10 +1349,17 @@ class CrossValidationSlice(Slotted_obj):
         with open(extra_data_path, 'wb') as outf:
             pickle.dump((self.feature_names, cat_vec, feat_id_vec), outf)
 
+        prot_id_vec = None
         for train_cv_id in self.train_slice_ids:
-            for tr_fp, te_fp in config.file_path_dict[train_cv_id]:
+            data_paths, prot_vec_path = config.file_path_dict[train_cv_id]
+            for tr_fp, te_fp in data_paths:
                 file_paths.append((tr_fp, te_fp, extra_data_path))
-        return file_paths
+
+            if prot_id_vec is None:
+                prot_id_vec = numpy.load(prot_vec_path, allow_pickle=True)
+            else:
+                prot_id_vec = numpy.concatenate((prot_id_vec, numpy.load(prot_vec_path, allow_pickle=True)))
+        return file_paths, prot_id_vec
     
     def prepare_test_ext_mem_qdmatrix(self,
             dump_precursor: str,
@@ -1356,7 +1368,7 @@ class CrossValidationSlice(Slotted_obj):
             features
             ) -> list[tuple[str, str, str]]:
         feat_id_vec, cat_vec = get_feat_id_vec(self.feature_names, feat_pos_dict, features, get_cat_vec = True)
-        encoded_prot_vec = self.get_encoded_test_prot_vec()
+        #encoded_prot_vec = self.get_encoded_test_prot_vec()
 
         file_paths: list[tuple[str, str, str]] = []
 
@@ -1364,10 +1376,11 @@ class CrossValidationSlice(Slotted_obj):
         with open(extra_data_path, 'wb') as outf:
             pickle.dump((self.feature_names, cat_vec, feat_id_vec), outf)
 
-        for tr_fp, te_fp in config.file_path_dict[self.test_slice_id]:
+        data_paths, prot_vec_path = config.file_path_dict[self.test_slice_id]
+        for tr_fp, te_fp in data_paths:
             file_paths.append((tr_fp, te_fp, extra_data_path))
             
-        return file_paths, encoded_prot_vec
+        return file_paths, numpy.load(prot_vec_path, allow_pickle=True)
 
 
     def get_skewed_feat_matrices(self, samples, thresh):

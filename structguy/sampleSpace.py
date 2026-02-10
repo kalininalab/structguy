@@ -1221,12 +1221,10 @@ class X_fold_cv(CrossValidation):
             self.slices[cv_counter] = cv_slice
 
 @ray.remote(max_calls = 1)
-def init_lopo_slice(store, test_prots, cv_counter = None):
-    config, sample_dict, raw_feature_names, all_prots = store
+def init_lopo_slice(store, test_prots, train_prots, cv_counter = None):
+    config, sample_dict, raw_feature_names, sample_list = store
 
-    train_prots = all_prots - test_prots
-
-    test_ids, train_ids = splitDataSet(config, sample_dict, specific_id=test_prots, protein_wise=True)
+    test_ids, train_ids = splitDataSet(config, sample_list, specific_id=test_prots, protein_wise=True)
 
     if cv_counter is None:
         for name in test_prots:
@@ -1241,12 +1239,12 @@ def init_lopo_slice(store, test_prots, cv_counter = None):
     if config.verbosity >= 5:
         #config.logger.info(f'Features of slice {cv_slice.name}:\n{cv_slice.features}')
         cv_slice.featureSanityCheck()
-    cv_slice = pack(cv_slice)
+    
     return (name, cv_slice)
     #return (name, cv_slice)
 
 class LOPO(CrossValidation):
-    def __init__(self, sampleSpace, config):
+    def __init__(self, sampleSpace: SampleSpace, config):
         t0 = time.time()
         config.logger.info('-- LOPO initialization --')
         super().__init__()
@@ -1336,7 +1334,7 @@ class Given_split(CrossValidation):
 
 class DataSAIL_cv(CrossValidation):
     __slots__ = cv_slots + ['prots']
-    def __init__(self, samples_store_id = None, sampleSpace = None, config = None, as_list = None):
+    def __init__(self, samples_store_id = None, sampleSpace: SampleSpace | None = None, config = None, as_list = None):
         t0 = time.time()
         if as_list is not None:
             for slot_number, slot in enumerate(self.__slots__):
@@ -1348,7 +1346,9 @@ class DataSAIL_cv(CrossValidation):
 
         weight_map = {}
         prots = set()
-        for (prot_id, aac) in sampleSpace.samples:
+        sample_list = list(sampleSpace.samples.keys())
+
+        for (prot_id, aac) in sample_list:
             if prot_id not in weight_map:
                 weight_map[prot_id] = 0
                 prots.add(prot_id)
@@ -1450,7 +1450,7 @@ class DataSAIL_cv(CrossValidation):
         if config.verbosity >= 4:
             config.logger.info(f'Init datasail:\nSplits: {train_test_pairs}\n')
 
-        store = ray.put((config, sampleSpace.samples, sampleSpace.feature_names, prots))
+        store = ray.put((config, sampleSpace.samples, sampleSpace.feature_names, sample_list))
 
         t4 = time.time()
         if config.verbosity >= 2:
@@ -1463,7 +1463,7 @@ class DataSAIL_cv(CrossValidation):
             if config.verbosity >= 2:
                 config.logger.info(f'Init datasail slice {cv_counter=}: {len(test_set)=}')
 
-            init_ids.append(init_lopo_slice.remote(store, set(test_set), cv_counter = cv_counter))
+            init_ids.append(init_lopo_slice.remote(store, test_set, train_set, cv_counter = cv_counter))
 
         init_results = ray.get(init_ids)
 
@@ -1475,12 +1475,15 @@ class DataSAIL_cv(CrossValidation):
 
         for cv_counter, cv_slice in init_results:
 
-            self.slices[cv_counter] = unpack(cv_slice)
+            self.slices[cv_counter] = cv_slice
             self.slices[cv_counter].test_slice_id = cv_counter
             self.slices[cv_counter].train_slice_ids = []
             for train_cv_counter in range(config.crossValidation_fold):
                 if train_cv_counter != cv_counter:
                     self.slices[cv_counter].train_slice_ids.append(train_cv_counter)
+
+            if config.verbosity >= 4:
+                config.logger.info(f'Init CV slice {cv_counter=} {self.slices[cv_counter].train_slice_ids=}')
 
             if config.verbosity >= 5:
                 cv_slice = self.slices[cv_counter]
@@ -1499,9 +1502,9 @@ class DataSAIL_cv(CrossValidation):
 
             dump_precursor = f'{config.tmp_folder}/ext_mem_data_{cv_counter}'
 
-            file_paths = put_data_to_tmp_storage(dump_precursor, self.slices[cv_counter], sampleSpace, config)
+            file_paths, prot_vec_path = put_data_to_tmp_storage(dump_precursor, self.slices[cv_counter], sampleSpace, config)
 
-            file_path_dict[cv_counter] = file_paths
+            file_path_dict[cv_counter] = file_paths, prot_vec_path
 
             slice_slices = []
 
@@ -1516,7 +1519,7 @@ class DataSAIL_cv(CrossValidation):
                     ignore_samples = None
                 else:
                     ignore_samples = set(self.slices[cv_counter].test_sample_ids)
-                test_ids, train_ids = splitDataSet(config, sampleSpace.samples, specific_id=subslice_test_proteins, protein_wise=(not config.random_split), ignore_samples=ignore_samples)
+                test_ids, train_ids = splitDataSet(config, sample_list, specific_id=subslice_test_proteins, protein_wise=(not config.random_split), ignore_samples=ignore_samples)
 
                 cv_slice_slice = CrossValidationSlice(
                     test_ids,
@@ -1565,6 +1568,10 @@ def put_data_to_tmp_storage(dump_precursor: str, cv_slice: CrossValidationSlice,
 
     config.logger.info(f'{gmem=} {sub_share=} {num_of_batches=} {batch_size=} {len(feat_matrix)=}')
 
+    prot_id_vec = cv_slice.get_encoded_test_prot_vec()
+    prot_vec_path = f'{dump_precursor}_prot_id_vec.npy'
+    prot_id_vec.dump(prot_vec_path)
+
     for batch_nr in range(num_of_batches):
         batch = np.array(feat_matrix[batch_nr*batch_size:(batch_nr+1)*batch_size], dtype=np.float32)
         if len(batch) == 0:
@@ -1581,4 +1588,4 @@ def put_data_to_tmp_storage(dump_precursor: str, cv_slice: CrossValidationSlice,
 
         file_paths.append((batch_path, y_batch_path))
 
-    return file_paths
+    return file_paths, prot_vec_path
