@@ -806,7 +806,7 @@ def trainRegressionForest(
 
     if print_out or config.verbosity >= 3:
         config.logger.info(
-            f"Train regression {config.forest_type} forest, call of fit with # of features: {len(cv_slice.feature_names)}, skip feature selection {skip_feature_selection}, skip scoring {skip_scoring}"
+            f"Train regression {config.forest_type} forest, call of fit with # of features: {len(cv_slice.feature_names)}, skip feature selection {skip_feature_selection}, skip scoring {skip_scoring} {sub_gpu_share=}"
         )
 
     if config.verbosity >= 4:

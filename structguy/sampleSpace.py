@@ -1557,13 +1557,13 @@ def put_data_to_tmp_storage(dump_precursor: str, cv_slice: CrossValidationSlice,
 
     gmem = get_gpu_memory()[0]
     sub_share = config.multi_gpu / (config.threads_per_gpu * config.crossValidation_fold * (config.crossValidation_fold-1))
-    num_of_batches = max([1, int(1 * (len(feat_matrix)/ (50 * gmem*sub_share)))])
+    num_of_batches = max([1, int(1 * (len(feat_matrix)/ (100 * gmem*sub_share)))])
 
     batch_size = len(feat_matrix) // num_of_batches
     if len(feat_matrix) % num_of_batches != 0:
         batch_size += 1
 
-    config.logger.info(f'{gmem=} {sub_share=} {num_of_batches=} {batch_size=}')
+    config.logger.info(f'{gmem=} {sub_share=} {num_of_batches=} {batch_size=} {len(feat_matrix)=}')
 
     for batch_nr in range(num_of_batches):
         batch = np.array(feat_matrix[batch_nr*batch_size:(batch_nr+1)*batch_size], dtype=np.float32)

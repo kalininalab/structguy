@@ -649,7 +649,7 @@ def bayesian_optimisation(
         n_of_sent_hpo_sets = 0
         number_of_procs = max([1,int(config.multi_gpu * threads_per_gpu)])
 
-        gpu_share = 1/threads_per_gpu
+        gpu_share = config.multi_gpu/threads_per_gpu
         remote_function = para_eval #.options(num_gpus = gpu_share)
         
         for p in range(number_of_procs):
