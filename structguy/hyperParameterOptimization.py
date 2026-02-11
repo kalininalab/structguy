@@ -512,7 +512,7 @@ def bayesian_optimisation(
     count_dups = 0
 
     if config.verbosity >= 1:
-        config.logger.info(f"Number of bayesian optimization iterations: {n_iters}")
+        config.logger.info(f"Number of bayesian optimization iterations: {n_iters=}")
 
     if config.multi_gpu < 1:
 
@@ -686,16 +686,17 @@ def bayesian_optimisation(
             for i, (com_queue, out_queue, proc_id) in enumerate(remote_processes):
                 
                 if not out_queue.empty():
-                    (scores, next_sample, first_scores) = out_queue.get(timeout=5)
+                    (scores, next_sample, first_scores) = out_queue.get(timeout=0.5)
                     n_of_sent_hpo_sets -= 1
-                    
+                else:
+                    continue
+                """
                 elif current_params_id >= n_iters:
                     if not dones[i]:
                         com_queue.put(None)
                         dones[i] = True
                     continue
-                else:
-                    continue
+                """
 
                 if isinstance(first_scores, float):
                     cv_score = first_scores
@@ -1181,6 +1182,8 @@ def initConfParameters(config, parameters, thresh_only = False):
 
 
 def initFSForestParameters(config, parameters):
+    if config.forest_type == "xgboost":
+        return parameters
     # parameters['fs_tree_depth'] = Parameter('fs_tree_depth','integer',half_step_limits = config.tree_depth_half_step)
     # parameters['fs_num_of_trees'] = Parameter('fs_num_of_trees','integer',half_step_limits = config.forest_size_half_step)
     # parameters['fs_min_impurity_decrease_exp'] = Parameter('fs_min_impurity_decrease_exp','real',half_step_limits = config.min_impurity_decrease_exp_half_step)
@@ -1258,8 +1261,8 @@ def initParameters(
         parameters = fs_parameters
 
     if config.hpo_do_forest_param:
-        
-        parameters["max_sample_parameter"] = Parameter("max_sample_parameter", "real", half_step_limits=config.max_sample_half_step)
+        if config.hpo_do_feat_selection and do_feat_selection:
+            parameters["max_sample_parameter"] = Parameter("max_sample_parameter", "real", half_step_limits=config.max_sample_half_step)
 
         if config.forest_type == "random" or config.forest_type == "gradient_boost":
             parameters["num_of_trees"] = Parameter("num_of_trees", "integer", half_step_limits=config.forest_size_half_step)
@@ -1271,23 +1274,26 @@ def initParameters(
             parameters["tree_depth"] = Parameter("tree_depth", "integer", half_step_limits=config.tree_depth_half_step)
 
         if config.forest_type == "gradient_boost" or config.forest_type == "xgboost":
-            parameters["learning_rate"] = Parameter("learning_rate", "real", half_step_limits=[0.0, 2.0])
+            if config.hpo_do_feat_selection and do_feat_selection:
+                parameters["learning_rate"] = Parameter("learning_rate", "real", half_step_limits=[0.0, 2.0])
             parameters["learning_rate_1"] = Parameter("learning_rate_1", "real", half_step_limits=[0.0, 2.0])
+            
         if config.forest_type == "xgboost":
-            parameters["early_stopping"] = Parameter("early_stopping", "integer", half_step_limits=[1, 1000])
-            parameters["min_child_weight"] = Parameter("min_child_weight", "real", half_step_limits=[0., 100.])
-            parameters["xgb_gamma"] = Parameter("xgb_gamma", "real", half_step_limits=[0.,10.])
-            parameters["xgb_alpha"] = Parameter("xgb_alpha", "real", half_step_limits=[0.,5.])
-            parameters["xgb_lambda"] = Parameter("xgb_lambda", "real", half_step_limits=[0.,5.])
-            parameters["colsample_bytree"] = Parameter("colsample_bytree", "real", half_step_limits=[0.,1.])
-            parameters["colsample_bylevel"] = Parameter("colsample_bylevel", "real", half_step_limits=[0.,1.])
-            parameters["colsample_bynode"] = Parameter("colsample_bynode", "real", half_step_limits=[0.,1.])
-            parameters["max_delta_step"] = Parameter("max_delta_step", "real", half_step_limits=[0.,50.])
-            parameters["feat_impact_thresh"] = Parameter("feat_impact_thresh", "real", half_step_limits=[-0.01,0.01])
-            parameters["tree_depth"] = Parameter("tree_depth", "integer", half_step_limits=[1,31])
-            parameters["num_of_trees"] = Parameter("num_of_trees", "integer", half_step_limits=[10,10_000])
-            parameters["max_cat_to_onehot"] = Parameter("max_cat_to_onehot", "integer", half_step_limits=[1,500])
-            parameters["max_cat_threshold"] = Parameter("max_cat_threshold", "integer", half_step_limits=[1,500])
+            if config.hpo_do_feat_selection and do_feat_selection:
+                parameters["early_stopping"] = Parameter("early_stopping", "integer", half_step_limits=[1, 1000])
+                parameters["min_child_weight"] = Parameter("min_child_weight", "real", half_step_limits=[0., 100.])
+                parameters["xgb_gamma"] = Parameter("xgb_gamma", "real", half_step_limits=[0.,10.])
+                parameters["xgb_alpha"] = Parameter("xgb_alpha", "real", half_step_limits=[0.,5.])
+                parameters["xgb_lambda"] = Parameter("xgb_lambda", "real", half_step_limits=[0.,5.])
+                parameters["colsample_bytree"] = Parameter("colsample_bytree", "real", half_step_limits=[0.,1.])
+                parameters["colsample_bylevel"] = Parameter("colsample_bylevel", "real", half_step_limits=[0.,1.])
+                parameters["colsample_bynode"] = Parameter("colsample_bynode", "real", half_step_limits=[0.,1.])
+                parameters["max_delta_step"] = Parameter("max_delta_step", "real", half_step_limits=[0.,50.])
+                parameters["feat_impact_thresh"] = Parameter("feat_impact_thresh", "real", half_step_limits=[-0.01,0.01])
+                parameters["tree_depth"] = Parameter("tree_depth", "integer", half_step_limits=[1,31])
+                parameters["num_of_trees"] = Parameter("num_of_trees", "integer", half_step_limits=[10,10_000])
+                parameters["max_cat_to_onehot"] = Parameter("max_cat_to_onehot", "integer", half_step_limits=[1,500])
+                parameters["max_cat_threshold"] = Parameter("max_cat_threshold", "integer", half_step_limits=[1,500])
 
             parameters["max_sample_parameter_1"] = Parameter("max_sample_parameter_1", "real", half_step_limits=config.max_sample_half_step)
             parameters["early_stopping_1"] = Parameter("early_stopping_1", "integer", half_step_limits=[1, 1000])
@@ -1563,12 +1569,15 @@ def bayesianComplete(
 
     return
 
+LEAF_SIZE = 4
+MAX_PARAMS = 12
+
 class SubdimensionNode:
     def __init__(self, param_names: list[str], parent, tree):
         self.parent = parent
         self.tree = tree
         self.param_names = param_names
-        if len(param_names) > 3:
+        if len(param_names) > LEAF_SIZE:
             h = len(param_names) // 2
             self.left_params = param_names[:h]
             self.right_params = param_names[h:]
@@ -1620,7 +1629,7 @@ class SubdimensionNode:
                 combined_x.append(completed_param_values)
                 combined_y.append(right_y[pos])
 
-            if len(self.param_names) > 8:
+            if len(self.param_names) > MAX_PARAMS:
                 return combined_x, combined_y
 
             param_set = [self.tree.parameters[param] for param in self.param_names]
