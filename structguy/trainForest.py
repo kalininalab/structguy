@@ -342,7 +342,8 @@ def xgb_train_wrapper(
     eval_label = 'eval'
     
     # Make sure XGBoost is using the CUDA async pool for all allocations.
-    with xgb.config_context(use_cuda_async_pool=True):
+    #with xgb.config_context(use_cuda_async_pool=True):
+    with xgb.config_context(use_rmm=True):
         if not second_round:
             es = xgb.callback.EarlyStopping(
                 rounds=config.early_stopping,
@@ -478,7 +479,7 @@ def retrieve_dmatrix(
     feat_pos_dict, features = ray.get(raw_feature_matrix_store_id)
     ta = add_to_times(times, ta)
     try:
-        setup_memory_resources(config, sub_share)
+        setup_memory_resources(config, sub_share, cuda_setup=False)
         dtrain, t_file_paths = cv_slice.get_extmem_dtrain(dump_precursor, config, feat_pos_dict, features, sub_share)
         ta = add_to_times(times, ta)
         dtest_feature_matrix, te_file_paths, sliced_test_matrices = cv_slice.get_extmem_dtest(dump_precursor, config, feat_pos_dict, features, sub_share, dtrain, get_sliced_test_matrices = get_sliced_test_matrices)
@@ -532,15 +533,15 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
         sub_share,
         get_sliced_test_matrices = True
         )
-    times.append(ret_times)
-    ta = add_to_times(times, ta) #2
+    times.append(ret_times) #2
+    ta = add_to_times(times, ta) #3
 
     if config.verbosity >= 3:
         config.logger.info(f'Reached after first data retrieval in double_booster_remote {proc_id}')
 
 
     booster = xgb_train_wrapper(config, dtrain, dtest_feature_matrix)
-    ta = add_to_times(times, ta) #3
+    ta = add_to_times(times, ta) #4
 
     if config.verbosity >= 3:
         config.logger.info(f'Reached after first training in double_booster_remote {proc_id}')
@@ -558,15 +559,17 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
         for name, size in sorted(((name, deep_get_size_of(value)) for name, value in locals().items()), key=lambda x: -x[1])[:10]:
             config.logger.info("In dbr: {:>30}: {:>8}".format(name, sizeof_fmt(size)))
 
+    ta = add_to_times(times, ta) #5
+
     """
     y_pred = booster.predict(dtest_feature_matrix)
-    ta = add_to_times(times, ta) #4
+    
 
     acc_feat_impacts, shap_times = shap_analysis(config, booster, dtest_feature_matrix, slice_slice.feature_names, y_pred, slice_slice.test_targets)
     
     """
-    times.append(shap_times) #5
-    ta = add_to_times(times, ta) #6
+    times.append(shap_times) #6
+    ta = add_to_times(times, ta) #7
     
     del booster
 
@@ -593,7 +596,7 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
         return p_id
     
     slice_slice.filterFeatures(feats_to_remove)
-    ta = add_to_times(times, ta) #7
+    ta = add_to_times(times, ta) #8
 
     dtrain, dtest_feature_matrix, t_file_paths, te_file_paths, ret_times = retrieve_dmatrix(
         dump_precursor,
@@ -602,11 +605,11 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
         slice_slice,
         sub_share
         )
-    times.append(ret_times)
-    ta = add_to_times(times, ta) #8
+    times.append(ret_times) #9
+    ta = add_to_times(times, ta) #10
 
     booster_2 = xgb_train_wrapper(config, dtrain, dtest_feature_matrix, second_round=True)
-    ta = add_to_times(times, ta) #9
+    ta = add_to_times(times, ta) #11
 
     if config.verbosity >= 3:
         config.logger.info(f'Reached after second training in double_booster_remote {proc_id}')
@@ -626,7 +629,7 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
         return booster_2, slice_slice.feature_names[:], p_id
 
     cv_slice.filterFeatures(feats_to_remove)
-    ta = add_to_times(times, ta) #10
+    ta = add_to_times(times, ta) #12
 
     if config.verbosity >= 3:
         config.logger.info(f'Reached after cv_slice feat filter in double_booster_remote {proc_id} {cv_slice.train_slice_ids=} {score_train=}')
@@ -645,7 +648,7 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
         x_true = dtrain.get_label()
         x_prot_vec = dtrain.encoded_prot_vec
 
-        if config.verbosity >= 4:
+        if config.verbosity >= 5:
             train_scores_obj = calc_scores_obj(x_true, x_pred, x_prot_vec, cv_slice.train_class_weight_vector, cv_slice.feature_names)
             config.logger.info('Train scores:')
             train_scores_obj.printOut(config = config)
@@ -670,7 +673,7 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
     y_prot_vec = dtest_feature_matrix.encoded_prot_vec
 
     
-    ta = add_to_times(times, ta) #11
+    ta = add_to_times(times, ta) #13
 
     if config.verbosity >= 3:
         config.logger.info(f'Reached the end of double_booster_remote {proc_id}')
