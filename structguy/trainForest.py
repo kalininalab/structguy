@@ -335,7 +335,7 @@ def xgb_train_wrapper(
         dtrain: xgb.DMatrix,
         dtest_feature_matrix: xgb.DMatrix,
         second_round = False,
-        ext_mem=False
+        ext_mem=True
         ):
         
     es_list = []
@@ -349,7 +349,7 @@ def xgb_train_wrapper(
             mem_context = xgb.config_context(use_rmm=True)
     else:
         mem_context = xgb.config_context()
-        
+
     with mem_context:
         if not second_round:
             es = xgb.callback.EarlyStopping(
@@ -478,7 +478,7 @@ def retrieve_dmatrix(
         cv_slice: CrossValidationSlice,
         sub_share: float,
         get_sliced_test_matrices: bool=False,
-        ext_mem = False
+        ext_mem = True
         ):
 
     times = []
@@ -487,7 +487,6 @@ def retrieve_dmatrix(
     ta = add_to_times(times, ta)
     if ext_mem:
         try:
-            setup_memory_resources(config, sub_share, cuda_setup=config.setup_cuda_mem)
             dtrain, t_file_paths = cv_slice.get_extmem_dtrain(dump_precursor, config, feat_pos_dict, features, sub_share)
             ta = add_to_times(times, ta)
             dtest_feature_matrix, te_file_paths, sliced_test_matrices = cv_slice.get_extmem_dtest(dump_precursor, config, feat_pos_dict, features, sub_share, dtrain, get_sliced_test_matrices = get_sliced_test_matrices)
@@ -544,6 +543,8 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
         slice_slice.log_attr_sizes(config.logger, label = f'slice_slice {proc_id} ')
         cv_slice.log_attr_sizes(config.logger, label = f'cv slice {proc_id} ')
         config.logger.info(f'{p_id=} {ray.get_runtime_context().get()=}')
+
+    setup_memory_resources(config, sub_share, cuda_setup=config.setup_cuda_mem)
 
     dtrain, dtest_feature_matrix, sliced_test_emd_matrices, t_file_paths, te_file_paths, ret_times = retrieve_dmatrix(
         dump_precursor,

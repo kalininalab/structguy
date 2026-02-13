@@ -79,7 +79,7 @@ class Config:
         self.python_env_expanded_for_ray = False
         self.gpu_mode = False
 
-        self.setup_cuda_mem = True
+        self.setup_cuda_mem = False
 
         self.plot_trees = False
 

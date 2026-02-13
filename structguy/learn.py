@@ -34,7 +34,7 @@ from structguy.util import (
 )
 from structguy.consts import feature_categories
 
-from xgboost import plot_tree, DMatrix
+from xgboost import plot_tree, DMatrix, build_info
 import matplotlib.pyplot as plt
 
 
@@ -139,6 +139,7 @@ def learn(config: Config):
         elif config.path_to_processed_features_file is not None:
             config.logger.info(f"Using feature file: {config.path_to_processed_features_file}")
         config.logger.info(f"Writing output to: {config.outfolder}")
+        config.logger.info(f'{build_info()=}')
 
     t0 = time.time()
     samples: sampleSpace.SampleSpace = featureGenerator.createTrainingSet(config, stop_matrix_transformation=(config.path_to_support_features is not None))
