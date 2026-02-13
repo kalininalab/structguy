@@ -1367,6 +1367,50 @@ class CrossValidationSlice(Slotted_obj):
                 prot_id_vec = numpy.concatenate((prot_id_vec, numpy.load(prot_vec_path, allow_pickle=True)))
         return file_paths, prot_id_vec
     
+    def dmat_from_disc(self,
+        config: Config,
+        feat_pos_dict: dict[str, int],
+        features
+        ):
+        feat_id_vec, cat_vec = get_feat_id_vec(self.feature_names, feat_pos_dict, features, get_cat_vec = True)
+
+        X = None
+        Y = None
+
+        prot_id_vec = None
+
+        for train_cv_id in self.train_slice_ids:
+            data_paths, prot_vec_path = config.file_path_dict[train_cv_id]
+            for tr_fp, te_fp in data_paths:
+                tr_chunk = numpy.load(tr_fp, allow_pickle=True)
+                tr_chunk = tr_chunk[:, feat_id_vec]
+                if X is None:
+                    X = tr_chunk
+                else:
+                    X = numpy.concatenate((X, tr_chunk))
+
+                te_chunk = numpy.load(te_fp, allow_pickle=True)
+                if Y is None:
+                    Y = te_chunk
+                else:
+                    Y = numpy.concatenate((Y, te_chunk))
+
+            if prot_id_vec is None:
+                prot_id_vec = numpy.load(prot_vec_path, allow_pickle=True)
+            else:
+                prot_id_vec = numpy.concatenate((prot_id_vec, numpy.load(prot_vec_path, allow_pickle=True)))
+
+
+        dtrain = xgb.QuantileDMatrix(
+            X,
+            label=Y,
+            feature_types=cat_vec,
+            enable_categorical=True,
+            feature_names = self.feature_names)
+        dtrain.encoded_prot_vec = prot_id_vec
+
+        return dtrain
+
     def prepare_test_ext_mem_qdmatrix(self,
             dump_precursor: str,
             config: Config,
@@ -1388,6 +1432,46 @@ class CrossValidationSlice(Slotted_obj):
             
         return file_paths, numpy.load(prot_vec_path, allow_pickle=True)
 
+
+    def dtest_from_disc(self,
+        config: Config,
+        feat_pos_dict: dict[str, int],
+        features,
+        dtrain: xgb.DMatrix
+        ):
+
+        feat_id_vec, cat_vec = get_feat_id_vec(self.feature_names, feat_pos_dict, features, get_cat_vec = True)
+
+        X = None
+        Y = None
+
+        data_paths, prot_vec_path = config.file_path_dict[self.test_slice_id]
+        for tr_fp, te_fp in data_paths:
+            tr_chunk = numpy.load(tr_fp, allow_pickle=True)
+            tr_chunk = tr_chunk[:, feat_id_vec]
+            if X is None:
+                X = tr_chunk
+            else:
+                X = numpy.concatenate((X, tr_chunk))
+
+            te_chunk = numpy.load(te_fp, allow_pickle=True)
+            if Y is None:
+                Y = te_chunk
+            else:
+                Y = numpy.concatenate((Y, te_chunk))
+
+        prot_id_vec = numpy.load(prot_vec_path, allow_pickle=True)
+
+        dtest = xgb.QuantileDMatrix(
+            X,
+            label=Y,
+            feature_types=cat_vec,
+            enable_categorical=True,
+            feature_names = self.feature_names,
+            ref = dtrain)
+        dtest.encoded_prot_vec = prot_id_vec
+        
+        return dtest
 
     def get_skewed_feat_matrices(self, samples, thresh):
         feat_matrices = samples.get_skewed_feat_matrices_from_ids(self.train_sample_ids, self.feature_names, thresh)

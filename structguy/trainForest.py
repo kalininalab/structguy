@@ -335,16 +335,21 @@ def xgb_train_wrapper(
         dtrain: xgb.DMatrix,
         dtest_feature_matrix: xgb.DMatrix,
         second_round = False,
+        ext_mem=False
         ):
         
     es_list = []
     evals: list[tuple[xgb.DMatrix, str]] = []
     eval_label = 'eval'
     
-    if config.setup_cuda_mem:
-        mem_context = xgb.config_context(use_cuda_async_pool=True)
+    if ext_mem:
+        if config.setup_cuda_mem:
+            mem_context = xgb.config_context(use_cuda_async_pool=True)
+        else:
+            mem_context = xgb.config_context(use_rmm=True)
     else:
-        mem_context = xgb.config_context(use_rmm=True)
+        mem_context = xgb.config_context()
+        
     with mem_context:
         if not second_round:
             es = xgb.callback.EarlyStopping(
@@ -473,25 +478,38 @@ def retrieve_dmatrix(
         cv_slice: CrossValidationSlice,
         sub_share: float,
         get_sliced_test_matrices: bool=False,
-        only_test: bool =False
+        ext_mem = False
         ):
 
     times = []
     ta = time.time()
     feat_pos_dict, features = ray.get(raw_feature_matrix_store_id)
     ta = add_to_times(times, ta)
-    try:
-        setup_memory_resources(config, sub_share, cuda_setup=config.setup_cuda_mem)
-        dtrain, t_file_paths = cv_slice.get_extmem_dtrain(dump_precursor, config, feat_pos_dict, features, sub_share)
+    if ext_mem:
+        try:
+            setup_memory_resources(config, sub_share, cuda_setup=config.setup_cuda_mem)
+            dtrain, t_file_paths = cv_slice.get_extmem_dtrain(dump_precursor, config, feat_pos_dict, features, sub_share)
+            ta = add_to_times(times, ta)
+            dtest_feature_matrix, te_file_paths, sliced_test_matrices = cv_slice.get_extmem_dtest(dump_precursor, config, feat_pos_dict, features, sub_share, dtrain, get_sliced_test_matrices = get_sliced_test_matrices)
+            ta = add_to_times(times, ta)
+            del feat_pos_dict
+            del features
+            ta = add_to_times(times, ta)
+        except (MemoryError, RuntimeError, xgb.core.XGBoostError) as err:
+            raise err
+        
+    else:
+        dtrain = cv_slice.dmat_from_disc(config, feat_pos_dict, features)
+        t_file_paths = None
         ta = add_to_times(times, ta)
-        dtest_feature_matrix, te_file_paths, sliced_test_matrices = cv_slice.get_extmem_dtest(dump_precursor, config, feat_pos_dict, features, sub_share, dtrain, get_sliced_test_matrices = get_sliced_test_matrices)
+
+        dtest_feature_matrix = cv_slice.dtest_from_disc(config, feat_pos_dict, features, dtrain)
+        te_file_paths = None
+        sliced_test_matrices = [dtest_feature_matrix]
         ta = add_to_times(times, ta)
         del feat_pos_dict
         del features
-        ta = add_to_times(times, ta)
-    except (MemoryError, RuntimeError, xgb.core.XGBoostError) as err:
-        raise err
-        
+
     if get_sliced_test_matrices:
         return dtrain, dtest_feature_matrix, sliced_test_matrices, t_file_paths, te_file_paths, times
     return dtrain, dtest_feature_matrix, t_file_paths, te_file_paths, times
@@ -661,8 +679,7 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
         config,
         raw_feature_matrix_store_id,
         cv_slice,
-        sub_share,
-        only_test = True
+        sub_share
         )
         times.append(ret_times)
         
