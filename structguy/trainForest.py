@@ -341,9 +341,11 @@ def xgb_train_wrapper(
     evals: list[tuple[xgb.DMatrix, str]] = []
     eval_label = 'eval'
     
-    # Make sure XGBoost is using the CUDA async pool for all allocations.
-    #with xgb.config_context(use_cuda_async_pool=True):
-    with xgb.config_context(use_rmm=True):
+    if config.setup_cuda_mem:
+        mem_context = xgb.config_context(use_cuda_async_pool=True)
+    else:
+        mem_context = xgb.config_context(use_rmm=True)
+    with mem_context:
         if not second_round:
             es = xgb.callback.EarlyStopping(
                 rounds=config.early_stopping,
@@ -479,7 +481,7 @@ def retrieve_dmatrix(
     feat_pos_dict, features = ray.get(raw_feature_matrix_store_id)
     ta = add_to_times(times, ta)
     try:
-        setup_memory_resources(config, sub_share, cuda_setup=False)
+        setup_memory_resources(config, sub_share, cuda_setup=config.setup_cuda_mem)
         dtrain, t_file_paths = cv_slice.get_extmem_dtrain(dump_precursor, config, feat_pos_dict, features, sub_share)
         ta = add_to_times(times, ta)
         dtest_feature_matrix, te_file_paths, sliced_test_matrices = cv_slice.get_extmem_dtest(dump_precursor, config, feat_pos_dict, features, sub_share, dtrain, get_sliced_test_matrices = get_sliced_test_matrices)

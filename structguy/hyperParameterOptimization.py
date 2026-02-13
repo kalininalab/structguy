@@ -651,7 +651,7 @@ def bayesian_optimisation(
         n_of_sent_hpo_sets = 0
         number_of_procs = max([1,int(config.multi_gpu * threads_per_gpu)])
 
-        gpu_share = config.multi_gpu/threads_per_gpu
+        gpu_share = 1/threads_per_gpu
         remote_function = para_eval #.options(num_gpus = gpu_share)
         
         for p in range(number_of_procs):
@@ -1277,7 +1277,7 @@ def initParameters(
             if config.hpo_do_feat_selection and do_feat_selection:
                 parameters["learning_rate"] = Parameter("learning_rate", "real", half_step_limits=[0.0, 2.0])
             parameters["learning_rate_1"] = Parameter("learning_rate_1", "real", half_step_limits=[0.0, 2.0])
-            
+
         if config.forest_type == "xgboost":
             if config.hpo_do_feat_selection and do_feat_selection:
                 parameters["early_stopping"] = Parameter("early_stopping", "integer", half_step_limits=[1, 1000])
