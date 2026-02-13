@@ -21,6 +21,10 @@ import xgboost as xgb
 from ray.train.xgboost import XGBoostTrainer, RayTrainReportCallback
 
 import cupy as cp
+import cuda.bindings.driver as driver
+import cuda.bindings.runtime as cudart
+from cupy.cuda import MemoryAsyncPool
+
 from rmm.allocators.cupy import rmm_cupy_allocator
 from rmm.mr import PoolMemoryResource, CudaAsyncMemoryResource, set_current_device_resource
 
@@ -337,79 +341,107 @@ def xgb_train_wrapper(
     evals: list[tuple[xgb.DMatrix, str]] = []
     eval_label = 'eval'
     
-
-    if not second_round:
-        es = xgb.callback.EarlyStopping(
-            rounds=config.early_stopping,
-            min_delta=1e-4,
-            save_best=True,
-            maximize=False,
-            data_name='eval',
-            metric_name='irho',
-        )
-        es_list.append(es)
-        evals.append((dtest_feature_matrix, eval_label))
-        xgb_params = {
-            "tree_method": "hist",
-            "device": "cuda",
-            "max_depth": config.tree_depth,
-            "reg_alpha": config.xgb_alpha,
-            "reg_lambda": config.xgb_lambda,
-            "colsample_bytree": config.colsample_bytree,
-            "colsample_bylevel": config.colsample_bylevel,
-            "colsample_bynode": config.colsample_bynode,
-            "max_delta_step": config.max_delta_step,
-            "gamma": config.xgb_gamma,
-            "learning_rate": config.learning_rate,
-            "min_child_weight": config.min_child_weight,
-            "early_stopping_rounds": config.early_stopping,
-            "subsample": config.max_sample_parameter,
-            "callbacks": es_list,
-            #"eval_metric": ['irho'],
-            "disable_default_eval_metric": True,
-            "max_cat_to_onehot": int(config.max_cat_to_onehot),
-            "max_cat_threshold": int(config.max_cat_threshold),
-            'random_state' : int(time.time())
-            }
-        forest = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees), early_stopping_rounds= config.early_stopping, evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
-    else:
-        es = xgb.callback.EarlyStopping(
-            rounds=config.early_stopping_1,
-            min_delta=1e-4,
-            save_best=True,
-            maximize=False,
-            data_name='eval',
-            metric_name='irho',
-        )
-        es_list.append(es)
-        evals.append((dtest_feature_matrix, eval_label))
-        xgb_params = {
-            "tree_method": "hist",
-            "device": "cuda",
-            "max_depth": int(config.tree_depth_1),
-            "reg_alpha": config.xgb_alpha_1,
-            "reg_lambda": config.xgb_lambda_1,
-            "colsample_bytree": config.colsample_bytree_1,
-            "colsample_bylevel": config.colsample_bylevel_1,
-            "colsample_bynode": config.colsample_bynode_1,
-            "max_delta_step": config.max_delta_step_1,
-            "gamma": config.xgb_gamma_1,
-            "learning_rate": config.learning_rate_1,
-            "min_child_weight": config.min_child_weight_1,
-            "early_stopping_rounds": int(config.early_stopping_1),
-            "subsample": config.max_sample_parameter_1,
-            "callbacks": es_list,
-            #"eval_metric": ['irho'],
-            "disable_default_eval_metric": True,
-            "max_cat_to_onehot": int(config.max_cat_to_onehot_1),
-            "max_cat_threshold": int(config.max_cat_threshold_1),
-            'random_state' : int(time.time())
-            }
-        forest = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees_1), early_stopping_rounds=int(config.early_stopping_1), evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
+    # Make sure XGBoost is using the CUDA async pool for all allocations.
+    with xgb.config_context(use_cuda_async_pool=True):
+        if not second_round:
+            es = xgb.callback.EarlyStopping(
+                rounds=config.early_stopping,
+                min_delta=1e-4,
+                save_best=True,
+                maximize=False,
+                data_name='eval',
+                metric_name='irho',
+            )
+            es_list.append(es)
+            evals.append((dtest_feature_matrix, eval_label))
+            xgb_params = {
+                "tree_method": "hist",
+                "device": "cuda",
+                "max_depth": config.tree_depth,
+                "reg_alpha": config.xgb_alpha,
+                "reg_lambda": config.xgb_lambda,
+                "colsample_bytree": config.colsample_bytree,
+                "colsample_bylevel": config.colsample_bylevel,
+                "colsample_bynode": config.colsample_bynode,
+                "max_delta_step": config.max_delta_step,
+                "gamma": config.xgb_gamma,
+                "learning_rate": config.learning_rate,
+                "min_child_weight": config.min_child_weight,
+                "early_stopping_rounds": config.early_stopping,
+                "subsample": config.max_sample_parameter,
+                "callbacks": es_list,
+                #"eval_metric": ['irho'],
+                "disable_default_eval_metric": True,
+                "max_cat_to_onehot": int(config.max_cat_to_onehot),
+                "max_cat_threshold": int(config.max_cat_threshold),
+                'random_state' : int(time.time())
+                }
+            forest = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees), early_stopping_rounds= config.early_stopping, evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
+        else:
+            es = xgb.callback.EarlyStopping(
+                rounds=config.early_stopping_1,
+                min_delta=1e-4,
+                save_best=True,
+                maximize=False,
+                data_name='eval',
+                metric_name='irho',
+            )
+            es_list.append(es)
+            evals.append((dtest_feature_matrix, eval_label))
+            xgb_params = {
+                "tree_method": "hist",
+                "device": "cuda",
+                "max_depth": int(config.tree_depth_1),
+                "reg_alpha": config.xgb_alpha_1,
+                "reg_lambda": config.xgb_lambda_1,
+                "colsample_bytree": config.colsample_bytree_1,
+                "colsample_bylevel": config.colsample_bylevel_1,
+                "colsample_bynode": config.colsample_bynode_1,
+                "max_delta_step": config.max_delta_step_1,
+                "gamma": config.xgb_gamma_1,
+                "learning_rate": config.learning_rate_1,
+                "min_child_weight": config.min_child_weight_1,
+                "early_stopping_rounds": int(config.early_stopping_1),
+                "subsample": config.max_sample_parameter_1,
+                "callbacks": es_list,
+                #"eval_metric": ['irho'],
+                "disable_default_eval_metric": True,
+                "max_cat_to_onehot": int(config.max_cat_to_onehot_1),
+                "max_cat_threshold": int(config.max_cat_threshold_1),
+                'random_state' : int(time.time())
+                }
+            forest = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees_1), early_stopping_rounds=int(config.early_stopping_1), evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
 
     return forest
 
-def setup_memory_resources(config: util.Config, sub_share: float):
+def setup_memory_resources(config: util.Config, sub_share: float, cuda_setup=True):
+    if cuda_setup:
+        setup_cuda_memory(config, sub_share)
+    else:
+        setup_rmm_memory(config, sub_share)
+
+def setup_cuda_memory(config: util.Config, sub_share: float):
+    # Get the default memory pool and configure the release threshold
+    status, dft_pool = cudart.cudaDeviceGetDefaultMemPool(0)
+    # Set the release threshold to 90% of total device memory
+    status, free, total = cudart.cudaMemGetInfo()
+
+    pool_size = int(total * 0.9 * sub_share)
+
+    if config.verbosity >= 4:
+        config.logger.info(f'Setup cuda memory resources: {pool_size=}')
+
+    v = driver.cuuint64_t(pool_size)
+
+    cudart.cudaMemPoolSetAttribute(
+        dft_pool,
+        cudart.cudaMemPoolAttr.cudaMemPoolAttrReleaseThreshold,
+        v,
+    )
+    # Set the allocator for cupy as well.
+    cp.cuda.set_allocator(MemoryAsyncPool().malloc)
+
+def setup_rmm_memory(config: util.Config, sub_share: float):
     gmem = util.get_gpu_memory()[0]
     init_pool = 1024*1024*int(gmem*sub_share*0.05)
     max_pool = 1024*1024*int(gmem*sub_share*0.8)
@@ -428,6 +460,8 @@ def setup_memory_resources(config: util.Config, sub_share: float):
     set_current_device_resource(mr)
     # Set the allocator for cupy as well.
     cp.cuda.set_allocator(rmm_cupy_allocator)
+
+
 
 def retrieve_dmatrix(
         dump_precursor: str,

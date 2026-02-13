@@ -1204,7 +1204,10 @@ class CrossValidationSlice(Slotted_obj):
             config.logger.info(f'After prep in get_extmem_dtest: {dump_precursor} {sub_share=} {len(file_paths)=}')
 
         # Make sure XGBoost is using RMM for all allocations.
-        with xgb.config_context(use_rmm=True):
+        #with xgb.config_context(use_rmm=True):
+
+        # Make sure XGBoost is using the CUDA async pool for all allocations.
+        with xgb.config_context(use_cuda_async_pool=True):
             it = Iterator(device="cuda", file_paths=file_paths)
 
             if config.verbosity >= 4:
@@ -1323,7 +1326,10 @@ class CrossValidationSlice(Slotted_obj):
             )
         
         # Make sure XGBoost is using RMM for all allocations.
-        with xgb.config_context(use_rmm=True):
+        #with xgb.config_context(use_rmm=True):
+
+        # Make sure XGBoost is using the CUDA async pool for all allocations.
+        with xgb.config_context(use_cuda_async_pool=True):
             it = Iterator(device="cuda", file_paths=file_paths)
 
             if config.verbosity >= 4:
