@@ -9,6 +9,8 @@ from sklearn.metrics import precision_score
 from sklearn.metrics import recall_score
 from sklearn.metrics import matthews_corrcoef
 
+from memory_profiler import profile
+
 import time
 import sys
 import os
@@ -330,6 +332,7 @@ def booster_list_predict(booster_list, feat_mats):
     y_pred = numpy.mean(y_preds, axis=0)
     return y_pred
 
+@profile
 def xgb_train_wrapper(
         config: util.Config,
         dtrain: xgb.DMatrix,
@@ -470,7 +473,7 @@ def setup_rmm_memory(config: util.Config, sub_share: float):
     cp.cuda.set_allocator(rmm_cupy_allocator)
 
 
-
+@profile
 def retrieve_dmatrix(
         dump_precursor: str,
         config: util.Config,
@@ -540,6 +543,7 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
 
     if config.verbosity >= 4:
         config.logger.info(f'Call of double_booster_remote: {lock_file=} {dump_precursor=} {retain_model=}')
+    if config.verbosity >= 5:
         slice_slice.log_attr_sizes(config.logger, label = f'slice_slice {proc_id} ')
         cv_slice.log_attr_sizes(config.logger, label = f'cv slice {proc_id} ')
         config.logger.info(f'{p_id=} {ray.get_runtime_context().get()=}')
@@ -711,7 +715,7 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
         return booster_2, slice_slice.feature_names[:], y_pred, y_true, y_prot_vec, x_pred, x_true, x_prot_vec, p_id
 
 
-
+@profile
 def trainRegressionForest(
     config: util.Config,
     cv_slice: CrossValidationSlice,
@@ -901,7 +905,7 @@ def trainRegressionForest(
             if sub_share < 1.0 and sub_share > 0.5:
                 sub_share = 0.5
             if config.verbosity >= 3:
-                config.logger.info(f'call of double_booster_remote: {sub_share=}')
+                config.logger.info(f'call of double_booster_remotes: {sub_share=} {len(cv_slice.slice_slices)=}')
             remote_function = double_booster_remote.options(num_gpus = sub_share)
             remote_proc_ids = []
             
@@ -921,7 +925,8 @@ def trainRegressionForest(
                     if config.verbosity >= 3:
                         config.logger.info(f'Double booster returned {len(ready)=}')
                     results = ray.get(ready)
-                    
+                    if config.verbosity >= 4:
+                        config.logger.info(f'Double booster returned with {type(results[0])=}')
                     for res in results:
                         if isinstance(res, int):
                             if config.verbosity >= 1:
