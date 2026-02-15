@@ -18,7 +18,10 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from sklearn.ensemble import RandomForestRegressor
-from supertree import SuperTree
+try:
+    from supertree import SuperTree
+except ImportError:
+    pass
 from structman.base_utils.base_utils import pack
 
 from structguy import featureAnalysis, featureGenerator, sampleSpace, trainForest

@@ -546,6 +546,9 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
 
     setup_memory_resources(config, sub_share, cuda_setup=config.setup_cuda_mem)
 
+    if config.verbosity >= 3:
+        config.logger.info(f'Reached after memory setup in double_booster_remote {proc_id} {config.setup_cuda_mem=}')
+
     dtrain, dtest_feature_matrix, sliced_test_emd_matrices, t_file_paths, te_file_paths, ret_times = retrieve_dmatrix(
         dump_precursor,
         config,
@@ -921,7 +924,8 @@ def trainRegressionForest(
                     if config.verbosity >= 3:
                         config.logger.info(f'Double booster returned {len(ready)=}')
                     results = ray.get(ready)
-                    
+                    if config.verbosity >= 4:
+                        config.logger.info(f'Double booster returned: {type(results[0])=}')
                     for res in results:
                         if isinstance(res, int):
                             if config.verbosity >= 1:
