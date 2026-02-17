@@ -152,15 +152,16 @@ def init_para_eval_store(
         config: util.Config,
         cv_obj: DataSAIL_cv,
         parameters: list[Parameter],
-        samples_store_id: ray.ObjectRef | None,
         raw_feature_matrix_store_id: ray.ObjectRef | None,
         best_first_scores: util.Scores,
         samples: SampleSpace,
     ):
 
-    store = ray.put((config, cv_obj, parameters, samples_store_id, raw_feature_matrix_store_id, best_first_scores, samples.feat_corr_matrix, samples.feature_names))
+    store = ray.put((cv_obj, parameters, raw_feature_matrix_store_id, best_first_scores, samples.feat_corr_matrix, samples.feature_names))
 
-    return store
+    config_ref_container = [ray.put(config)]
+
+    return store, config_ref_container
 
 
 def bayes_random_init(
@@ -219,7 +220,7 @@ def bayes_random_init(
     config.logger.info(f"Objective score: {best_scores.objective_value(config)}")
 
     if config.multi_gpu > 0:
-        store = init_para_eval_store(config, initial_cv_obj, parameters, samples_store_id, raw_feature_matrix_store_id, best_first_scores, samples)
+        store = init_para_eval_store(config, initial_cv_obj, parameters, raw_feature_matrix_store_id, best_first_scores, samples)
         return x_list, y_list, bounds, n_params, best_scores, best_first_scores, best_params, initial_values, new_optimimum, len(fix_parameters_pos), param_names, integer_type_params, initial_cv_obj, store
     else:
         para_random_init = False
@@ -240,7 +241,7 @@ def bayes_random_init(
         if debug:
             config.logger.info(f"Init params: {init_params}")
 
-        store = init_para_eval_store(config, initial_cv_obj, parameters, samples_store_id, raw_feature_matrix_store_id, best_first_scores, samples)
+        store, config_ref_container = init_para_eval_store(config, initial_cv_obj, parameters, raw_feature_matrix_store_id, best_first_scores, samples)
 
         config.logger.info(f"after store init, samples is None: {samples is None}")
 
@@ -253,7 +254,7 @@ def bayes_random_init(
             out_queue = Queue()
             com_queue.put((randomized_parameters[current_params_id]))
             current_params_id += 1
-            proc_id = para_eval.remote(com_queue, out_queue, store, para_number, 1.0, proc_id)
+            proc_id = para_eval.remote(com_queue, out_queue, store, para_number, 1.0, proc_id, config_ref_container)
             remote_processes.append((com_queue, out_queue, proc_id))
 
         config.logger.info(f"Para random init started: # of packages: {len(para_eval_ret_ids)} # of subthreads: {para_number} {len(remote_processes)=}")
@@ -300,11 +301,8 @@ def bayes_random_init(
                 scores, first_scores = get_scores(
                     config,
                     cv_obj,
-                    distance_map,
                     samples.feat_corr_matrix,
                     samples.feature_names,
-                    samples=samples,
-                    samples_store_id=samples_store_id,
                     raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                     get_first_scores=True,
                     cv_interuption=(0.95, best_first_scores),
@@ -454,7 +452,7 @@ def bayesian_optimisation(
 
     # while n_fixed_params > 0:
     
-    x_list, y_list, bounds, n_params, best_scores, best_first_scores, best_params, initial_values, new_optimimum, n_fixed_params, param_names, integer_type_params, cv_obj, store = bayes_random_init(
+    x_list, y_list, bounds, n_params, best_scores, best_first_scores, best_params, initial_values, new_optimimum, n_fixed_params, param_names, integer_type_params, cv_obj, stores = bayes_random_init(
         config,
         parameters,
         cv_obj,
@@ -573,11 +571,8 @@ def bayesian_optimisation(
             scores, first_scores = get_scores(
                 config,
                 cv_obj,
-                distance_map,
                 samples.feat_corr_matrix,
                 samples.feature_names,
-                samples=samples,
-                samples_store_id=samples_store_id,
                 raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                 debug=debug,
                 get_first_scores=True,
@@ -654,6 +649,8 @@ def bayesian_optimisation(
         gpu_share = 1/threads_per_gpu
         remote_function = para_eval #.options(num_gpus = gpu_share)
         
+        store, config_ref_container = stores
+
         for p in range(number_of_procs):
             next_sample = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
 
@@ -662,7 +659,7 @@ def bayesian_optimisation(
             com_queue.put(next_sample)
             n_of_sent_hpo_sets += 1
             
-            proc_id = remote_function.remote(com_queue, out_queue, store, para_number, gpu_share, p)
+            proc_id = remote_function.remote(com_queue, out_queue, store, para_number, gpu_share, p, config_ref_container)
             remote_processes.append((com_queue, out_queue, proc_id))
 
         if config.verbosity >= 1:
@@ -1077,11 +1074,8 @@ def cat3D(parameter_1, parameter_2, parameter_3, best_scores, config, score_matr
 def get_scores(
         config: util.Config,
         cv_obj: DataSAIL_cv | dict[int, ray.ObjectRef],
-        distance_map,
         feat_corr_matrix,
         feature_names,
-        samples=None,
-        samples_store_id=None,
         raw_feature_matrix_store_id=None,
         remote=True,
         para_number=None,
@@ -1089,22 +1083,20 @@ def get_scores(
         get_first_scores=False,
         cv_interuption=None,
         gpu_share = None,
-        proc_id = 0
+        proc_id = 0,
+        config_ref_container=None
         ):
     
     if config.verbosity >= 2:
         config.logger.info(f"Call of get_scores: {gpu_share=} {para_number=}")
     t0 = time.time()
     
-    _, scores, cv_obj = trainForest.trainForest(
+    _, scores = trainForest.trainForest(
         config,
         cv_obj,
         feat_corr_matrix,
         feature_names,
-        samples=samples,
-        samples_store_id=samples_store_id,
         raw_feature_matrix_store_id=raw_feature_matrix_store_id,
-        distance_map=distance_map,
         repeat=config.repeat_training,
         cv_repeat=config.cv_hpo,
         remote=remote,
@@ -1113,7 +1105,8 @@ def get_scores(
         get_first_scores=get_first_scores,
         cv_interuption=cv_interuption,
         gpu_share=gpu_share,
-        proc_id=proc_id
+        proc_id=proc_id,
+        config_ref_container=config_ref_container
     )
     t1 = time.time()
     config.logger.info(f"Time for training forest in get_scores: {t1 - t0}")
@@ -1125,9 +1118,10 @@ def get_scores(
 
 
 @ray.remote
-def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_share, proc_id):
-    (config, cv_obj, parameters, samples_store_id, raw_feature_matrix_store_id, best_first_scores, feat_corr_matrix, feature_names) = store
-    
+def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_share, proc_id, config_ref_container):
+    (cv_obj, parameters, raw_feature_matrix_store_id, best_first_scores, feat_corr_matrix, feature_names) = store
+    config = ray.get(config_ref_container[0])
+
     util.reset_logger_for_remotes(config)
     if config.verbosity >= 2:
         config.logger.info(f"Call of para_eval: {com_queue.empty()=}")
@@ -1151,16 +1145,17 @@ def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_share,
         scores, first_scores = get_scores(
             config,
             cv_obj,
-            None,
             feat_corr_matrix,
             feature_names,
-            samples_store_id=samples_store_id,
             raw_feature_matrix_store_id=raw_feature_matrix_store_id,
             remote=True,
             para_number=para_number,
             get_first_scores=True,
             cv_interuption=(0.95, best_first_scores),
-            gpu_share=gpu_share, proc_id=proc_id)
+            gpu_share=gpu_share, proc_id=proc_id,
+            config_ref_container=config_ref_container
+            )
+        
         
         out_queue.put((scores, params, first_scores))
     return

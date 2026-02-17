@@ -10,6 +10,7 @@ from structguy import featureGenerator, util, learn, featureAnalysis
 from structguy.sequence_feature_generation import prepare_gemme
 from ray.train import ScalingConfig
 
+#from memory_profiler import profile
 import structman.base_utils.ray_utils as ray_utils
 
 disclaimer = """
@@ -18,6 +19,7 @@ structguy_main.py build_model [-i -o --verbosity]\n
 MORE TODO\n
 """
 
+#@profile
 def parse_arguments(argument_start = 2, manual_args = None):
     if manual_args is None:
         argv = sys.argv[argument_start:]
@@ -305,6 +307,7 @@ def feature_generator_main():
     if config.path_structural_feature_table is not None or config.overwrite:
         featureGenerator.expand_structural_feature_table(config)
 
+#@profile
 def build_model_main(manual_args = None):
     config, test_config = parse_arguments(manual_args = manual_args)
 
@@ -340,6 +343,7 @@ def generate_info():
 
     featureAnalysis.get_model_info(config)
 
+#@profile
 def main():
 
     start_time = time.time()

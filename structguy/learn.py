@@ -3,8 +3,10 @@ import sys
 import os
 import time
 import ray
-import shap
+#import shap
 import numpy
+
+#from memory_profiler import profile
 
 from scipy import stats
 from sklearn.metrics import (
@@ -120,7 +122,7 @@ def save_feature_importances(outfile, feature_importance_map):
     f.write("".join(lines))
     f.close()
 
-
+#@profile
 def learn(config: Config):
     crossValidation = config.crossValidation
 
@@ -191,10 +193,6 @@ def learn(config: Config):
 
         cv_slice = cross_val_obj.getCurrentSlice()
 
-        if config.verbosity >= 1:
-            config.logger.info(f"{len(cv_slice.train_targets)=}")
-            config.logger.info(f"{len(cv_slice.test_targets)=}")
-
         debug = config.debug_mode
 
         if config.cv_hpo:
@@ -206,14 +204,11 @@ def learn(config: Config):
             config.logger.info(f"Before initial model training: {config.cv_hpo=} {initial_training_input.slice_slices=}")
 
         if config.hyperOptimization == "bayesianComplete":
-            forest, scores, initial_training_input = trainForest.trainForest(
+            forest, scores = trainForest.trainForest(
                 config,
                 initial_training_input,
                 samples.feat_corr_matrix, samples.feature_names,
-                samples_store_id=samples_store_id,
                 raw_feature_matrix_store_id=raw_feature_matrix_store_id,
-                samples=samples,
-                distance_map=distance_map,
                 repeat=config.repeat_training,
                 cv_repeat=config.cv_hpo,
                 print_out=True,
@@ -235,13 +230,11 @@ def learn(config: Config):
                 gpu_share = config.multi_gpu
             else:
                 gpu_share = None
-            forest, (first_scores, scores), initial_training_input = trainForest.trainForest(
+            forest, (first_scores, scores) = trainForest.trainForest(
                 config,
                 initial_training_input,
                 samples.feat_corr_matrix, samples.feature_names,
-                samples_store_id=samples_store_id,
                 raw_feature_matrix_store_id=raw_feature_matrix_store_id,
-                samples=samples,
                 repeat=config.repeat_training,
                 cv_repeat=config.cv_hpo,
                 print_out=True,
@@ -264,13 +257,11 @@ def learn(config: Config):
             )
         else:
             if debug:
-                forest, scores, initial_training_input = trainForest.trainForest(
+                forest, scores = trainForest.trainForest(
                     config,
                     initial_training_input,
                     samples.feat_corr_matrix, samples.feature_names,
-                    samples_store_id=samples_store_id,
                     raw_feature_matrix_store_id=raw_feature_matrix_store_id,
-                    samples=samples,
                     distance_map=distance_map,
                     repeat=config.repeat_training,
                     cv_repeat=config.cv_hpo,
@@ -316,13 +307,11 @@ def learn(config: Config):
                 gpu_share = config.multi_gpu
             else:
                 gpu_share = None
-            booster_list, scores, cv_slice = trainForest.trainForest(
+            booster_list, scores = trainForest.trainForest(
                 config,
                 cv_slice,
                 samples.feat_corr_matrix,
                 samples.feature_names,
-                samples=samples,
-                samples_store_id=samples_store_id,
                 raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                 distance_map=distance_map,
                 repeat=config.repeat_training,
@@ -492,7 +481,6 @@ def learn(config: Config):
 
         booster_list = buildFinalModel(
             samples,
-            samples_store_id,
             config,
             raw_feature_matrix_store_id,
             internal_cv=cross_val_obj,
@@ -1184,7 +1172,7 @@ def loadCV(fn):
     return forests, cross_val_object, config
 
 
-def buildFinalModel(samples, samples_store_id, config, raw_feature_matrix_store_id, internal_cv=None, outfile=None, filtered_features_file=None):
+def buildFinalModel(samples, config, raw_feature_matrix_store_id, internal_cv=None, outfile=None, filtered_features_file=None):
     # Some feature selection strategies require an internal cross validation-like slicing
     # An example is the confusion-based feature section
 
@@ -1205,13 +1193,11 @@ def buildFinalModel(samples, samples_store_id, config, raw_feature_matrix_store_
         gpu_share = config.multi_gpu
     else:
         gpu_share = None
-    booster_list, scores, full_slice = trainForest.trainForest(
+    booster_list, scores = trainForest.trainForest(
         config,
         full_slice,
         samples.feat_corr_matrix,
         samples.feature_names,
-        samples=samples,
-        samples_store_id=samples_store_id,
         raw_feature_matrix_store_id=raw_feature_matrix_store_id,
         distance_map=samples.geometric_distance_map,
         print_out=print_out,

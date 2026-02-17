@@ -38,7 +38,7 @@ setup(
     setup_requires=['setuptools_scm'],
     include_package_data=True,
     install_requires=[
-        "scikit-learn==1.5.0",
+        "scikit-learn>=1.5.0",
         "numpy==1.26.4",
         "xgboost>=3.2.0",
         "torch==2.8.0",

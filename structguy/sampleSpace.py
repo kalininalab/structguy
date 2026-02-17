@@ -1333,7 +1333,7 @@ class Given_split(CrossValidation):
             self.slice_slices[slice_id] = slice_slices
 
 class DataSAIL_cv(CrossValidation):
-    __slots__ = cv_slots + ['prots']
+    __slots__ = cv_slots + ['prots', 'subslice_refs']
     def __init__(self, samples_store_id = None, sampleSpace: SampleSpace | None = None, config = None, as_list = None):
         t0 = time.time()
         if as_list is not None:
@@ -1472,53 +1472,52 @@ class DataSAIL_cv(CrossValidation):
             config.logger.info(f'Time for init DataSAIL_cv Part 5: {t5-t4}')
 
         file_path_dict = {}
+        self.subslice_refs = {}
 
         for cv_counter, cv_slice in init_results:
 
-            self.slices[cv_counter] = cv_slice
-            self.slices[cv_counter].test_slice_id = cv_counter
-            self.slices[cv_counter].train_slice_ids = []
+            
+            cv_slice.test_slice_id = cv_counter
+            cv_slice.train_slice_ids = []
             for train_cv_counter in range(config.crossValidation_fold):
                 if train_cv_counter != cv_counter:
-                    self.slices[cv_counter].train_slice_ids.append(train_cv_counter)
+                    cv_slice.train_slice_ids.append(train_cv_counter)
 
             if config.verbosity >= 4:
-                config.logger.info(f'Init CV slice {cv_counter=} {self.slices[cv_counter].train_slice_ids=}')
+                config.logger.info(f'Init CV slice {cv_counter=} {cv_slice.train_slice_ids=}')
 
-            if config.verbosity >= 5:
-                cv_slice = self.slices[cv_counter]
-                #config.logger.info(f'Features of slice {cv_slice.name}:\n{cv_slice.features}')
+            if config.verbosity >= 6:
                 cv_slice.featureSanityCheck(verbose = True)
 
             self.slice_ids.append(cv_counter)
             if train_test_pairs[cv_counter][2] is not None:
-                self.slices[cv_counter].subslices = {}
+                cv_slice.subslices = {}
                 for subslice_counter in train_test_pairs[cv_counter][2]:
-                    self.slices[cv_counter].subslices[subslice_counter] = (train_test_pairs[cv_counter][2][subslice_counter])
+                    cv_slice.subslices[subslice_counter] = (train_test_pairs[cv_counter][2][subslice_counter])
 
             detectBiasedFeaturesByMeanCorrelation(
-                config, self.slices[cv_counter], samples_store_id, samples=sampleSpace, dummy_call=True
+                config, cv_slice, samples_store_id, samples=sampleSpace, dummy_call=True
             )
 
             dump_precursor = f'{config.tmp_folder}/ext_mem_data_{cv_counter}'
 
-            file_paths, prot_vec_path = put_data_to_tmp_storage(dump_precursor, self.slices[cv_counter], sampleSpace, config)
+            file_paths, prot_vec_path = put_data_to_tmp_storage(dump_precursor, cv_slice, sampleSpace, config)
 
             file_path_dict[cv_counter] = file_paths, prot_vec_path
 
             slice_slices = []
 
-            for i, subslice_test_id in enumerate(self.slices[cv_counter].subslices.keys()):
-                subslice_test_proteins = self.slices[cv_counter].subslices[subslice_test_id]
+            for i, subslice_test_id in enumerate(cv_slice.subslices.keys()):
+                subslice_test_proteins = cv_slice.subslices[subslice_test_id]
                 try:
-                    remaining_prots = set(self.slices[cv_counter].train_prots) - subslice_test_proteins
+                    remaining_prots = set(cv_slice.train_prots) - subslice_test_proteins
                 except TypeError:
                     remaining_prots = []
 
-                if self.slices[cv_counter].train_equal_test:
+                if cv_slice.train_equal_test:
                     ignore_samples = None
                 else:
-                    ignore_samples = set(self.slices[cv_counter].test_sample_ids)
+                    ignore_samples = set(cv_slice.test_sample_ids)
                 test_ids, train_ids = splitDataSet(config, sample_list, specific_id=subslice_test_proteins, protein_wise=(not config.random_split), ignore_samples=ignore_samples)
 
                 cv_slice_slice = CrossValidationSlice(
@@ -1527,9 +1526,9 @@ class DataSAIL_cv(CrossValidation):
                     raw_feature_names=sampleSpace.feature_names,
                     sample_dict=sampleSpace.samples,
                     config=config,
-                    name=f"{self.slices[cv_counter].name}_subslice_{i}",
+                    name=f"{cv_slice.name}_subslice_{i}",
                     train_prots=remaining_prots,
-                    feature_names=self.slices[cv_counter].feature_names,
+                    feature_names=cv_slice.feature_names,
                 )
                 
                 cv_slice_slice.test_slice_id = subslice_test_id
@@ -1543,7 +1542,11 @@ class DataSAIL_cv(CrossValidation):
 
                 slice_slices.append(ray.put(pack(cv_slice_slice)))
 
-            self.slices[cv_counter].slice_slices = slice_slices
+            cv_slice.slice_slices = slice_slices
+
+            self.subslice_refs[cv_counter] = cv_slice.slice_slices
+
+            self.slices[cv_counter] = ray.put(pack(cv_slice))
 
         config.file_path_dict = file_path_dict
 
@@ -1569,8 +1572,9 @@ def put_data_to_tmp_storage(dump_precursor: str, cv_slice: CrossValidationSlice,
     config.logger.info(f'{gmem=} {sub_share=} {num_of_batches=} {batch_size=} {len(feat_matrix)=}')
 
     prot_id_vec = cv_slice.get_encoded_test_prot_vec()
-    prot_vec_path = f'{dump_precursor}_prot_id_vec.npy'
-    prot_id_vec.dump(prot_vec_path)
+    #prot_vec_path = f'{dump_precursor}_prot_id_vec.npy'
+    #prot_id_vec.dump(prot_vec_path)
+    prot_vec_ref = ray.put(prot_id_vec)
 
     for batch_nr in range(num_of_batches):
         batch = np.array(feat_matrix[batch_nr*batch_size:(batch_nr+1)*batch_size], dtype=np.float32)
@@ -1579,13 +1583,18 @@ def put_data_to_tmp_storage(dump_precursor: str, cv_slice: CrossValidationSlice,
         
         y_batch = np.array(cv_slice.test_targets[batch_nr*batch_size:(batch_nr+1)*batch_size])
 
-        batch_path = f'{dump_precursor}_X_{batch_nr}_test.npy'
-        batch.dump(batch_path)
+        #batch_path = f'{dump_precursor}_X_{batch_nr}_test.npy'
+        #batch.dump(batch_path)
+        batch_ref = ray.put(batch)
+        
         #cp.save(batch_path, batch)
 
-        y_batch_path = f'{dump_precursor}_y_{batch_nr}_test.npy'
-        y_batch.dump(y_batch_path)
+        #y_batch_path = f'{dump_precursor}_y_{batch_nr}_test.npy'
+        #y_batch.dump(y_batch_path)
 
-        file_paths.append((batch_path, y_batch_path))
+        y_batch_ref = ray.put(y_batch)
 
-    return file_paths, prot_vec_path
+        #file_paths.append((batch_path, y_batch_path))
+        file_paths.append((batch_ref, y_batch_ref))
+
+    return file_paths, prot_vec_ref
