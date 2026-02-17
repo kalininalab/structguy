@@ -136,6 +136,7 @@ def shap_internal_loop(
 
     return acc_feat_impacts
 
+#@profile
 def ext_shap_analysis(
         feature_names: list[str],
         booster: xgb.Booster,
@@ -284,6 +285,7 @@ def jit_mean_spear(predt: numpy.ndarray, true_labels: numpy.ndarray, code_vec: n
     else:
         mean_corr: float = sum(corrs)/len(corrs)
     return mean_corr
+
 
 def rho_eval_for_xgboost_cb(predt: numpy.ndarray, dtest: xgb.DMatrix) -> tuple[str, float]:
     if isinstance(dtest, xgb.DMatrix):

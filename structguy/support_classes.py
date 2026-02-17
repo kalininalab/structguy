@@ -10,6 +10,7 @@ import cupy as cp
 import xgboost as xgb
 from scipy import stats
 
+#from memory_profiler import profile
 from typing import Callable
 
 from structguy import dicts
@@ -1183,6 +1184,7 @@ class CrossValidationSlice(Slotted_obj):
         dtest_feature_matrix.encoded_prot_vec = encoded_prot_vec
         return dtest_feature_matrix
 
+    #@profile
     def get_extmem_dtest(self,
             dump_precursor: str,
             config: Config,
@@ -1221,12 +1223,14 @@ class CrossValidationSlice(Slotted_obj):
             ext_dtest.encoded_prot_vec = encoded_prot_vec
 
             if get_sliced_test_matrices:
-                ext_test_matrices = []
+                ext_test_matrices = [ext_dtest]
+                """
                 for fp_tuple in file_paths:
                     it = Iterator(device="cuda", file_paths=[fp_tuple])
 
                     ext_dtest_slice = xgb.ExtMemQuantileDMatrix(it, ref=dtrain, enable_categorical=True, max_bin=256, max_quantile_batches = 1)
                     ext_test_matrices.append(ext_dtest_slice)
+                """
             else:
                 ext_test_matrices = None
 
@@ -1310,6 +1314,7 @@ class CrossValidationSlice(Slotted_obj):
             enable_categorical=True)
         return dtrain
     
+    #@profile
     def get_extmem_dtrain(self,
             dump_precursor: str,
             config: Config,
@@ -1343,6 +1348,7 @@ class CrossValidationSlice(Slotted_obj):
 
         return ext_dtrain, file_paths
 
+    #@profile
     def prepare_ext_mem_qdmatrix(self,
             dump_precursor: str,
             config: Config,
@@ -1416,6 +1422,7 @@ class CrossValidationSlice(Slotted_obj):
 
         return dtrain
 
+    #@profile
     def prepare_test_ext_mem_qdmatrix(self,
             dump_precursor: str,
             config: Config,
