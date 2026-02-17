@@ -923,7 +923,15 @@ def trainRegressionForest(
                 if len(ready) > 0:
                     if config.verbosity >= 3:
                         config.logger.info(f'Double booster returned {len(ready)=}')
-                    results = ray.get(ready)
+                    try:
+                        results = ray.get(ready, timeout=60)
+                    except ray.exceptions.GetTimeoutError:
+                        remote_proc_ids = not_ready
+                        if len(remote_proc_ids) == 0:
+                            done = True
+                        config.logger.info('double_booster_remote ray.get timed out')
+                        continue
+
                     if config.verbosity >= 4:
                         config.logger.info(f'Double booster returned: {type(results[0])=}')
                     for res in results:
