@@ -1,7 +1,12 @@
 import numpy as np
 
-def get_feat_id_vec(feat_names: list[str], feat_pos_dict: dict[str, int], features, get_cat_vec: bool =False):
-    cat_vec = []
+def get_feat_id_vec(
+        feat_names: list[str],
+        feat_pos_dict: dict[str, int],
+        features,
+        get_cat_vec: bool =False
+        ) -> tuple[np.ndarray, list[str]]:
+    cat_vec: list[str] = []
     feat_id_vec: list[int] = []
     for feat_name in feat_names:
         feat_id_vec.append(feat_pos_dict[feat_name])
@@ -10,7 +15,7 @@ def get_feat_id_vec(feat_names: list[str], feat_pos_dict: dict[str, int], featur
                 cat_vec.append('c')
             else:
                 cat_vec.append('q')
-    
+    feat_id_vec: np.ndarray = np.array(feat_id_vec)
     return feat_id_vec, cat_vec
 
 def get_feat_matrix_from_ids(

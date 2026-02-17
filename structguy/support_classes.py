@@ -140,8 +140,9 @@ class Iterator(xgb.DataIter):
         X_path, y_path, ext_path = self._file_paths[self._it]
 
         if self._ext_dat is None:
-            with open(ext_path, 'rb') as inp:
-                feat_names, cat_vec, feat_id_vec = pickle.load(inp)
+            #with open(ext_path, 'rb') as inp:
+            #    feat_names, cat_vec, feat_id_vec = pickle.load(inp)
+            feat_names, cat_vec, feat_id_vec = ray.get(ext_path)
             self._ext_dat = feat_names, cat_vec, feat_id_vec
         else:
             feat_names, cat_vec, feat_id_vec = self._ext_dat
@@ -152,9 +153,11 @@ class Iterator(xgb.DataIter):
             X = numpy.load(X_path)
             y = numpy.load(y_path)
         else:
-            import cupy as cp
-            X = numpy.load(X_path, allow_pickle=True)
-            y = cp.load(y_path, allow_pickle=True)
+            #import cupy as cp
+            #X = numpy.load(X_path, allow_pickle=True)
+            X = ray.get(X_path)
+            #y = cp.load(y_path, allow_pickle=True)
+            y = cp.array(ray.get(y_path))
 
             #trim down to selected features
             X = cp.array(X[:, feat_id_vec])
@@ -1351,20 +1354,22 @@ class CrossValidationSlice(Slotted_obj):
         
         file_paths: list[tuple[str, str, str]] = []
 
-        extra_data_path = f'{dump_precursor}_ext.dump'
-        with open(extra_data_path, 'wb') as outf:
-            pickle.dump((self.feature_names, cat_vec, feat_id_vec), outf)
+        #extra_data_path = f'{dump_precursor}_ext.dump'
+        #with open(extra_data_path, 'wb') as outf:
+        #    pickle.dump((self.feature_names, cat_vec, feat_id_vec), outf)
+        extra_data_ref = ray.put((self.feature_names, cat_vec, feat_id_vec))
+
 
         prot_id_vec = None
         for train_cv_id in self.train_slice_ids:
             data_paths, prot_vec_path = config.file_path_dict[train_cv_id]
             for tr_fp, te_fp in data_paths:
-                file_paths.append((tr_fp, te_fp, extra_data_path))
+                file_paths.append((tr_fp, te_fp, extra_data_ref))
 
             if prot_id_vec is None:
-                prot_id_vec = numpy.load(prot_vec_path, allow_pickle=True)
+                prot_id_vec = ray.get(prot_vec_path) #numpy.load(prot_vec_path, allow_pickle=True)
             else:
-                prot_id_vec = numpy.concatenate((prot_id_vec, numpy.load(prot_vec_path, allow_pickle=True)))
+                prot_id_vec = numpy.concatenate((prot_id_vec, ray.get(prot_vec_path))) #numpy.load(prot_vec_path, allow_pickle=True)))
         return file_paths, prot_id_vec
     
     def dmat_from_disc(self,
@@ -1422,15 +1427,17 @@ class CrossValidationSlice(Slotted_obj):
 
         file_paths: list[tuple[str, str, str]] = []
 
-        extra_data_path = f'{dump_precursor}_ext_test.dump'
-        with open(extra_data_path, 'wb') as outf:
-            pickle.dump((self.feature_names, cat_vec, feat_id_vec), outf)
+        #extra_data_path = f'{dump_precursor}_ext_test.dump'
+        #with open(extra_data_path, 'wb') as outf:
+        #    pickle.dump((self.feature_names, cat_vec, feat_id_vec), outf)
+
+        extra_data_ref = ray.put((self.feature_names, cat_vec, feat_id_vec))
 
         data_paths, prot_vec_path = config.file_path_dict[self.test_slice_id]
         for tr_fp, te_fp in data_paths:
-            file_paths.append((tr_fp, te_fp, extra_data_path))
+            file_paths.append((tr_fp, te_fp, extra_data_ref))
             
-        return file_paths, numpy.load(prot_vec_path, allow_pickle=True)
+        return file_paths, ray.get(prot_vec_path) #numpy.load(prot_vec_path, allow_pickle=True)
 
 
     def dtest_from_disc(self,

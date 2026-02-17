@@ -1,13 +1,15 @@
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score
+#from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+#from sklearn.ensemble import RandomForestClassifier
+#from sklearn.metrics import accuracy_score
 from sklearn.metrics import r2_score
-from sklearn.metrics import f1_score
+#from sklearn.metrics import f1_score
 from sklearn.metrics import mean_squared_error
-from sklearn.metrics import roc_auc_score
-from sklearn.metrics import precision_score
-from sklearn.metrics import recall_score
+#from sklearn.metrics import roc_auc_score
+#from sklearn.metrics import precision_score
+#from sklearn.metrics import recall_score
 from sklearn.metrics import matthews_corrcoef
+
+#from memory_profiler import profile
 
 import time
 import sys
@@ -15,10 +17,10 @@ import os
 import signal
 import traceback
 import ray
-import contextlib
+#import contextlib
 from scipy import stats
 import xgboost as xgb
-from ray.train.xgboost import XGBoostTrainer, RayTrainReportCallback
+#from ray.train.xgboost import XGBoostTrainer, RayTrainReportCallback
 
 import cupy as cp
 import cuda.bindings.driver as driver
@@ -28,16 +30,16 @@ from cupy.cuda import MemoryAsyncPool
 from rmm.allocators.cupy import rmm_cupy_allocator
 from rmm.mr import PoolMemoryResource, CudaAsyncMemoryResource, set_current_device_resource
 
-from filelock import FileLock, Timeout
+#from filelock import FileLock, Timeout
 from structguy import featureSelection, util
 from structman.base_utils.base_utils import pack, unpack, add_to_times, print_times, aggregate_times
 from structman.lib.sdsc.sdsc_utils import deep_get_size_of, sizeof_fmt
 from structguy.support_classes import CrossValidationSlice
 from structguy.sampleSpace import DataSAIL_cv, SampleSpace
 import numpy
-from ray.util.queue import Queue
-from ray.train import RunConfig
-import shap
+#from ray.util.queue import Queue
+#from ray.train import RunConfig
+#import shap
 from numba import njit
 
 def makeBinaryClassifier(data, thresh, flip_sign=False):
@@ -73,8 +75,10 @@ def para_prediction(forest_dump_file, feat_matrix):
 
 @ray.remote
 def trainRegressionForestWrapper(
-    store: tuple[util.Config, list[list[tuple]], list[str], ray.ObjectRef, dict | None],
+    store: tuple[list[list[tuple]], list[str], ray.ObjectRef, dict | None],
     cv_slice: CrossValidationSlice,
+    config_ref_container: list[ray.ObjectRef],
+    subslice_refs: list[ray.ObjectRef],
     print_out=True,
     skip_scoring=False,
     cv_counter=None,
@@ -85,16 +89,18 @@ def trainRegressionForestWrapper(
     gpu_share=None,
     proc_id=0
 ):
-    config, feats_to_filter, samples_store_id, raw_feature_matrix_store_id, distance_map = store
+    feats_to_filter, raw_feature_matrix_store_id = store
+    config: util.Config = ray.get(config_ref_container[0])
     util.reset_logger_for_remotes(config)
+
+    if config.verbosity >= 4:
+        config.logger.info(f'Call of trainRegressionForestWrapper {type(cv_slice)=}')
 
     return trainRegressionForest(
         config,
         cv_slice,
         feats_to_filter,
-        samples_store_id=samples_store_id,
         raw_feature_matrix_store_id=raw_feature_matrix_store_id,
-        distance_map=distance_map,
         print_out=print_out,
         skip_scoring=skip_scoring,
         cv_counter=cv_counter,
@@ -104,7 +110,9 @@ def trainRegressionForestWrapper(
         overwrite_proc_n=overwrite_proc_n,
         score_train=score_train,
         sub_gpu_share=gpu_share,
-        proc_id=proc_id
+        proc_id=proc_id,
+        config_ref_container=config_ref_container,
+        subslice_refs = subslice_refs
     )
 
 
@@ -223,14 +231,6 @@ def cut_and_predict(feat_matrix, model):
     concatted = numpy.concatenate(pred_1, pred_2)
     return concatted
 
-
-def return_zero(zero_return, remote, cv_slice):
-    if remote:
-        del cv_slice
-    return zero_return
-
-
-
 @njit
 def jit_spear(arr1: numpy.ndarray, arr2: numpy.ndarray) -> float:
     rarr1: numpy.ndarray = arr1.argsort().argsort()
@@ -330,6 +330,7 @@ def booster_list_predict(booster_list, feat_mats):
     y_pred = numpy.mean(y_preds, axis=0)
     return y_pred
 
+#@profile
 def xgb_train_wrapper(
         config: util.Config,
         dtrain: xgb.DMatrix,
@@ -449,6 +450,7 @@ def setup_cuda_memory(config: util.Config, sub_share: float):
     # Set the allocator for cupy as well.
     cp.cuda.set_allocator(MemoryAsyncPool().malloc)
 
+#@profile
 def setup_rmm_memory(config: util.Config, sub_share: float):
     gmem = util.get_gpu_memory()[0]
     init_pool = 1024*1024*int(gmem*sub_share*0.05)
@@ -470,7 +472,7 @@ def setup_rmm_memory(config: util.Config, sub_share: float):
     cp.cuda.set_allocator(rmm_cupy_allocator)
 
 
-
+#@profile
 def retrieve_dmatrix(
         dump_precursor: str,
         config: util.Config,
@@ -514,11 +516,20 @@ def retrieve_dmatrix(
     return dtrain, dtest_feature_matrix, t_file_paths, te_file_paths, times
 
 @ray.remote(max_retries=0)
-def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: float):
+#@profile
+def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: float, config_ref_container: list[ray.ObjectRef]):
     config: util.Config
-    config, filtered_features, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, retain_model = store
+    filtered_features, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, retain_model = store
+    config = ray.get(config_ref_container[0])
     cv_slice = unpack(cv_slice)
     util.reset_logger_for_remotes(config)
+    if config.verbosity >= 4:
+        config.logger.info(f'Call of double_booster_remote: {type(packed_slice_slice)=}')
+
+    return double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_features, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, retain_model)
+
+#@profile
+def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_features, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, retain_model):
     times = []
     ta = time.time()
 
@@ -539,7 +550,8 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
     dump_precursor = f'{config.tmp_folder}/ext_mem_data_{proc_id}'
 
     if config.verbosity >= 4:
-        config.logger.info(f'Call of double_booster_remote: {lock_file=} {dump_precursor=} {retain_model=}')
+        config.logger.info(f'Call of double_booster: {lock_file=} {dump_precursor=} {retain_model=}')
+    if config.verbosity >= 5:
         slice_slice.log_attr_sizes(config.logger, label = f'slice_slice {proc_id} ')
         cv_slice.log_attr_sizes(config.logger, label = f'cv slice {proc_id} ')
         config.logger.info(f'{p_id=} {ray.get_runtime_context().get()=}')
@@ -582,6 +594,9 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
     if config.verbosity >= 4:
         for name, size in sorted(((name, deep_get_size_of(value)) for name, value in locals().items()), key=lambda x: -x[1])[:10]:
             config.logger.info("In dbr: {:>30}: {:>8}".format(name, sizeof_fmt(size)))
+
+        for name, size in sorted(((name, deep_get_size_of(value)) for name, value in globals().items()), key=lambda x: -x[1])[:10]:
+            config.logger.info("Globals in dbr: {:>30}: {:>8}".format(name, sizeof_fmt(size)))
 
     ta = add_to_times(times, ta) #5
 
@@ -714,15 +729,12 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
         return booster_2, slice_slice.feature_names[:], y_pred, y_true, y_prot_vec, x_pred, x_true, x_prot_vec, p_id
 
 
-
+#@profile
 def trainRegressionForest(
     config: util.Config,
-    cv_slice: CrossValidationSlice,
+    packed_cv_slice: bytes,
     feats_to_filter: list[str],
-    samples: SampleSpace | None =None,
-    samples_store_id: ray.ObjectRef | None =None,
     raw_feature_matrix_store_id: ray.ObjectRef | None =None,
-    distance_map=None,
     print_out=True,
     skip_scoring=False,
     score_train=True,
@@ -732,11 +744,12 @@ def trainRegressionForest(
     debug=False,
     skip_feature_selection=False,
     sub_gpu_share=None,
-    proc_id=0
+    proc_id=0,
+    config_ref_container=None,
+    subslice_refs=None
 ):
     times = []
     t_start = ta = time.time()
-
 
     depth = config.tree_depth
     min_sample_split = config.min_sample_split
@@ -775,6 +788,17 @@ def trainRegressionForest(
     criterion = config.criterion
     number_of_bins = config.number_of_bins
 
+    if config.verbosity >= 4:
+        config.logger.info(f'Call of trainRegressionForest {type(packed_cv_slice)=} {type(subslice_refs)=}')
+
+    cv_slice: CrossValidationSlice = unpack(packed_cv_slice)
+    del packed_cv_slice
+    if subslice_refs is not None:
+        cv_slice.slice_slices = subslice_refs
+
+    if config.verbosity >= 4:
+        config.logger.info(f'After unpacking in trainRegressionForest {type(cv_slice)=} {cv_slice.slice_slices=}')
+
     zero_scores = util.Scores(zero=True, n_of_features=len(cv_slice.feature_names))
 
     if remote:
@@ -791,52 +815,51 @@ def trainRegressionForest(
     if depth < 1:
         if config.verbosity >= 3:
             config.logger.info(f"Return Zero: {depth=}")
-        return return_zero(zero_return, remote, cv_slice)
+        return zero_return
     if leaf_samples < 1:
         if config.verbosity >= 3:
             config.logger.info(f"Return Zero: {leaf_samples=}")
-        return return_zero(zero_return, remote, cv_slice)
+        return zero_return
     if min_sample_split < 2:
         if config.verbosity >= 3:
             config.logger.info(f"Return Zero: {min_sample_split=}")
-        return return_zero(zero_return, remote, cv_slice)
+        return zero_return
     if n_of_trees < 1:
         if config.verbosity >= 3:
             config.logger.info(f"Return Zero: {n_of_trees=}")
-        return return_zero(zero_return, remote, cv_slice)
+        return zero_return
     if min_impurity_decrease < 0.0 or min_impurity_decrease > 1.0:
         if config.verbosity >= 3:
             config.logger.info(f"Return Zero: {min_impurity_decrease=}")
-        return return_zero(zero_return, remote, cv_slice)
+        return zero_return
     if ccp_alpha < 0.0:
         if config.verbosity >= 3:
             config.logger.info(f"Return Zero: {ccp_alpha=}")
-        return return_zero(zero_return, remote, cv_slice)
+        return zero_return
 
     if max_sample_parameter <= 0.0 or max_sample_parameter > 1.0:
         if config.verbosity >= 3:
             config.logger.info(f"Return Zero: {max_sample_parameter=}")
-        return return_zero(zero_return, remote, cv_slice)
+        return zero_return
 
     if skip_feature_selection and (config.fs_max_sample_parameter <= 0.0 or config.fs_max_sample_parameter > 1.0):
         if config.verbosity >= 3:
             config.logger.info(f"Return Zero: {config.fs_max_sample_parameter=}")
-        return return_zero(zero_return, remote, cv_slice)
+        return zero_return
 
     if isinstance(max_feature_parameter, float):
         if max_feature_parameter <= 0.0 or max_feature_parameter > 1.0:
             if config.verbosity >= 3:
                 config.logger.info(f"Return Zero: {max_feature_parameter=}")
-            return return_zero(zero_return, remote, cv_slice)
+            return zero_return
     if number_of_bins < 1:
         if config.verbosity >= 3:
             config.logger.info(f"Return Zero: {number_of_bins=}")
-        return return_zero(zero_return, remote, cv_slice)
+        return zero_return
 
     ta = add_to_times(times, ta) #0
     if config.verbosity >= 3:
-        config.logger.info(f"Train regression forest part 1, Threads: {proc}, Feature selection: {not skip_feature_selection} {samples is None=} {config.forest_type=} {config.gpu_mode=} {config.multi_gpu=} {config.auto_weighting=}")
-        
+        config.logger.info(f"Train regression forest part 1, Threads: {proc}, Feature selection: {not skip_feature_selection} {config.forest_type=} {config.gpu_mode=} {config.multi_gpu=} {config.auto_weighting=}")
 
 
     if config.auto_weighting:
@@ -844,7 +867,7 @@ def trainRegressionForest(
 
     if len(cv_slice.feature_names) == 0:
         config.logger.warning(f"Warning =============== Feature vector has len 0 {cv_counter}")
-        return return_zero(zero_return, remote, cv_slice)
+        return zero_return
 
     if max_sample_parameter == 1.0:
         max_sample_parameter = None
@@ -854,7 +877,7 @@ def trainRegressionForest(
 
     ta = add_to_times(times, ta) #2
     if config.verbosity >= 3:
-        config.logger.info(f"Train regression forest part 2, {proc=} {samples is None=} {score_train=} {len(feats_to_filter)=}")
+        config.logger.info(f"Train regression forest part 2, {proc=} {score_train=} {len(feats_to_filter)=}")
     
     if not config.forest_type == "xgboost" and not skip_feature_selection:
         forest = RandomForestRegressor(
@@ -880,7 +903,7 @@ def trainRegressionForest(
 
     ta = add_to_times(times, ta) #4
     if config.verbosity >= 3:
-        config.logger.info(f"Train regression forest part 3, {len(cv_slice.feature_names)=} {samples is None=}")
+        config.logger.info(f"Train regression forest part 3, {len(cv_slice.feature_names)=}")
 
     if print_out or config.verbosity >= 3:
         config.logger.info(
@@ -897,6 +920,9 @@ def trainRegressionForest(
 
     ta = add_to_times(times, ta) #5
     
+    if config.suppress_remote_forests:
+        sub_gpu_share = None
+
     if config.forest_type == "xgboost" and not skip_feature_selection:
         booster_list = []
         if sub_gpu_share is not None:
@@ -904,13 +930,14 @@ def trainRegressionForest(
             if sub_share < 1.0 and sub_share > 0.5:
                 sub_share = 0.5
             if config.verbosity >= 3:
-                config.logger.info(f'call of double_booster_remote: {sub_share=}')
+                config.logger.info(f'call of double_booster_remotes: {sub_share=} {len(cv_slice.slice_slices)=}')
             remote_function = double_booster_remote.options(num_gpus = sub_share)
             remote_proc_ids = []
-            
-            store = ray.put((config, feats_to_filter, pack(cv_slice), skip_scoring, score_train, raw_feature_matrix_store_id, remote))
+            if config_ref_container is None:
+                config_ref_container = [ray.put(config)]
+            store = ray.put((feats_to_filter, pack(cv_slice), skip_scoring, score_train, raw_feature_matrix_store_id, remote))
             for nested_proc_id, packed_slice_slice in enumerate(cv_slice.slice_slices):
-                remote_proc_ids.append(remote_function.remote(packed_slice_slice, store, f'{proc_id}_{nested_proc_id}', sub_share))
+                remote_proc_ids.append(remote_function.remote(packed_slice_slice, store, f'{proc_id}_{nested_proc_id}', sub_share, config_ref_container))
 
             done = False
             y_preds = []
@@ -933,14 +960,14 @@ def trainRegressionForest(
                         continue
 
                     if config.verbosity >= 4:
-                        config.logger.info(f'Double booster returned: {type(results[0])=}')
+                        config.logger.info(f'Double booster returned with {type(results[0])=}')
                     for res in results:
                         if isinstance(res, int):
                             if config.verbosity >= 1:
                                 config.logger.info('double_booster_remote returned None')
 
                             os.kill(res, signal.SIGTERM)
-                            return return_zero(zero_return, remote, cv_slice)
+                            return zero_return
                         if skip_scoring:
                             booster, sl_sl_feat_names, db_p_id = res
                             booster_2_list.append((booster, sl_sl_feat_names))
@@ -960,28 +987,41 @@ def trainRegressionForest(
                 if len(remote_proc_ids) == 0:
                     done = True
 
-            if not skip_scoring:
-                y_pred = numpy.mean(y_preds, axis=0)
-                cv_slice.test_targets = y_true
-                cv_slice.test_prot_vec = y_prot_vec
-                if score_train:
-                    x_pred = numpy.mean(x_preds, axis=0)
-                    cv_slice.train_targets = x_true
+            #for packed_slice_slice in cv_slice.slice_slices:
+            #    ray._private.internal_api.free(packed_slice_slice)
+
         else:
-            if samples is None:
-                samples = unpack(ray.get(samples_store_id))
-            for stored_slice_slice in cv_slice.slice_slices:
-                slice_slice = unpack(ray.get(stored_slice_slice))
-                dtrain = slice_slice.get_dtrain(samples.feat_pos_dict, samples.features, samples.sample_pos_dict, samples.raw_feature_matrix, sub_sampling=config.sub_sample_factor)
+            y_preds = []
+            x_preds = []
+            booster_2_list = []
+            for nested_proc_id, packed_slice_slice in enumerate(cv_slice.slice_slices):
+                res = double_booster(packed_slice_slice, f'{proc_id}_{nested_proc_id}', 1.0, config, feats_to_filter, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, remote)
+
+                if isinstance(res, int):
+                    if config.verbosity >= 1:
+                        config.logger.info('double_booster_remote returned None')
+                    return zero_return
                 
-                dtest_feature_matrix = slice_slice.get_dtest(samples.feat_pos_dict, samples.features, samples.sample_pos_dict, samples.raw_feature_matrix, dtrain)
+                if skip_scoring:
+                    booster, sl_sl_feat_names, db_p_id = res
+                    booster_2_list.append((booster, sl_sl_feat_names))
+                elif not remote:
+                    booster, sl_sl_feat_names, y_pred, y_true, y_prot_vec, x_pred, x_true, x_prot_vec, db_p_id = res
+                    booster_2_list.append((booster, sl_sl_feat_names))
+                    y_preds.append(y_pred)
+                    x_preds.append(x_pred)
+                else:
+                    y_pred, y_true, y_prot_vec, x_pred, x_true, x_prot_vec, db_p_id = res
+                    y_preds.append(y_pred)
+                    x_preds.append(x_pred)
 
-                ta = add_to_times(times, ta) #6
-
-                booster = xgb_train_wrapper(config, dtrain, dtest_feature_matrix)
-                if booster is None:
-                    return return_zero(zero_return, remote, cv_slice)
-                booster_list.append((booster, dtest_feature_matrix))
+        if not skip_scoring:
+            y_pred = numpy.mean(y_preds, axis=0)
+            cv_slice.test_targets = y_true
+            cv_slice.test_prot_vec = y_prot_vec
+            if score_train:
+                x_pred = numpy.mean(x_preds, axis=0)
+                cv_slice.train_targets = x_true
 
     ta = add_to_times(times, ta) #7
 
@@ -989,62 +1029,13 @@ def trainRegressionForest(
         
         test_feat_mats = []
         train_feat_mats = []
-        if sub_gpu_share is None:
-            booster_2_list = []
-            for booster_index, (booster, dtest_feature_matrix) in enumerate(booster_list):
-                slice_slice = unpack(ray.get(cv_slice.slice_slices[booster_index]))
-                ta = add_to_times(times, ta) #8
-
-                y_pred = booster.predict(dtest_feature_matrix)
-
-                ta = add_to_times(times, ta) #9
-
-                acc_feat_impacts, shap_times = shap_analysis(config, booster, dtest_feature_matrix, slice_slice.feature_names, y_pred, slice_slice.test_targets)
-                times.append(shap_times)
-
-                ta = add_to_times(times, ta) #10
-                if acc_feat_impacts is None:
-                    return return_zero(zero_return, remote, cv_slice)
-
-                config.logger.info(f'{acc_feat_impacts[:5]=}\n{acc_feat_impacts[-5:]=}')
-                feats_to_remove = feats_to_filter[:]
-                for feat_name, feat_impact in acc_feat_impacts:
-                    if feat_impact >= config.feat_impact_thresh:
-                        feats_to_remove.append(feat_name)
-
-                config.logger.info(f'{len(feats_to_remove)=} {len(feats_to_filter)=} {len(cv_slice.feature_names) + len(feats_to_filter)=}')
-
-                if len(feats_to_remove) >= (len(cv_slice.feature_names)+ len(feats_to_filter)):
-                    return return_zero(zero_return, remote, cv_slice)
-                
-
-                #if len(feats_to_remove) > len(feats_to_filter):
-                cv_slice.filterFeatures(feats_to_remove)
-                slice_slice.filterFeatures(feats_to_remove)
-
-                if not skip_scoring:
-                    test_feat_mats.append(cv_slice.get_dtest(samples.feat_pos_dict, samples.features, samples.sample_pos_dict, samples.raw_feature_matrix))
-                    train_feat_mats.append(cv_slice.get_dtrain(samples.feat_pos_dict, samples.features, samples.sample_pos_dict, samples.raw_feature_matrix, sub_sampling=config.sub_sample_factor))
-
-                ta = add_to_times(times, ta) #11
-
-                dtrain = slice_slice.get_dtrain(samples.feat_pos_dict, samples.features, samples.sample_pos_dict, samples.raw_feature_matrix, sub_sampling=config.sub_sample_factor)
-
-                dtest_feature_matrix = slice_slice.get_dtest(samples.feat_pos_dict, samples.features, samples.sample_pos_dict, samples.raw_feature_matrix)
-
-                booster_2 = xgb_train_wrapper(config, dtrain, dtest_feature_matrix, second_round=True)
-                if booster_2 is None:
-                    return return_zero(zero_return, remote, cv_slice)
-
-                booster_2_list.append((booster_2, slice_slice.feature_names[:]))
-                
-
+ 
         ta = add_to_times(times, ta) #12
         if skip_scoring:
-            return booster_2_list, None, cv_counter, cv_slice, times
+            return booster_2_list, None, cv_counter, times
 
     elif skip_scoring:
-        return forest, None, cv_counter, cv_slice, times
+        return forest, None, cv_counter, times
 
     if debug:
         cv_slice.printBalance(config)
@@ -1056,7 +1047,7 @@ def trainRegressionForest(
             [e, f, g] = sys.exc_info()
             g = traceback.format_exc()
             config.logger.info(f'Catched error {config.forest_type=} {skip_feature_selection=}: {e}\n{f}\n{g}\n')
-            return return_zero(zero_return, remote, cv_slice)
+            return zero_return
         if score_train:
             x_pred = booster_list_predict(booster_2_list, train_feat_mats)
                 
@@ -1068,7 +1059,7 @@ def trainRegressionForest(
             zero_scores.printOut(config = config)
         if config.verbosity >= 3:
             config.logger.info("Return Zero: test_for_constant_array was True")
-        return return_zero(zero_return, remote, cv_slice)
+        return zero_return
 
     if config.verbosity >= 5:
         util.sanity_check_value_list(
@@ -1104,8 +1095,8 @@ def trainRegressionForest(
     ta = add_to_times(times, ta) #9/14
 
     if remote:
-        return scores_obj, cv_slice, cv_counter, times
-    return booster_2_list, scores_obj, cv_counter, cv_slice, times
+        return scores_obj, cv_counter, times
+    return booster_2_list, scores_obj, cv_counter, times
 
 
 def calc_scores_obj(target_vector, prediction_vector, prot_id_vec, weight_vector, feature_names, runtime_penalty = 0.):
@@ -1156,10 +1147,7 @@ def trainForest(
     cross_val_object: CrossValidationSlice | DataSAIL_cv | dict[int, ray.ObjectRef],
     feat_corr_matrix,
     feature_names,
-    samples_store_id: ray.ObjectRef | None =None,
     raw_feature_matrix_store_id: ray.ObjectRef | None=None,
-    samples: SampleSpace | None =None,
-    distance_map=None,
     repeat=1,
     print_out=False,
     cv_repeat=False,
@@ -1172,8 +1160,9 @@ def trainForest(
     get_first_scores=False,
     cv_interuption=None,
     gpu_share=None,
-    proc_id=0
-) -> tuple[RandomForestRegressor | None, util.Scores, CrossValidationSlice | DataSAIL_cv, None | list[CrossValidationSlice] | dict[int, list[CrossValidationSlice]]]:
+    proc_id=0,
+    config_ref_container: list[ray.ObjectRef] | None =None
+) -> tuple[None, util.Scores, CrossValidationSlice | DataSAIL_cv, None | list[CrossValidationSlice] | dict[int, list[CrossValidationSlice]]]:
     # if cv_repeat is False, the cross_val_object is a cross validation slice object instead
     zero_scores_obj = util.Scores(zero=True)
     # if para_number == 1:
@@ -1181,13 +1170,16 @@ def trainForest(
     if config.suppress_remote_forests or debug or config.gpu_mode:
         para_number = None
 
+    if config.suppress_remote_forests:
+        remote = False
+
     if not cv_repeat:
         if len(cross_val_object.feature_names) < 1:
             config.logger.info(f"Call of trainForest without features: {cross_val_object.name}")
             return None, zero_scores_obj, cross_val_object
 
     if config.verbosity >= 3 or debug:
-        config.logger.info(f"Call of trainForest: {repeat=}, {cv_repeat=}, {remote=}, {para_number=}, {skip_feature_selection=}, {debug=}, {samples is None=}")
+        config.logger.info(f"Call of trainForest: {repeat=}, {cv_repeat=}, {remote=}, {para_number=}, {skip_feature_selection=}, {debug=}")
 
     t0 = time.time()
 
@@ -1208,16 +1200,12 @@ def trainForest(
                 booster_list,
                 scores_obj,
                 cv_counter,
-                cv_slice,
                 reg_forest_times,
             ) = trainRegressionForest(
                 config,
                 cross_val_object,
                 feats_to_filter,
-                samples_store_id=samples_store_id,
                 raw_feature_matrix_store_id=raw_feature_matrix_store_id,
-                samples=samples,
-                distance_map=distance_map,
                 print_out=print_out,
                 skip_scoring=skip_scoring,
                 debug=debug,
@@ -1273,7 +1261,9 @@ def trainForest(
             quota = gpu_share/len(cv_counters)
             remote_wrapper_function = trainRegressionForestWrapper
 
-            remote_store = ray.put((config, feats_to_filter, samples_store_id, raw_feature_matrix_store_id, distance_map))
+            if config_ref_container is None:
+                config_ref_container = [ray.put(config)]
+            remote_store = ray.put((feats_to_filter, raw_feature_matrix_store_id))
 
             if config.verbosity >= 4:
                 for name, size in sorted(((name, deep_get_size_of(value)) for name, value in locals().items()), key=lambda x: -x[1])[:10]:
@@ -1294,16 +1284,16 @@ def trainForest(
                         cv_slice = cross_val_object.slices[cv_counter]
                     else:
                         cv_slice: CrossValidationSlice = cross_val_object[cv_counter]
-                    if samples_store_id is None:
-                        samples_store_id = ray.put(pack(samples))
 
                     if config.verbosity >= 4:
-                        cv_slice.log_attr_sizes(config.logger, label = f'trainForest CV slice attributes {cv_counter}: ')
+                        config.logger.info(f'Sending trainRegressionForestWrapper: {type(cv_slice)=}')
 
                     slice_result_ids.append(
                         remote_wrapper_function.remote(
                             remote_store,
                             cv_slice,
+                            config_ref_container,
+                            cross_val_object.subslice_refs[cv_counter],
                             print_out=print_out,
                             cv_counter=cv_counter,
                             debug=debug,
@@ -1324,10 +1314,7 @@ def trainForest(
                             config,
                             cv_slice,
                             feats_to_filter,
-                            samples=samples,
-                            samples_store_id=samples_store_id,
                             raw_feature_matrix_store_id=raw_feature_matrix_store_id,
-                            distance_map=distance_map,
                             print_out=print_out,
                             cv_counter=cv_counter,
                             overwrite_proc_n=para_number,
@@ -1363,7 +1350,6 @@ def trainForest(
                 if remote:
                     (
                         scores_obj,
-                        cv_slice,
                         cv_counter,
                         reg_forest_times
                     ) = res
@@ -1373,15 +1359,10 @@ def trainForest(
                         booster_list,
                         scores_obj,
                         cv_counter,
-                        cv_slice,
                         reg_forest_times
                     ) = res
 
                 total_times = aggregate_times(total_times, reg_forest_times)
-
-                if cv_slice is not None:
-                    del cross_val_object.slices[cv_counter]
-                    cross_val_object.slices[cv_counter] = cv_slice
 
                 if scores_obj is None:
                     raise "Scores must not be None here"
@@ -1424,4 +1405,4 @@ def trainForest(
     if config.verbosity >= 2:
         config.logger.info(f"Time for trainForest: {t1 - t0}")
 
-    return booster_list, scores_obj, cross_val_object
+    return booster_list, scores_obj
