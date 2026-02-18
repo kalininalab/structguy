@@ -375,6 +375,8 @@ def xgb_train_wrapper(
             xgb_params = {
                 "tree_method": "hist",
                 "device": "cuda",
+                "extmem_single_page": True,
+                'sampling_method': 'gradient_based',
                 "max_depth": config.tree_depth,
                 "reg_alpha": config.xgb_alpha,
                 "reg_lambda": config.xgb_lambda,
@@ -409,6 +411,8 @@ def xgb_train_wrapper(
             xgb_params = {
                 "tree_method": "hist",
                 "device": "cuda",
+                "extmem_single_page": True,
+                'sampling_method': 'gradient_based',
                 "max_depth": int(config.tree_depth_1),
                 "reg_alpha": config.xgb_alpha_1,
                 "reg_lambda": config.xgb_lambda_1,
