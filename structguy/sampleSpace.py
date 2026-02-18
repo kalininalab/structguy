@@ -1561,13 +1561,13 @@ def put_data_to_tmp_storage(cv_slice: CrossValidationSlice, samples: SampleSpace
 
     gmem = get_gpu_memory()[0]
     sub_share = config.multi_gpu / (config.threads_per_gpu * config.crossValidation_fold * (config.crossValidation_fold-1))
-    num_of_batches = max([1, int(1 * (len(feat_matrix)/ (1 * gmem*sub_share)))])
+    num_of_batches = max([1, int(1 * (len(feat_matrix)/ (10 * gmem*sub_share)))])
 
     batch_size = len(feat_matrix) // num_of_batches
     if len(feat_matrix) % num_of_batches != 0:
         batch_size += 1
 
-    config.logger.info(f'{gmem=} {sub_share=} {num_of_batches=} {batch_size=} {len(feat_matrix)=}')
+    config.logger.info(f'{gmem=} {sub_share=} {num_of_batches=} {batch_size=} {sys.getsizeof(feat_matrix)//num_of_batches=} {len(feat_matrix)=}')
 
     prot_id_vec = cv_slice.get_encoded_test_prot_vec()
     #prot_vec_path = f'{dump_precursor}_prot_id_vec.npy'

@@ -20,7 +20,7 @@ from structguy.class_utils import get_feat_matrix_from_ids, get_raw_feat_matrix_
 from structman.lib.sdsc.sdsc_utils import Slotted_obj
 from structman.lib.serializedPipeline import sizeof_fmt
 
-MAX_QUANTILE_BATCHES = 256
+MAX_QUANTILE_BATCHES = 8
 
 def calculate_chunksizes(n_of_chunks, n_of_items):
     small_chunksize = n_of_items // n_of_chunks
@@ -1202,7 +1202,7 @@ class CrossValidationSlice(Slotted_obj):
             )
         
         if config.verbosity >= 4:
-            config.logger.info(f'After prep in get_extmem_dtest: {len(file_paths)=}')
+            config.logger.info(f'After prep in get_extmem_dtest: {len(file_paths)=} {MAX_QUANTILE_BATCHES=}')
 
         if config.setup_cuda_mem:
             mem_context = xgb.config_context(use_cuda_async_pool=True)
