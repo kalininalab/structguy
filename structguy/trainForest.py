@@ -579,6 +579,7 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
 
 
     booster = xgb_train_wrapper(config, dtrain, dtest_feature_matrix)
+    del dtrain
     ta = add_to_times(times, ta) #4
 
     if config.verbosity >= 3:
@@ -587,11 +588,13 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
     if booster is None:
         if config.verbosity >= 4:
             print_times(times, label = 'double booster 1', logger=config.logger)
-        del dtrain
+        
         del dtest_feature_matrix
         return p_id
     
     acc_feat_impacts, shap_times = ext_shap_analysis(slice_slice.feature_names, booster, sliced_test_emd_matrices)
+    del dtest_feature_matrix
+    del sliced_test_emd_matrices
 
     if config.verbosity >= 4:
         for name, size in sorted(((name, deep_get_size_of(value)) for name, value in locals().items()), key=lambda x: -x[1])[:10]:
@@ -620,8 +623,7 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
     if acc_feat_impacts is None:
         if config.verbosity >= 4:
             print_times(times, label = 'double booster 2', logger=config.logger)
-        del dtrain
-        del dtest_feature_matrix
+        
         return p_id
     
     feats_to_remove = filtered_features[:]
@@ -632,8 +634,6 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
     if len(feats_to_remove) >= (len(cv_slice.feature_names)+ len(filtered_features)):
         if config.verbosity >= 4:
             print_times(times, label = 'double booster 3', logger=config.logger)
-        del dtrain
-        del dtest_feature_matrix
         return p_id
     
     slice_slice.filterFeatures(feats_to_remove)
