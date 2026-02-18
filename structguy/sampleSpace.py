@@ -1499,9 +1499,7 @@ class DataSAIL_cv(CrossValidation):
                 config, cv_slice, samples_store_id, samples=sampleSpace, dummy_call=True
             )
 
-            dump_precursor = f'{config.tmp_folder}/ext_mem_data_{cv_counter}'
-
-            file_paths, prot_vec_path = put_data_to_tmp_storage(dump_precursor, cv_slice, sampleSpace, config)
+            file_paths, prot_vec_path = put_data_to_tmp_storage(cv_slice, sampleSpace, config)
 
             file_path_dict[cv_counter] = file_paths, prot_vec_path
 
@@ -1555,7 +1553,7 @@ class DataSAIL_cv(CrossValidation):
             config.logger.info(f'Time for init DataSAIL_cv Part 6: {t6-t5}')
 
 
-def put_data_to_tmp_storage(dump_precursor: str, cv_slice: CrossValidationSlice, samples: SampleSpace, config: Config):
+def put_data_to_tmp_storage(cv_slice: CrossValidationSlice, samples: SampleSpace, config: Config):
 
     feat_matrix = get_raw_feat_matrix_from_sample_ids(cv_slice.test_sample_ids, samples.sample_pos_dict, samples.raw_feature_matrix)
 

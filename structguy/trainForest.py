@@ -140,17 +140,24 @@ def shap_internal_loop(
 def ext_shap_analysis(
         feature_names: list[str],
         booster: xgb.Booster,
-        sliced_test_emd_matrices: list[xgb.ExtMemQuantileDMatrix]):
+        data_refs: list[tuple[ray.ObjectRef, ray.ObjectRef, ray.ObjectRef]]):
 
     times = []
     ta = time.time()
 
     acc_feat_impacts = None
+    feat_names, cat_vec, feat_id_vec = ray.get(data_refs[0][2])
 
-    n_samples = 0
+    n_samples: int = 0
 
-    for dmatrix in sliced_test_emd_matrices:
-        n_samples += dmatrix.num_row()
+    for X_ref, y_ref, _ in data_refs:
+
+        X: numpy.ndarray = ray.get(X_ref)
+        X = X[:, feat_id_vec]
+        n_samples += len(X)
+
+        dmatrix: xgb.DMatrix = xgb.DMatrix(X, feature_names=feat_names, feature_types=cat_vec, enable_categorical=True)
+
         explanation = booster.predict(dmatrix, pred_contribs=True)
 
         pred_vector = booster.predict(dmatrix)
@@ -159,7 +166,7 @@ def ext_shap_analysis(
             len(feature_names),
             explanation,
             pred_vector,
-            dmatrix.get_label()
+            ray.get(y_ref)
             )
         
         if acc_feat_impacts is None:
@@ -476,12 +483,9 @@ def setup_rmm_memory(config: util.Config, sub_share: float):
 
 #@profile
 def retrieve_dmatrix(
-        dump_precursor: str,
         config: util.Config,
         raw_feature_matrix_store_id: ray.ObjectRef,
         cv_slice: CrossValidationSlice,
-        sub_share: float,
-        get_sliced_test_matrices: bool=False,
         ext_mem = True
         ):
 
@@ -491,9 +495,9 @@ def retrieve_dmatrix(
     ta = add_to_times(times, ta)
     if ext_mem:
         try:
-            dtrain, t_file_paths = cv_slice.get_extmem_dtrain(dump_precursor, config, feat_pos_dict, features, sub_share)
+            dtrain, t_file_paths = cv_slice.get_extmem_dtrain(config, feat_pos_dict, features)
             ta = add_to_times(times, ta)
-            dtest_feature_matrix, te_file_paths, sliced_test_matrices = cv_slice.get_extmem_dtest(dump_precursor, config, feat_pos_dict, features, sub_share, dtrain, get_sliced_test_matrices = get_sliced_test_matrices)
+            dtest_feature_matrix, test_data_refs = cv_slice.get_extmem_dtest(config, feat_pos_dict, features, dtrain)
             ta = add_to_times(times, ta)
             del feat_pos_dict
             del features
@@ -507,15 +511,13 @@ def retrieve_dmatrix(
         ta = add_to_times(times, ta)
 
         dtest_feature_matrix = cv_slice.dtest_from_disc(config, feat_pos_dict, features, dtrain)
-        te_file_paths = None
-        sliced_test_matrices = [dtest_feature_matrix]
+        test_data_refs = None
+
         ta = add_to_times(times, ta)
         del feat_pos_dict
         del features
 
-    if get_sliced_test_matrices:
-        return dtrain, dtest_feature_matrix, sliced_test_matrices, t_file_paths, te_file_paths, times
-    return dtrain, dtest_feature_matrix, t_file_paths, te_file_paths, times
+    return dtrain, dtest_feature_matrix, t_file_paths, test_data_refs, times
 
 @ray.remote(max_retries=0)
 #@profile
@@ -547,12 +549,8 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
     slice_slice.filterFeatures(filtered_features)
     ta = add_to_times(times, ta) #1
 
-    lock_file = f'remote_proc_{proc_id.split('_')[0]}.lock'
-
-    dump_precursor = f'{config.tmp_folder}/ext_mem_data_{proc_id}'
-
     if config.verbosity >= 4:
-        config.logger.info(f'Call of double_booster: {lock_file=} {dump_precursor=} {retain_model=}')
+        config.logger.info(f'Call of double_booster: {retain_model=}')
     if config.verbosity >= 5:
         slice_slice.log_attr_sizes(config.logger, label = f'slice_slice {proc_id} ')
         cv_slice.log_attr_sizes(config.logger, label = f'cv slice {proc_id} ')
@@ -563,13 +561,10 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
     if config.verbosity >= 3:
         config.logger.info(f'Reached after memory setup in double_booster_remote {proc_id} {config.setup_cuda_mem=}')
 
-    dtrain, dtest_feature_matrix, sliced_test_emd_matrices, t_file_paths, te_file_paths, ret_times = retrieve_dmatrix(
-        dump_precursor,
+    dtrain, dtest_feature_matrix, _ , test_data_refs, ret_times = retrieve_dmatrix(
         config,
         raw_feature_matrix_store_id,
         slice_slice,
-        sub_share,
-        get_sliced_test_matrices = True
         )
     times.append(ret_times) #2
     ta = add_to_times(times, ta) #3
@@ -580,6 +575,7 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
 
     booster = xgb_train_wrapper(config, dtrain, dtest_feature_matrix)
     del dtrain
+    del dtest_feature_matrix
     ta = add_to_times(times, ta) #4
 
     if config.verbosity >= 3:
@@ -588,14 +584,11 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
     if booster is None:
         if config.verbosity >= 4:
             print_times(times, label = 'double booster 1', logger=config.logger)
-        
-        del dtest_feature_matrix
+
         return p_id
     
-    acc_feat_impacts, shap_times = ext_shap_analysis(slice_slice.feature_names, booster, sliced_test_emd_matrices)
-    del dtest_feature_matrix
-    del sliced_test_emd_matrices
-
+    acc_feat_impacts, shap_times = ext_shap_analysis(slice_slice.feature_names, booster, test_data_refs)
+    
     if config.verbosity >= 4:
         for name, size in sorted(((name, deep_get_size_of(value)) for name, value in locals().items()), key=lambda x: -x[1])[:10]:
             config.logger.info("In dbr: {:>30}: {:>8}".format(name, sizeof_fmt(size)))
@@ -639,12 +632,10 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
     slice_slice.filterFeatures(feats_to_remove)
     ta = add_to_times(times, ta) #8
 
-    dtrain, dtest_feature_matrix, t_file_paths, te_file_paths, ret_times = retrieve_dmatrix(
-        dump_precursor,
+    dtrain, dtest_feature_matrix, _, _, ret_times = retrieve_dmatrix(
         config,
         raw_feature_matrix_store_id,
-        slice_slice,
-        sub_share
+        slice_slice
         )
     times.append(ret_times) #9
     ta = add_to_times(times, ta) #10
@@ -676,18 +667,18 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
         config.logger.info(f'Reached after cv_slice feat filter in double_booster_remote {proc_id} {cv_slice.train_slice_ids=} {score_train=}')
 
     if score_train:
-        dtrain, dtest_feature_matrix, t_file_paths, te_file_paths, ret_times = retrieve_dmatrix(
-        dump_precursor,
+        dtrain, dtest_feature_matrix, _, _, ret_times = retrieve_dmatrix(
         config,
         raw_feature_matrix_store_id,
-        cv_slice,
-        sub_share
+        cv_slice
         )
-        times.append(ret_times)
+        times.append(ret_times) #13
 
         x_pred = booster_2.predict(dtrain)
         x_true = dtrain.get_label()
         x_prot_vec = dtrain.encoded_prot_vec
+
+        del dtrain
 
         if config.verbosity >= 5:
             train_scores_obj = calc_scores_obj(x_true, x_pred, x_prot_vec, cv_slice.train_class_weight_vector, cv_slice.feature_names)
@@ -695,14 +686,13 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
             train_scores_obj.printOut(config = config)
 
     else:
-        _, dtest_feature_matrix, _, te_file_paths, ret_times = retrieve_dmatrix(
-        dump_precursor,
+        del dtrain
+        _, dtest_feature_matrix, _, _, ret_times = retrieve_dmatrix(
         config,
         raw_feature_matrix_store_id,
-        cv_slice,
-        sub_share
+        cv_slice
         )
-        times.append(ret_times)
+        times.append(ret_times) #13
         
         x_pred = None
         x_true = None
@@ -712,8 +702,7 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
     y_true = dtest_feature_matrix.get_label()
     y_prot_vec = dtest_feature_matrix.encoded_prot_vec
 
-    
-    ta = add_to_times(times, ta) #13
+    ta = add_to_times(times, ta) #14
 
     if config.verbosity >= 3:
         config.logger.info(f'Reached the end of double_booster_remote {proc_id}')
@@ -721,7 +710,6 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
     if config.verbosity >= 4:
         print_times(times, label = 'double booster 6', logger=config.logger)
 
-    del dtrain
     del dtest_feature_matrix
 
     if retain_model:
@@ -951,7 +939,7 @@ def trainRegressionForest(
 
                 if len(ready) > 0:
                     if config.verbosity >= 3:
-                        config.logger.info(f'Double booster returned {len(ready)=}')
+                        config.logger.info(f'Double booster returned {ready=}')
                     try:
                         results = ray.get(ready, timeout=60)
                     except ray.exceptions.GetTimeoutError:
