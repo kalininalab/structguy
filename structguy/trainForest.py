@@ -925,12 +925,27 @@ def trainRegressionForest(
                 sub_share = 0.5
             if config.verbosity >= 3:
                 config.logger.info(f'call of double_booster_remotes: {sub_share=} {len(cv_slice.slice_slices)=}')
-            remote_function = double_booster_remote.options(num_gpus = sub_share)
+
+            gpu_id = int(proc_id)//config.threads_per_gpu
+            try:
+                pg = ray.util.get_placement_group(f"pg_{gpu_id}")
+                grouped = True
+            except ValueError:
+                grouped = False
+            if grouped:
+                remote_function = double_booster_remote.options(
+                    num_gpus=sub_share,
+                    scheduling_strategy=ray.util.PlacementGroupSchedulingStrategy(placement_group=pg)
+                    )
+            else:
+                remote_function = double_booster_remote.options(num_gpus=sub_share)
+                
             remote_proc_ids = []
             if config_ref_container is None:
                 config_ref_container = [ray.put(config)]
             store = ray.put((feats_to_filter, pack(cv_slice), skip_scoring, score_train, raw_feature_matrix_store_id, remote))
             for nested_proc_id, packed_slice_slice in enumerate(cv_slice.slice_slices):
+
                 remote_proc_ids.append(remote_function.remote(packed_slice_slice, store, f'{proc_id}_{nested_proc_id}', sub_share, config_ref_container))
 
             done = False

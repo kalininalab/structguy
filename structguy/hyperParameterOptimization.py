@@ -651,6 +651,10 @@ def bayesian_optimisation(
         
         store, config_ref_container = stores
 
+        for i in range(config.multi_gpu):
+            pg = ray.util.placement_group([{"CPU": config.proc_n // config.multi_gpu}, {'GPU':1}], lifetime="detached", name=f"pg_{i}")
+            ray.get(pg.ready())
+
         for p in range(number_of_procs):
             next_sample = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
 
@@ -1124,7 +1128,7 @@ def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_share,
 
     util.reset_logger_for_remotes(config)
     if config.verbosity >= 2:
-        config.logger.info(f"Call of para_eval: {com_queue.empty()=}")
+        config.logger.info(f"Call of para_eval: {com_queue.empty()=} {proc_id=}")
       
     if config.verbosity >= 4:
         for name, size in sorted(((name, deep_get_size_of(value)) for name, value in locals().items()), key=lambda x: -x[1])[:10]:

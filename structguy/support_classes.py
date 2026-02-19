@@ -1314,6 +1314,9 @@ class CrossValidationSlice(Slotted_obj):
             features
             )
         
+        if config.verbosity >= 4:
+            config.logger.info(f'After prep in get_extmem_dtrain: {len(file_paths)=} {MAX_QUANTILE_BATCHES=}')
+
         if config.setup_cuda_mem:
             mem_context = xgb.config_context(use_cuda_async_pool=True)
         else:
