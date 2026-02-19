@@ -652,7 +652,7 @@ def bayesian_optimisation(
         store, config_ref_container = stores
 
         for i in range(config.multi_gpu):
-            pg = ray.util.placement_group([{"CPU": config.proc_n // config.multi_gpu}, {'GPU':1}], lifetime="detached", name=f"pg_{i}")
+            pg = ray.util.placement_group([{"CPU": config.proc_n // (config.multi_gpu), 'GPU':1}], name=f"pg_{i}")
             ray.get(pg.ready())
 
         for p in range(number_of_procs):
@@ -663,6 +663,16 @@ def bayesian_optimisation(
             com_queue.put(next_sample)
             n_of_sent_hpo_sets += 1
             
+            gpu_id = p//config.threads_per_gpu
+            pg = ray.util.get_placement_group(f"pg_{gpu_id}")
+
+            proc_id = remote_function.options(
+                    num_cpus=1,
+                    num_gpus=0,
+                    scheduling_strategy=ray.util.scheduling_strategies.PlacementGroupSchedulingStrategy(
+                        placement_group=pg, placement_group_capture_child_tasks=True
+                    )
+                ).remote(com_queue, out_queue, store, para_number, gpu_share, p, config_ref_container)
             proc_id = remote_function.remote(com_queue, out_queue, store, para_number, gpu_share, p, config_ref_container)
             remote_processes.append((com_queue, out_queue, proc_id))
 

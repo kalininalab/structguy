@@ -926,17 +926,29 @@ def trainRegressionForest(
             if config.verbosity >= 3:
                 config.logger.info(f'call of double_booster_remotes: {sub_share=} {len(cv_slice.slice_slices)=}')
 
-            gpu_id = int(proc_id)//config.threads_per_gpu
+            gpu_id = int(proc_id.split('_')[0])//config.threads_per_gpu
             try:
                 pg = ray.util.get_placement_group(f"pg_{gpu_id}")
+                if config.verbosity >= 4:
+                    config.logger.info(f'Setting placement group for double booster: pg_{gpu_id} {proc_id=}')
                 grouped = True
-            except ValueError:
+            except ValueError as e:
                 grouped = False
+                if config.verbosity >= 4:
+                    config.logger.info(f'Could not find a placement group {proc_id=}: {e=}')
+
             if grouped:
                 remote_function = double_booster_remote.options(
+                    num_cpus=1,
                     num_gpus=sub_share,
-                    scheduling_strategy=ray.util.PlacementGroupSchedulingStrategy(placement_group=pg)
+                    scheduling_strategy=ray.util.scheduling_strategies.PlacementGroupSchedulingStrategy(
+                        placement_group=pg , placement_group_capture_child_tasks=True
+                        )
                     )
+                
+                if config.verbosity >= 4:
+                    config.logger.info(f'double booster remote configured: {proc_id=}')
+                
             else:
                 remote_function = double_booster_remote.options(num_gpus=sub_share)
                 
@@ -1297,6 +1309,22 @@ def trainForest(
                     if config.verbosity >= 4:
                         config.logger.info(f'Sending trainRegressionForestWrapper: {type(cv_slice)=}')
 
+                    
+                    try:
+                        pg = ray.util.get_placement_group(f"pg_{proc_id}")
+                        remote_wrapper_function.options(
+                            num_cpus=1,
+                            num_gpus=0,
+                            scheduling_strategy=ray.util.scheduling_strategies.PlacementGroupSchedulingStrategy(
+                                placement_group=pg, placement_group_capture_child_tasks=True
+                            )
+                        )
+                        if config.verbosity >= 4:
+                            config.logger.info(f'Setting placement group before trainRegressionForestWrapper pg_{proc_id}')
+                    except ValueError:
+                        pass
+                    
+                        
                     slice_result_ids.append(
                         remote_wrapper_function.remote(
                             remote_store,
