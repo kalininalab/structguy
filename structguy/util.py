@@ -5,6 +5,7 @@ import logging
 import getopt
 import statistics
 import numpy as np
+import subprocess
 from psutil import virtual_memory
 from scipy import stats
 import math
@@ -2210,3 +2211,11 @@ def get_gpu_memory():
     memory_free_info = sp.check_output(command.split()).decode('ascii').split('\n')[:-1][1:]
     memory_free_values = [int(x.split()[0]) for i, x in enumerate(memory_free_info)]
     return memory_free_values
+
+def dump_ray_logs_snapshot(dump_file_path: str):
+    f = open(dump_file_path, 'w')
+    cmds = ' '.join(['cat', '/tmp/ray/session_latest/logs/worker-*.out'])
+    sp.call(cmds, shell=True, stdout=f)
+    cmds = ' '.join(['cat', '/tmp/ray/session_latest/logs/worker-*.err'])
+    sp.call(cmds, shell=True, stdout=f)
+    f.close()

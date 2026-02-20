@@ -977,7 +977,15 @@ def trainRegressionForest(
                         remote_proc_ids = not_ready
                         if len(remote_proc_ids) == 0:
                             done = True
+                        util.dump_ray_logs_snapshot(f'{config.outfolder}/ray_dump_snapshot.log')
                         config.logger.info('double_booster_remote ray.get timed out')
+                        continue
+                    except ray.exceptions.WorkerCrashedError:
+                        remote_proc_ids = not_ready
+                        if len(remote_proc_ids) == 0:
+                            done = True
+                        util.dump_ray_logs_snapshot(f'{config.outfolder}/ray_dump_snapshot.log')
+                        config.logger.info('double_booster_remote ray.get crashed')
                         continue
 
                     if config.verbosity >= 4:
