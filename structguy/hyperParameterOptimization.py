@@ -673,7 +673,9 @@ def bayesian_optimisation(
                         placement_group=pg, placement_group_capture_child_tasks=True
                     )
                 ).remote(com_queue, out_queue, store, para_number, gpu_share, p, config_ref_container)
-            proc_id = remote_function.remote(com_queue, out_queue, store, para_number, gpu_share, p, config_ref_container)
+            
+            #proc_id = remote_function.remote(com_queue, out_queue, store, para_number, gpu_share, p, config_ref_container)
+            
             remote_processes.append((com_queue, out_queue, proc_id))
 
         if config.verbosity >= 1:
