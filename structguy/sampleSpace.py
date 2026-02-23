@@ -1560,8 +1560,8 @@ def put_data_to_tmp_storage(cv_slice: CrossValidationSlice, samples: SampleSpace
     file_paths: list[tuple[str, str]] = []
 
     gmem = get_gpu_memory()[0]
-    sub_share = config.multi_gpu / (config.threads_per_gpu * config.crossValidation_fold * (config.crossValidation_fold-1))
-    num_of_batches = max([1, int(1 * config.multi_gpu * (len(feat_matrix)/ (10 * gmem*sub_share)))])
+    sub_share = 1 / (config.threads_per_gpu * config.crossValidation_fold * (config.crossValidation_fold-1))
+    num_of_batches = max([1, int(1 * (len(feat_matrix)/ (100 * gmem*sub_share)))])
 
     batch_size = len(feat_matrix) // num_of_batches
     if len(feat_matrix) % num_of_batches != 0:

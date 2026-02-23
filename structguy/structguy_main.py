@@ -48,7 +48,8 @@ def parse_arguments(argument_start = 2, manual_args = None):
                 'sd',
                 'repeat=',
                 'select_samples',
-                'tpgpu='
+                'tpgpu=',
+                'nCV='
             ]
             opts, args = getopt.getopt(argv, "i:n:m:d", long_paras)
 
@@ -94,6 +95,7 @@ def parse_arguments(argument_start = 2, manual_args = None):
     multi_gpu = 0
     threads_per_gpu = 4
     repeat = None
+    n_cv = None
 
     for opt, arg in opts:
         if opt == '-i':
@@ -186,6 +188,9 @@ def parse_arguments(argument_start = 2, manual_args = None):
         if opt == '--select_samples':
             select_samples = True
 
+        if opt == '--nCV':
+            n_cv = int(arg)
+
     if path_to_model is not None:
         if path_to_model.count('/') > 0:
             model_name = path_to_model.rsplit("/",1)[1].rsplit('.',1)[0]
@@ -198,6 +203,9 @@ def parse_arguments(argument_start = 2, manual_args = None):
     print(f'Parsing config: {path_to_project_file=} {random_split=}')
 
     config: util.Config = util.Config(path_to_project_file, hyperparameters_path = path_to_hyperparameters_file)
+
+    if n_cv is not None:
+        config.crossValidation_fold = n_cv
 
     if skip_final_model is not None:
         config.skip_final_model = True

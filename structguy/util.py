@@ -124,7 +124,7 @@ class Config:
         self.verbosity = 1
 
         self.crossValidation=True
-        self.crossValidation_fold = 8
+        self.crossValidation_fold = 4
         self.multiple_lopo = 1
 
         self.split_rate = 0.2

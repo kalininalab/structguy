@@ -503,7 +503,7 @@ def bayesian_optimisation(
         n_iters = 4
 
     if config.multi_gpu > 1:
-        n_iters = max([n_params**2, 2])
+        n_iters = max([2**(n_params+1), 2])
 
     return_cv_obj = cv_obj
 
@@ -835,6 +835,11 @@ def bayesian_optimisation(
                 ray.cancel(proc)
             except TypeError:
                 continue
+
+        for i in range(config.multi_gpu):
+            pg = ray.util.get_placement_group(f"pg_{i}")
+            
+            ray.util.remove_placement_group(pg)
 
     if new_optimimum:
         for pos, para_value in enumerate(best_params):

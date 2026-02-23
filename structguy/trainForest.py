@@ -28,7 +28,7 @@ import cuda.bindings.runtime as cudart
 from cupy.cuda import MemoryAsyncPool
 
 from rmm.allocators.cupy import rmm_cupy_allocator
-from rmm.mr import PoolMemoryResource, CudaAsyncMemoryResource, set_current_device_resource
+from rmm.mr import PoolMemoryResource, CudaAsyncMemoryResource, set_current_device_resource, set_per_device_resource, CudaMemoryResource, ArenaMemoryResource
 
 #from filelock import FileLock, Timeout
 from structguy import featureSelection, util
@@ -467,22 +467,36 @@ def setup_cuda_memory(config: util.Config, sub_share: float):
 def setup_rmm_memory(config: util.Config, sub_share: float):
     gmem = util.get_gpu_memory()[0]
     init_pool = 1024*1024*int(gmem*sub_share*0.05)
-    max_pool = 1024*1024*int(gmem*sub_share*0.8)
+    max_pool = 1024*1024*int(gmem*sub_share*0.4)
 
     if config.verbosity >= 4:
-        config.logger.info(f'Setup memory resources: {init_pool=} {max_pool=}')
+        config.logger.info(f'Setup memory resources: {init_pool=} {max_pool=} {config.multi_gpu=}')
         
     # It's important to use RMM for GPU-based external memory to improve performance.
     # If XGBoost is not built with RMM support, a warning will be raised.
     # We use the pool memory resource here for simplicity, you can also try the
     # `ArenaMemoryResource` for improved memory fragmentation handling.
 
-    amr = CudaAsyncMemoryResource(initial_pool_size=init_pool, release_threshold = 2*init_pool)
+    #amr = CudaAsyncMemoryResource(initial_pool_size=init_pool, release_threshold = 2*init_pool)
     
-    mr = PoolMemoryResource(amr, initial_pool_size=init_pool, maximum_pool_size=max_pool)
-    set_current_device_resource(mr)
-    # Set the allocator for cupy as well.
-    cp.cuda.set_allocator(rmm_cupy_allocator)
+    #mr = PoolMemoryResource(amr, initial_pool_size=init_pool, maximum_pool_size=max_pool)
+    
+    if config.multi_gpu > 1:
+        for device_id in range(config.multi_gpu):
+            with cp.cuda.Device(device_id):
+                mr = CudaMemoryResource()
+                mr = ArenaMemoryResource(mr, arena_size=max_pool)
+                set_per_device_resource(device_id, mr)
+                cp.cuda.set_allocator(rmm_cupy_allocator)
+
+    else:
+        mr = CudaMemoryResource()
+        mr = ArenaMemoryResource(mr, arena_size=max_pool)
+        
+        set_current_device_resource(mr)
+
+        # Set the allocator for cupy as well.
+        cp.cuda.set_allocator(rmm_cupy_allocator)
 
 
 #@profile
@@ -490,7 +504,7 @@ def retrieve_dmatrix(
         config: util.Config,
         raw_feature_matrix_store_id: ray.ObjectRef,
         cv_slice: CrossValidationSlice,
-        ext_mem = True
+        ext_mem = False
         ):
 
     times = []
@@ -514,8 +528,7 @@ def retrieve_dmatrix(
         t_file_paths = None
         ta = add_to_times(times, ta)
 
-        dtest_feature_matrix = cv_slice.dtest_from_disc(config, feat_pos_dict, features, dtrain)
-        test_data_refs = None
+        dtest_feature_matrix, test_data_refs = cv_slice.dtest_from_disc(config, feat_pos_dict, features, dtrain)
 
         ta = add_to_times(times, ta)
         del feat_pos_dict
@@ -560,7 +573,7 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
         cv_slice.log_attr_sizes(config.logger, label = f'cv slice {proc_id} ')
         config.logger.info(f'{p_id=} {ray.get_runtime_context().get()=}')
 
-    setup_memory_resources(config, sub_share, cuda_setup=config.setup_cuda_mem)
+    #setup_memory_resources(config, sub_share, cuda_setup=config.setup_cuda_mem)
 
     if config.verbosity >= 3:
         config.logger.info(f'Reached after memory setup in double_booster_remote {proc_id} {config.setup_cuda_mem=}')
@@ -599,6 +612,9 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
 
         for name, size in sorted(((name, deep_get_size_of(value)) for name, value in globals().items()), key=lambda x: -x[1])[:10]:
             config.logger.info("Globals in dbr: {:>30}: {:>8}".format(name, sizeof_fmt(size)))
+
+        if proc_id == '0_0_0':
+            util.dump_ray_logs_snapshot(f'{config.outfolder}/ray_dump_snapshot.log')
 
     ta = add_to_times(times, ta) #5
 
