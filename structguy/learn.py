@@ -1185,11 +1185,6 @@ def buildFinalModel(samples, config, raw_feature_matrix_store_id, internal_cv=No
     if config.verbosity >= 1:
         full_slice.printBalance(config)
 
-    if config.feature_selection == "confusion":
-        full_slice.subslices = []
-        for slice_slice in full_slice.slice_slices:
-            full_slice.subslices.append(slice_slice.test_prots)
-
     print_out = config.verbosity >= 1
     if config.multi_gpu > 0:
         gpu_share = config.multi_gpu
@@ -1201,7 +1196,6 @@ def buildFinalModel(samples, config, raw_feature_matrix_store_id, internal_cv=No
         samples.feat_corr_matrix,
         samples.feature_names,
         raw_feature_matrix_store_id=raw_feature_matrix_store_id,
-        distance_map=samples.geometric_distance_map,
         print_out=print_out,
         skip_scoring=True,
         gpu_share=gpu_share

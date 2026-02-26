@@ -613,6 +613,8 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
         for name, size in sorted(((name, deep_get_size_of(value)) for name, value in globals().items()), key=lambda x: -x[1])[:10]:
             config.logger.info("Globals in dbr: {:>30}: {:>8}".format(name, sizeof_fmt(size)))
 
+        config.logger.info(f'{config.feat_impact_thresh=} {acc_feat_impacts=}')
+
         if proc_id == '0_0_0':
             util.dump_ray_logs_snapshot(f'{config.outfolder}/ray_dump_snapshot.log')
 
@@ -801,8 +803,12 @@ def trainRegressionForest(
     if config.verbosity >= 4:
         config.logger.info(f'Call of trainRegressionForest {type(packed_cv_slice)=} {type(subslice_refs)=}')
 
-    cv_slice: CrossValidationSlice = unpack(packed_cv_slice)
-    del packed_cv_slice
+    if isinstance(packed_cv_slice, CrossValidationSlice): 
+        cv_slice: CrossValidationSlice = packed_cv_slice
+    else:
+        cv_slice: CrossValidationSlice = unpack(packed_cv_slice)
+        del packed_cv_slice
+
     if subslice_refs is not None:
         cv_slice.slice_slices = subslice_refs
 
@@ -942,7 +948,11 @@ def trainRegressionForest(
             if config.verbosity >= 3:
                 config.logger.info(f'call of double_booster_remotes: {sub_share=} {len(cv_slice.slice_slices)=}')
 
-            gpu_id = int(proc_id.split('_')[0])//config.threads_per_gpu
+            if isinstance(proc_id, int):
+                gpu_id = proc_id//config.threads_per_gpu
+            else:
+                gpu_id = int(proc_id.split('_')[0])//config.threads_per_gpu
+                
             try:
                 pg = ray.util.get_placement_group(f"pg_{gpu_id}")
                 if config.verbosity >= 4:
@@ -955,7 +965,7 @@ def trainRegressionForest(
 
             if grouped:
                 remote_function = double_booster_remote.options(
-                    num_cpus=1,
+                    num_cpus=0.5,
                     num_gpus=sub_share,
                     scheduling_strategy=ray.util.scheduling_strategies.PlacementGroupSchedulingStrategy(
                         placement_group=pg , placement_group_capture_child_tasks=True
@@ -1337,7 +1347,7 @@ def trainForest(
                     try:
                         pg = ray.util.get_placement_group(f"pg_{proc_id}")
                         remote_wrapper_function.options(
-                            num_cpus=1,
+                            num_cpus=0.5,
                             num_gpus=0,
                             scheduling_strategy=ray.util.scheduling_strategies.PlacementGroupSchedulingStrategy(
                                 placement_group=pg, placement_group_capture_child_tasks=True

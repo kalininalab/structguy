@@ -667,7 +667,7 @@ def bayesian_optimisation(
             pg = ray.util.get_placement_group(f"pg_{gpu_id}")
 
             proc_id = remote_function.options(
-                    num_cpus=1,
+                    num_cpus=0.5,
                     num_gpus=0,
                     scheduling_strategy=ray.util.scheduling_strategies.PlacementGroupSchedulingStrategy(
                         placement_group=pg, placement_group_capture_child_tasks=True
