@@ -81,6 +81,7 @@ class Config:
         self.gpu_mode = False
 
         self.setup_cuda_mem = False
+        self.use_external_memory_qdm = False
 
         self.plot_trees = False
 

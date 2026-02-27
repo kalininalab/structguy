@@ -28,6 +28,7 @@ import cuda.bindings.runtime as cudart
 from cupy.cuda import MemoryAsyncPool
 
 from rmm.allocators.cupy import rmm_cupy_allocator
+from rmm.allocators.numba import RMMNumbaManager
 from rmm.mr import PoolMemoryResource, CudaAsyncMemoryResource, set_current_device_resource, set_per_device_resource, CudaMemoryResource, ArenaMemoryResource
 
 #from filelock import FileLock, Timeout
@@ -40,6 +41,7 @@ import numpy
 #from ray.util.queue import Queue
 #from ray.train import RunConfig
 #import shap
+import numba
 from numba import njit
 
 def makeBinaryClassifier(data, thresh, flip_sign=False):
@@ -466,8 +468,8 @@ def setup_cuda_memory(config: util.Config, sub_share: float):
 #@profile
 def setup_rmm_memory(config: util.Config, sub_share: float):
     gmem = util.get_gpu_memory()[0]
-    init_pool = 1024*1024*int(gmem*sub_share*0.05)
-    max_pool = 1024*1024*int(gmem*sub_share*0.4)
+    init_pool = 1024*1024*int(gmem*sub_share*0.01)
+    max_pool = 1024*1024*int(gmem*sub_share*0.99)
 
     if config.verbosity >= 4:
         config.logger.info(f'Setup memory resources: {init_pool=} {max_pool=} {config.multi_gpu=}')
@@ -481,22 +483,26 @@ def setup_rmm_memory(config: util.Config, sub_share: float):
     
     #mr = PoolMemoryResource(amr, initial_pool_size=init_pool, maximum_pool_size=max_pool)
     
+    """
     if config.multi_gpu > 1:
         for device_id in range(config.multi_gpu):
             with cp.cuda.Device(device_id):
                 mr = CudaMemoryResource()
-                mr = ArenaMemoryResource(mr, arena_size=max_pool)
+                #mr = ArenaMemoryResource(mr, arena_size=max_pool)
+                mr = PoolMemoryResource(mr, initial_pool_size=init_pool, maximum_pool_size=max_pool)
                 set_per_device_resource(device_id, mr)
                 cp.cuda.set_allocator(rmm_cupy_allocator)
+    """
+    #else:
 
-    else:
-        mr = CudaMemoryResource()
-        mr = ArenaMemoryResource(mr, arena_size=max_pool)
-        
-        set_current_device_resource(mr)
+    mr = CudaMemoryResource()
+    #mr = ArenaMemoryResource(mr, arena_size=max_pool)
+    mr = PoolMemoryResource(mr, initial_pool_size=init_pool, maximum_pool_size=max_pool)
+    set_current_device_resource(mr)
 
-        # Set the allocator for cupy as well.
-        cp.cuda.set_allocator(rmm_cupy_allocator)
+    # Set the allocator for cupy as well.
+    cp.cuda.set_allocator(rmm_cupy_allocator)
+    numba.cuda.set_memory_manager(RMMNumbaManager)
 
 
 #@profile
@@ -573,7 +579,7 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
         cv_slice.log_attr_sizes(config.logger, label = f'cv slice {proc_id} ')
         config.logger.info(f'{p_id=} {ray.get_runtime_context().get()=}')
 
-    #setup_memory_resources(config, sub_share, cuda_setup=config.setup_cuda_mem)
+    setup_memory_resources(config, sub_share, cuda_setup=config.setup_cuda_mem)
 
     if config.verbosity >= 3:
         config.logger.info(f'Reached after memory setup in double_booster_remote {proc_id} {config.setup_cuda_mem=}')
@@ -582,6 +588,7 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
         config,
         raw_feature_matrix_store_id,
         slice_slice,
+        ext_mem=config.use_external_memory_qdm
         )
     times.append(ret_times) #2
     ta = add_to_times(times, ta) #3
@@ -657,7 +664,8 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
     dtrain, dtest_feature_matrix, _, _, ret_times = retrieve_dmatrix(
         config,
         raw_feature_matrix_store_id,
-        slice_slice
+        slice_slice,
+        ext_mem=config.use_external_memory_qdm
         )
     times.append(ret_times) #9
     ta = add_to_times(times, ta) #10
@@ -692,7 +700,8 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
         dtrain, dtest_feature_matrix, _, _, ret_times = retrieve_dmatrix(
         config,
         raw_feature_matrix_store_id,
-        cv_slice
+        cv_slice,
+        ext_mem=config.use_external_memory_qdm
         )
         times.append(ret_times) #13
 
@@ -712,7 +721,8 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
         _, dtest_feature_matrix, _, _, ret_times = retrieve_dmatrix(
         config,
         raw_feature_matrix_store_id,
-        cv_slice
+        cv_slice,
+        ext_mem=config.use_external_memory_qdm
         )
         times.append(ret_times) #13
         
@@ -952,7 +962,7 @@ def trainRegressionForest(
                 gpu_id = proc_id//config.threads_per_gpu
             else:
                 gpu_id = int(proc_id.split('_')[0])//config.threads_per_gpu
-                
+
             try:
                 pg = ray.util.get_placement_group(f"pg_{gpu_id}")
                 if config.verbosity >= 4:

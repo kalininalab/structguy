@@ -49,7 +49,8 @@ def parse_arguments(argument_start = 2, manual_args = None):
                 'repeat=',
                 'select_samples',
                 'tpgpu=',
-                'nCV='
+                'nCV=',
+                'extmem'
             ]
             opts, args = getopt.getopt(argv, "i:n:m:d", long_paras)
 
@@ -96,6 +97,7 @@ def parse_arguments(argument_start = 2, manual_args = None):
     threads_per_gpu = 4
     repeat = None
     n_cv = None
+    use_external_memory_qdm = False
 
     for opt, arg in opts:
         if opt == '-i':
@@ -191,6 +193,9 @@ def parse_arguments(argument_start = 2, manual_args = None):
         if opt == '--nCV':
             n_cv = int(arg)
 
+        if opt == '--extmem':
+            use_external_memory_qdm = True
+
     if path_to_model is not None:
         if path_to_model.count('/') > 0:
             model_name = path_to_model.rsplit("/",1)[1].rsplit('.',1)[0]
@@ -220,6 +225,7 @@ def parse_arguments(argument_start = 2, manual_args = None):
 
     config.multi_gpu = multi_gpu
     config.threads_per_gpu = threads_per_gpu
+    config.use_external_memory_qdm = use_external_memory_qdm
 
     if repeat is not None:
         config.repeat_training = repeat

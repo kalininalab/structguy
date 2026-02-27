@@ -146,7 +146,7 @@ def learn(config: Config):
         config.logger.info(f"Writing output to: {config.outfolder}")
         config.logger.info(f'{build_info()=}')
 
-    trainForest.setup_memory_resources(config, 1.0, cuda_setup=config.setup_cuda_mem)
+    #trainForest.setup_memory_resources(config, 1.0, cuda_setup=config.setup_cuda_mem)
 
     t0 = time.time()
     samples: sampleSpace.SampleSpace = featureGenerator.createTrainingSet(config, stop_matrix_transformation=(config.path_to_support_features is not None))

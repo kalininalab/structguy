@@ -1174,14 +1174,17 @@ class CrossValidationSlice(Slotted_obj):
             self.test_sample_ids, self.feature_names, get_cat_vec=True)
         encoded_prot_vec = self.get_encoded_test_prot_vec()
         print(f'{len(self.test_sample_ids)=} {len(self.test_targets)=} {len(encoded_prot_vec)=} {numpy.array(feat_matrix).shape=} {len(self.feature_names)=}')
-        dtest_feature_matrix = xgb.QuantileDMatrix(
-            numpy.array(feat_matrix),
-            label=numpy.array(self.test_targets),
-            feature_types=cat_vec,
-            enable_categorical=True,
-            feature_names = self.feature_names,
-            ref=dtrain)
-        dtest_feature_matrix.encoded_prot_vec = encoded_prot_vec
+        
+        mem_context = xgb.config_context(use_rmm=True)
+        with mem_context:
+            dtest_feature_matrix = xgb.QuantileDMatrix(
+                numpy.array(feat_matrix),
+                label=numpy.array(self.test_targets),
+                feature_types=cat_vec,
+                enable_categorical=True,
+                feature_names = self.feature_names,
+                ref=dtrain)
+            dtest_feature_matrix.encoded_prot_vec = encoded_prot_vec
         return dtest_feature_matrix
 
     #@profile
@@ -1403,6 +1406,8 @@ class CrossValidationSlice(Slotted_obj):
         else:
             mem_context = xgb.config_context(use_rmm=True)
         with mem_context:
+            X = cp.array(X)
+            Y = cp.array(Y)
             dtrain = xgb.QuantileDMatrix(
                 X,
                 label=Y,
@@ -1474,6 +1479,8 @@ class CrossValidationSlice(Slotted_obj):
         else:
             mem_context = xgb.config_context(use_rmm=True)
         with mem_context:
+            X = cp.array(X)
+            Y = cp.array(Y)
             dtest = xgb.QuantileDMatrix(
                 X,
                 label=Y,
