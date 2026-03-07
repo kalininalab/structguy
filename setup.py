@@ -42,10 +42,10 @@ setup(
         "numpy==1.26.4",
         "xgboost>=3.2.0",
         "fgclustering==2.0.2",
-        "shap==0.48.0",
+        "shap>=0.48.0",
         "supertree==0.5.5",
         "matplotlib==3.10.6",
-        'cupy-cuda12x>=12',
+        #'cupy-cuda12x>=12',
         'rmm-cu12>=25.12.0'
     ],
 
