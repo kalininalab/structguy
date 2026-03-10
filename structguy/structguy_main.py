@@ -182,7 +182,7 @@ def parse_arguments(argument_start = 2, manual_args = None):
             multi_gpu = int(arg)
 
         if opt == '--tpgpu':
-            threads_per_gpu = int(arg)
+            threads_per_gpu = float(arg)
 
         if opt == '--repeat':
             repeat = int(arg)
@@ -274,12 +274,8 @@ def parse_arguments(argument_start = 2, manual_args = None):
         config.forest_type = forest_type
         if forest_type == 'gradient_boost' or forest_type == 'xgboost':
             #config.impute_missing_values = True
-            try:
-                import torch
-                config.gpu_mode = torch.cuda.is_available()
-                config.multi_gpu = max([1, config.multi_gpu])
-            except ModuleNotFoundError:
-                config.gpu_mode = False
+            config.gpu_mode = config.multi_gpu > 0
+            
 
     if config.multi_gpu > 1:
         #import dask

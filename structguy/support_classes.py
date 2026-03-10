@@ -7,6 +7,7 @@ import random
 import pickle
 import numpy
 import cupy as cp
+import cudf
 import xgboost as xgb
 from scipy import stats
 
@@ -1401,20 +1402,27 @@ class CrossValidationSlice(Slotted_obj):
                 prot_id_vec = numpy.concatenate((prot_id_vec, ray.get(prot_vec_path)))
 
 
+        X = cp.asarray(X)
+        Y = cp.asarray(Y)
+        #cat_vec = cudf.Series(cat_vec)
+
+        #if not config.use_external_memory_qdm:
+        #    mem_context = xgb.config_context()
+        #el
         if config.setup_cuda_mem:
             mem_context = xgb.config_context(use_cuda_async_pool=True)
         else:
             mem_context = xgb.config_context(use_rmm=True)
         with mem_context:
-            X = cp.array(X)
-            Y = cp.array(Y)
+            
             dtrain = xgb.QuantileDMatrix(
                 X,
-                label=Y,
+                label=Y, 
                 feature_types=cat_vec,
                 enable_categorical=True,
-                feature_names = self.feature_names)
-            dtrain.encoded_prot_vec = prot_id_vec
+                feature_names = self.feature_names,
+                max_bin=512)
+        dtrain.encoded_prot_vec = cp.asarray(prot_id_vec)
 
         return dtrain
 
@@ -1474,21 +1482,30 @@ class CrossValidationSlice(Slotted_obj):
         #prot_id_vec = numpy.load(prot_vec_path, allow_pickle=True)
         prot_id_vec = ray.get(prot_vec_path)
 
+        X = cp.asarray(X)
+        Y = cp.asarray(Y)
+
+        #cat_vec = cudf.Series(cat_vec)
+
+        #if not config.use_external_memory_qdm:
+        #    mem_context = xgb.config_context()
+        #el
         if config.setup_cuda_mem:
             mem_context = xgb.config_context(use_cuda_async_pool=True)
         else:
             mem_context = xgb.config_context(use_rmm=True)
         with mem_context:
-            X = cp.array(X)
-            Y = cp.array(Y)
+            
             dtest = xgb.QuantileDMatrix(
+            #dtest = xgb.DMatrix(
                 X,
                 label=Y,
                 feature_types=cat_vec,
                 enable_categorical=True,
                 feature_names = self.feature_names,
+                max_bin=512,
                 ref = dtrain)
-            dtest.encoded_prot_vec = prot_id_vec
+        dtest.encoded_prot_vec = cp.asarray(prot_id_vec)
 
 
         data_refs: list[tuple[ray.ObjectRef, ray.ObjectRef, ray.ObjectRef]] = []

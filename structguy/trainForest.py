@@ -27,6 +27,7 @@ import cuda.bindings.driver as driver
 import cuda.bindings.runtime as cudart
 from cupy.cuda import MemoryAsyncPool
 
+import rmm
 from rmm.allocators.cupy import rmm_cupy_allocator
 from rmm.allocators.numba import RMMNumbaManager
 from rmm.mr import PoolMemoryResource, CudaAsyncMemoryResource, set_current_device_resource, set_per_device_resource, CudaMemoryResource, ArenaMemoryResource
@@ -295,9 +296,67 @@ def jit_mean_spear(predt: numpy.ndarray, true_labels: numpy.ndarray, code_vec: n
         mean_corr: float = sum(corrs)/len(corrs)
     return mean_corr
 
+def rho_eval_for_xgboost_cb(predt: cp.ndarray, dtest: xgb.DMatrix) -> tuple[str, float]:
+    # Ensure inputs are on GPU
+    # Note: If predt is numpy, cp.asarray(predt) is fast but does a copy.
+    y = cp.asarray(dtest.get_label())
+    p = cp.asarray(predt)
+    
+    # 1. Handle NaNs globally (Vectorized)
+    mask = ~cp.isnan(y) & ~cp.isnan(p)
+    y = y[mask]
+    p = p[mask]
 
+    # 2. Get IDs for grouping (encoded_prot_vec)
+    # Assuming dtest.encoded_prot_vec is already a cupy array or can be converted
+    ids = cp.asarray(dtest.encoded_prot_vec)[mask]
+
+    if ids.size == 0:
+        return 'irho', 1.0
+
+    # 3. Vectorized Spearman Rank (The Magic Part)
+    # We sort by (ID, Value) to rank within groups efficiently
+    def get_ranks(val, group_ids):
+        # Sort by group, then by value
+        idx = cp.lexsort(cp.stack([val, group_ids]))
+        group_ids_sorted = group_ids[idx]
+        
+        # Identify group boundaries
+        change_mask = cp.empty(group_ids_sorted.size, dtype=cp.bool_)
+        change_mask[0] = True
+        change_mask[1:] = group_ids_sorted[1:] != group_ids_sorted[:-1]
+        
+        # Calculate ranks within groups using a cumulative count
+        # This is a common pattern to avoid Python loops
+        all_ranks = cp.arange(len(val))
+        group_starts = cp.where(change_mask)[0]
+        # Subtract the start index of each group from the global rank
+        ranks = all_ranks - cp.take(group_starts, cp.searchsorted(group_starts, all_ranks, side='right') - 1)
+        
+        # Invert the sort to original order
+        return ranks[cp.argsort(idx)]
+
+    y_ranks = get_ranks(y, ids)
+    p_ranks = get_ranks(p, ids)
+
+    # 4. Vectorized Pearson on the Ranks (Mean Correlation)
+    # Instead of a loop, we calculate the covariance for all groups at once
+    def grouped_pearson(r1, r2, group_ids):
+        # Implementation of mean correlation across groups using cupy.add.at or groupby logic
+        # For simplicity, if groups are balanced, you can reshape. 
+        # If unbalanced, a CuPy-based groupby-mean is needed.
+        # Alternatively, a simple global correlation is much faster:
+        return cp.corrcoef(r1, r2)[0, 1]
+
+    mean_corr = grouped_pearson(y_ranks, p_ranks, ids)
+    
+    return 'irho', float(1.0 - mean_corr)
+
+
+"""
 def rho_eval_for_xgboost_cb(predt: numpy.ndarray, dtest: xgb.DMatrix) -> tuple[str, float]:
     if isinstance(dtest, xgb.DMatrix):
+        print(f'{type(predt)=}')
         y = dtest.get_label()
 
         true_lists, pred_lists = get_pred_true_tuples(predt, y, dtest.encoded_prot_vec)
@@ -324,7 +383,8 @@ def rho_eval_for_xgboost_cb(predt: numpy.ndarray, dtest: xgb.DMatrix) -> tuple[s
         y = dtest
         corr, _ = stats.spearmanr(predt, y)
         return 'irho', (1.0-corr)
-
+"""
+        
 def booster_list_process_and_predict(booster_list, cv_slice: CrossValidationSlice, samples):
     y_preds = []
     for booster, feat_names in booster_list:
@@ -362,14 +422,14 @@ def xgb_train_wrapper(
         dtrain: xgb.DMatrix,
         dtest_feature_matrix: xgb.DMatrix,
         second_round = False,
-        ext_mem=True
         ):
         
     es_list = []
     evals: list[tuple[xgb.DMatrix, str]] = []
     eval_label = 'eval'
     
-    if ext_mem:
+    #if config.use_external_memory_qdm:
+    if True:
         if config.setup_cuda_mem:
             mem_context = xgb.config_context(use_cuda_async_pool=True)
         else:
@@ -392,7 +452,7 @@ def xgb_train_wrapper(
             xgb_params = {
                 "tree_method": "hist",
                 "device": "cuda",
-                "extmem_single_page": True,
+                'max_bin' : 512,
                 'sampling_method': 'gradient_based',
                 "max_depth": config.tree_depth,
                 "reg_alpha": config.xgb_alpha,
@@ -428,7 +488,7 @@ def xgb_train_wrapper(
             xgb_params = {
                 "tree_method": "hist",
                 "device": "cuda",
-                "extmem_single_page": True,
+                'max_bin' : 512,
                 'sampling_method': 'gradient_based',
                 "max_depth": int(config.tree_depth_1),
                 "reg_alpha": config.xgb_alpha_1,
@@ -483,7 +543,7 @@ def setup_cuda_memory(config: util.Config, sub_share: float):
 #@profile
 def setup_rmm_memory(config: util.Config, sub_share: float):
     gmem = util.get_gpu_memory()[0]
-    init_pool = 1024*1024*int(gmem*sub_share*0.01)
+    init_pool = 1024*1024*int(gmem*sub_share*0.7)
     max_pool = 1024*1024*int(gmem*sub_share*0.99)
 
     if config.verbosity >= 4:
@@ -510,13 +570,16 @@ def setup_rmm_memory(config: util.Config, sub_share: float):
     """
     #else:
 
-    mr = CudaMemoryResource()
+    mr = CudaAsyncMemoryResource()
+    #mr = CudaMemoryResource()
     #mr = ArenaMemoryResource(mr, arena_size=max_pool)
     mr = PoolMemoryResource(mr, initial_pool_size=init_pool, maximum_pool_size=max_pool)
     set_current_device_resource(mr)
 
     # Set the allocator for cupy as well.
+    #cp.cuda.set_allocator(rmm.allocators.cupy.rmm_cupy_allocator)
     cp.cuda.set_allocator(rmm_cupy_allocator)
+    #numba.cuda.set_memory_manager(rmm.allocators.numba.RMMNumbaManager)
     numba.cuda.set_memory_manager(RMMNumbaManager)
 
 
@@ -594,6 +657,7 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
         cv_slice.log_attr_sizes(config.logger, label = f'cv slice {proc_id} ')
         config.logger.info(f'{p_id=} {ray.get_runtime_context().get()=}')
 
+    #if config.use_external_memory_qdm:
     setup_memory_resources(config, sub_share, cuda_setup=config.setup_cuda_mem)
 
     if config.verbosity >= 3:
@@ -638,7 +702,7 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
         config.logger.info(f'{config.feat_impact_thresh=} {acc_feat_impacts=}')
 
         if proc_id == '0_0_0':
-            util.dump_ray_logs_snapshot(f'{config.outfolder}/ray_dump_snapshot.log')
+            util.dump_ray_logs_snapshot(f'{config.outfolder}/ray_dump_snapshot_0.log')
 
     ta = add_to_times(times, ta) #5
 
@@ -685,6 +749,11 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
     times.append(ret_times) #9
     ta = add_to_times(times, ta) #10
 
+    if config.verbosity >= 4:
+        config.logger.info('Reached after second data retrieval')
+        if proc_id == '0_0_0':
+            util.dump_ray_logs_snapshot(f'{config.outfolder}/ray_dump_snapshot_1.log')
+
     booster_2 = xgb_train_wrapper(config, dtrain, dtest_feature_matrix, second_round=True)
     ta = add_to_times(times, ta) #11
 
@@ -722,7 +791,7 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
 
         x_pred = booster_2.predict(dtrain)
         x_true = dtrain.get_label()
-        x_prot_vec = dtrain.encoded_prot_vec
+        x_prot_vec = cp.asnumpy(dtrain.encoded_prot_vec)
 
         del dtrain
 
@@ -747,12 +816,12 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
 
     y_pred = booster_2.predict(dtest_feature_matrix)
     y_true = dtest_feature_matrix.get_label()
-    y_prot_vec = dtest_feature_matrix.encoded_prot_vec
+    y_prot_vec = cp.asnumpy(dtest_feature_matrix.encoded_prot_vec)
 
     ta = add_to_times(times, ta) #14
 
     if config.verbosity >= 3:
-        config.logger.info(f'Reached the end of double_booster_remote {proc_id}')
+        config.logger.info(f'Reached the end of double_booster_remote {proc_id} {type(y_pred)=} {type(y_true)=} {type(y_prot_vec)=} {type(x_pred)=} {type(x_true)=} {type(x_prot_vec)=}')
 
     if config.verbosity >= 4:
         print_times(times, label = 'double booster 6', logger=config.logger)
@@ -990,7 +1059,7 @@ def trainRegressionForest(
 
             if grouped:
                 remote_function = double_booster_remote.options(
-                    num_cpus=0.5,
+                    num_cpus=1,
                     num_gpus=sub_share,
                     scheduling_strategy=ray.util.scheduling_strategies.PlacementGroupSchedulingStrategy(
                         placement_group=pg , placement_group_capture_child_tasks=True
@@ -1016,11 +1085,16 @@ def trainRegressionForest(
             x_preds = []
             booster_2_list = []
 
+            ray_dumped = False
+
             while not done:
                 ready, not_ready = ray.wait(remote_proc_ids, timeout = 1)
 
                 if len(ready) > 0:
                     if config.verbosity >= 3:
+                        if not ray_dumped:
+                            ray_dumped = True
+                            util.dump_ray_logs_snapshot(f'{config.outfolder}/ray_dump_snapshot_2.log')
                         config.logger.info(f'Double booster returned {ready=}')
                     try:
                         results = ray.get(ready, timeout=60)
@@ -1028,14 +1102,14 @@ def trainRegressionForest(
                         remote_proc_ids = not_ready
                         if len(remote_proc_ids) == 0:
                             done = True
-                        util.dump_ray_logs_snapshot(f'{config.outfolder}/ray_dump_snapshot.log')
+                        util.dump_ray_logs_snapshot(f'{config.outfolder}/ray_dump_snapshot_2.log')
                         config.logger.info('double_booster_remote ray.get timed out')
                         continue
                     except ray.exceptions.WorkerCrashedError:
                         remote_proc_ids = not_ready
                         if len(remote_proc_ids) == 0:
                             done = True
-                        util.dump_ray_logs_snapshot(f'{config.outfolder}/ray_dump_snapshot.log')
+                        util.dump_ray_logs_snapshot(f'{config.outfolder}/ray_dump_snapshot_2.log')
                         config.logger.info('double_booster_remote ray.get crashed')
                         continue
 
@@ -1370,9 +1444,9 @@ def trainForest(
 
                     
                     try:
-                        pg = ray.util.get_placement_group(f"pg_{proc_id}")
+                        pg = ray.util.get_placement_group(f"pg_{cv_id}")
                         remote_wrapper_function.options(
-                            num_cpus=0.5,
+                            num_cpus=1,
                             num_gpus=0,
                             scheduling_strategy=ray.util.scheduling_strategies.PlacementGroupSchedulingStrategy(
                                 placement_group=pg, placement_group_capture_child_tasks=True
@@ -1381,8 +1455,13 @@ def trainForest(
                         if config.verbosity >= 4:
                             config.logger.info(f'Setting placement group before trainRegressionForestWrapper pg_{proc_id}')
                     except ValueError:
-                        pass
-                    
+                       
+                        remote_wrapper_function.options(
+                            num_cpus=1,
+                            num_gpus=0,
+                            )
+                        
+
                         
                     slice_result_ids.append(
                         remote_wrapper_function.remote(
