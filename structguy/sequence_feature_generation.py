@@ -730,8 +730,11 @@ def calc_gemme_feats(config, samples, prot_id_back_map):
                 if len(tokens) > 2:
                     if tokens[1] == 'normPred' and sfn[-4:] == '.txt':
                         gemme_pred_type = tokens[2].split('.')[0][4:]
-                        
-                        _ = parseGemmeFile(config, f'{subfolder}/{sfn}', prot_id, samples, gemme_pred_type, prot_id_back_map[prot_id])
+                        try:
+                            mapped_id = prot_id_back_map[prot_id]
+                        except KeyError:
+                            continue
+                        _ = parseGemmeFile(config, f'{subfolder}/{sfn}', prot_id, samples, gemme_pred_type, mapped_id)
 
 @ray.remote
 def para_mafft(chunk, config):
@@ -790,7 +793,11 @@ def afdb_msa_pipeline(config, samples: SampleSpace):
                 try:
                     seq = samples.sequence_map[prot_id][0]
                 except KeyError:
-                    seq = samples.sequence_map[prot_id_back_map[prot_id]][0]
+                    try:
+                        seq = samples.sequence_map[prot_id_back_map[prot_id]][0]
+                    except KeyError:
+                        config.logger.info(f'Warning in afdb_msa_pipeline - {prot_id=} not in sampleSpace {msa_file=}')
+                        continue
                 checked = check_msa_file(msa_file, seq)
                 if checked:
                     msa_map[prot_id] = {'smsa' : msa_file}
@@ -1135,7 +1142,11 @@ def calcSeqFeat(package, msa_map, gpw_map, config):
                 prot_mut_map[aac].append((dpsic_map[aac], f"dPSIC {feature_name_tag} {db_name}"))
 
                 prot_mut_map[aac].append((positional_dpsic_map[aac], f"Positional median dPSIC {feature_name_tag} {db_name}"))
-                prot_mut_map[aac].append((window_dpsic_map[aac], f"Window median dPSIC {feature_name_tag} {db_name}"))
+                try:
+                    wdpsic = window_dpsic_map[aac]
+                except KeyError:
+                    wdpsic = None
+                prot_mut_map[aac].append((wdpsic, f"Window median dPSIC {feature_name_tag} {db_name}"))
                 prot_mut_map[aac].append((protein_median_dpsic, f"Protein median dPSIC {feature_name_tag} {db_name}"))
                 if first_db:
                     prot_mut_map[aac].append((pos, "Sequence Position Number"))

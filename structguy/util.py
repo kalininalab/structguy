@@ -1222,6 +1222,8 @@ def calc_protein_wise_corr(y_test, y_pred, prot_id_vec, corr_function, mono_retu
     test_pred_pairs = {}
     for sample_nr, yt_value in enumerate(y_test):
         prot_id = prot_id_vec[sample_nr]
+        if isinstance(prot_id, tuple):
+            prot_id = prot_id[0]
         if prot_id not in test_pred_pairs:
             test_pred_pairs[prot_id] = [], []
         test_pred_pairs[prot_id][0].append(yt_value)
@@ -1231,10 +1233,13 @@ def calc_protein_wise_corr(y_test, y_pred, prot_id_vec, corr_function, mono_retu
     prot_wise_raw_corrs = []
     corrs = []
     for prot_id in test_pred_pairs:
-        if not mono_return_score_function:
-            raw_corr, _ = corr_function(test_pred_pairs[prot_id][0], test_pred_pairs[prot_id][1])
-        else:
-            raw_corr = corr_function(test_pred_pairs[prot_id][0], test_pred_pairs[prot_id][1])
+        try:
+            if not mono_return_score_function:
+                raw_corr, _ = corr_function(test_pred_pairs[prot_id][0], test_pred_pairs[prot_id][1])
+            else:
+                raw_corr = corr_function(test_pred_pairs[prot_id][0], test_pred_pairs[prot_id][1])
+        except ValueError:
+            continue
         corr = abs(raw_corr)
         prot_wise_corrs.append((prot_id, corr))
         prot_wise_raw_corrs.append((prot_id, corr))

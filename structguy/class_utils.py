@@ -26,7 +26,7 @@ def get_feat_matrix_from_ids(
         sample_ids: list[str],
         feat_names: list[str],
         get_cat_vec = False
-        )-> list[list[int | float | None]]:
+        )-> tuple[list[list[int | float | None]], list[str]]:
     if len(feat_names) == 0:
         raise ValueError(f'{len(feat_names)=}')
     

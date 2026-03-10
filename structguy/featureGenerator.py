@@ -8,7 +8,8 @@ from structguy import consts
 from structguy.sampleSpace import SampleSpace
 from structguy import sequence_feature_generation as seqfg
 from structguy.util import Config
-
+import zstd
+import pickle
 from structman.base_utils.base_utils import unpack
 
 
@@ -190,6 +191,10 @@ def parse_structural_features(
     samples, config, non_feature_cols=[0, 1, 2, 4, 7, 19], primary_protein_id_col=1, aac_col_s=[3, 4, 5], tags_col=7, amount_of_struct_col=19, effect_col=None, filter_none_tv=False
 ):
     file_path = config.path_structural_feature_table
+    if file_path is None:
+        config.logger.info(f'Critical error in parse_structural_features: {config.path_structural_feature_table=}')
+        raise TypeError(f'{config.path_structural_feature_table=}')
+    
     parse_feature_table(
         file_path,
         samples,
@@ -258,7 +263,10 @@ def parse_feature_table(file_path, samples, config, filter_none_tv, non_feature_
         if filter_none_tv and target_value is None:
             continue
         for value, feat_name in feat_out:
-            samples.addValue(sample_id, value, feat_name)
+            if config.verbosity >= 5:
+                samples.addValue(sample_id, value, feat_name, config = config)
+            else:
+                samples.addValue(sample_id, value, feat_name)
             n_f += 1
         samples.addTargetValue(sample_id, target_value)
         if target_value is None and n_print < max_print:
@@ -302,7 +310,10 @@ def createTrainingSet(
             packed_samples = f.read()
             f.close()
             bu_slotmask = samples.deactivate_slot_mask()
-            samples = unpack(packed_samples)
+            try:
+                samples = unpack(packed_samples)
+            except zstd.Error:
+                samples = pickle.loads(packed_samples)
             samples.reactivate_slot_mask(bu_slotmask)
             config.n_of_features = len(samples.feature_names)
             if isinstance(samples.raw_feature_matrix, tuple):

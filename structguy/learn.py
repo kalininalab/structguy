@@ -601,7 +601,7 @@ def evaluate_dataset(config: Config):
         y_pred = total_y_pred
     else:
     """
-    test_feat_mats = []
+    test_feat_mats: list[DMatrix] = []
     for booster_index, (_, extern_feature_names_list) in enumerate(booster_list):
         test_feature_matrix, test_targets, sample_id_list, feat_id_vec, cat_vec = booster_specific_data[booster_index]
         dtest_feature_matrix = DMatrix(

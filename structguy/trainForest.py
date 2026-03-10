@@ -334,10 +334,25 @@ def booster_list_process_and_predict(booster_list, cv_slice: CrossValidationSlic
     y_pred = numpy.mean(y_preds, axis=0)
     return y_pred
 
-def booster_list_predict(booster_list, feat_mats):
+def booster_list_predict(booster_list, feat_mats: list[xgb.DMatrix], n_row_slice = 50_000):
     y_preds = []
     for booster_index, (booster, _) in enumerate(booster_list):
-        y_preds.append(booster.predict(feat_mats[booster_index]))
+        feat_mat = feat_mats[booster_index]
+        total_rows = feat_mat.num_row()
+
+        y_pred = numpy.array([])
+        for i in range(0, total_rows, n_row_slice):
+            # Calculate end index, ensuring we don't exceed total_rows
+            end = min(i + n_row_slice, total_rows)
+            
+            # Create the index list for the current slice
+            indices = list(range(i, end))
+            
+            # Slice the DMatrix
+            dslice = feat_mat.slice(indices)
+            y_pred = numpy.concatenate((y_pred, booster.predict(dslice)))
+
+        y_preds.append(y_pred)
     y_pred = numpy.mean(y_preds, axis=0)
     return y_pred
 

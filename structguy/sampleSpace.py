@@ -392,13 +392,14 @@ class SampleSpace(Slotted_obj):
 
     def calc_subsamples_feat_corr_matrix(self, config, n_of_subsamples = 50_000) -> list[list[tuple[float, float, float, float, float, float, float]]]:
         subsamples = self.draw_subsamples(n_of_subsamples=n_of_subsamples)
-        feat_matrix = np.array(get_feat_matrix_from_ids(
+        feat_matrix, cat_vec = get_feat_matrix_from_ids(
             self.feat_pos_dict,
             self.features,
-            self. sample_pos_dict,
+            self.sample_pos_dict,
             self.raw_feature_matrix,
             subsamples,
-            self.feature_names))#, dtype=float)
+            self.feature_names)
+        feat_matrix = np.array(feat_matrix)#, dtype=float)
         #feat_matrix = np.nan_to_num(feat_matrix, nan=-1_000_000)
         feat_matrix = feat_matrix.transpose()
         feats_per_process = len(self.feature_names) // config.proc_n
@@ -603,7 +604,10 @@ class SampleSpace(Slotted_obj):
 
     def dump(self, outfile):
         bu_slotmask = self.deactivate_slot_mask()
-        packed = pack(self)
+        try:
+            packed = pack(self)
+        except ValueError:
+            packed = pickle.dumps(self)
         with open(outfile, 'wb') as f:
             f.write(packed)
         self.reactivate_slot_mask(bu_slotmask)

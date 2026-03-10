@@ -693,7 +693,7 @@ def calcPsicProfiles(config, prot_id, aacs, seq, ref_db_id, gpw=False, psic_name
     positional_median_dpsics = []
     for pos, wt in enumerate(seq):
         if pos not in psic_profiles:
-            config.logger.info("pos not in psic_profiles:", prot_id, pos)
+            config.logger.info(f"pos not in psic_profiles: {prot_id=}, {pos=}")
             continue
         if wt not in psic_profiles[pos]:
             config.logger.info(f"wt not in psic_profiles[pos]: {prot_id} {pos} {wt}\n{psic_profiles[pos]}")
