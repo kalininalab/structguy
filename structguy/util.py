@@ -1406,7 +1406,8 @@ def mean_scores(scores_list):
         if scores_obj.corr is not None:
             corrs.append(scores_obj.corr)
         if scores_obj.mean_spearman is not None:
-            mean_spearmans.append(scores_obj.mean_spearman)
+            if not np.isnan(scores_obj.mean_spearman):
+                mean_spearmans.append(scores_obj.mean_spearman)
         if scores_obj.pearson_r is not None:
             pearson_rs.append(scores_obj.pearson_r)
         if scores_obj.mean_pearson is not None:
@@ -1433,8 +1434,14 @@ def mean_scores(scores_list):
         n_of_features = None
     else:
         n_of_features = mean(n_of_features_s)
-
-    mean_spear_repeat_std = statistics.stdev(mean_spearmans)
+    if len(mean_spearmans) == 1:
+        mean_spear_repeat_std = mean_spearmans[0]
+    else:
+        try:
+            mean_spear_repeat_std = statistics.stdev(mean_spearmans)
+        except AttributeError as e:
+            print(f'Error: {e=} {mean_spearmans=}')
+            mean_spear_repeat_std = None
 
     scores_obj = Scores(mse = mean(mses), r2 = mean(r2s), corr = mean(corrs), acc = mean(accs), roc = mean(rocs),
                         precision = mean(precisions), recall = mean(recalls), f1 = mean(f1s), mcc = mean(mccs),

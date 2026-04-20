@@ -500,7 +500,7 @@ def bayesian_optimisation(
         n_iters = 4
 
     if config.multi_gpu > 1:
-        n_iters = max([2**(n_params+1), 2])
+        n_iters = max([2**(n_params-2), 8])
 
     return_cv_obj = cv_obj
 
@@ -637,11 +637,13 @@ def bayesian_optimisation(
     else:
         remote_processes = []
         threads_per_gpu = config.threads_per_gpu
+        number_of_procs = max([1,round(config.multi_gpu * threads_per_gpu)])
+        threads_per_gpu = number_of_procs / config.multi_gpu
+        
         para_number = min([config.proc_n , max([1,config.proc_n // (config.multi_gpu * threads_per_gpu)])])
         
         current_params_id = 0
         n_of_sent_hpo_sets = 0
-        number_of_procs = max([1,int(config.multi_gpu * threads_per_gpu)])
 
         gpu_share = 1/threads_per_gpu
         remote_function = para_eval #.options(num_gpus = gpu_share)
@@ -1367,8 +1369,8 @@ def threeDimHyperOptimization(
 
     while not converged:
         converged = True
-        if n > 1:
-            cv_obj.reset_confusion_maps()
+        #if n > 1:
+        #    cv_obj.reset_confusion_maps()
 
         if not debug:
             for param in [fss_parameters]:
@@ -1585,7 +1587,7 @@ def bayesianComplete(
     return
 
 LEAF_SIZE = 4
-MAX_PARAMS = 12
+MAX_PARAMS = 24
 
 class SubdimensionNode:
     def __init__(self, param_names: list[str], parent, tree):
