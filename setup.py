@@ -35,7 +35,7 @@ setup(
         "Topic :: Scientific/Engineering :: Bio-Informatics",
     ],
     packages=find_packages(),
-    setup_requires=['setuptools_scm'],
+    #setup_requires=['setuptools_scm'],
     include_package_data=True,
     install_requires=[
         "scikit-learn>=1.5.0",

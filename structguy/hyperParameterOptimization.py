@@ -3,7 +3,6 @@ import time
 import sys
 import traceback
 import ray
-import math
 import numpy as np
 import sklearn.gaussian_process as gp
 from scipy.stats import norm
@@ -11,10 +10,8 @@ from scipy.optimize import minimize
 from sklearn.preprocessing import MinMaxScaler
 
 from structguy import util, trainForest
-from structguy.sampleSpace import DataSAIL_cv, CrossValidationSlice, SampleSpace
-from structman.base_utils.base_utils import pack, unpack
-from structman.lib.sdsc.sdsc_utils import deep_get_size_of, sizeof_fmt
-
+from structguy.sampleSpace import DataSAIL_cv, SampleSpace
+from structman.base_utils.base_utils import deep_get_size_of, sizeof_fmt
 
 from ray.util.queue import Queue
 

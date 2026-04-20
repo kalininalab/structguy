@@ -4,22 +4,19 @@ import os
 import traceback
 import time
 import random
-import pickle
 import numpy
 import cupy as cp
-import cudf
+#import cudf
 import xgboost as xgb
 from scipy import stats
 
 #from memory_profiler import profile
 from typing import Callable
 
-from structguy import dicts
-from structguy.util import get_gpu_memory, Config
+from structguy.util import Config
 from structguy.class_utils import get_feat_matrix_from_ids, get_raw_feat_matrix_from_ids, get_feat_id_vec
 
-from structman.lib.sdsc.sdsc_utils import Slotted_obj
-from structman.lib.serializedPipeline import sizeof_fmt
+from structman.base_utils.base_utils import Slotted_obj
 
 MAX_QUANTILE_BATCHES = 8
 
@@ -46,81 +43,6 @@ def distance_weighting_subroutine(store, package):
         outputs.append((pos_1, d_sum/subsamplesize))
     return outputs
 
-possible_na_values = set(['-', 'None', 'inf'])
-class Feature(Slotted_obj):
-    __slots__ = ['name', 'f_type', 'group', 'default', 'mutation_specific', 'category_map', 'category_counter', 'category_backmap']
-    def __init__(self, name = None, f_type = None,group=None,default_value=None,mutation_specific=False):
-        self.name = name
-        self.f_type = f_type
-        self.group = group
-        self.default = default_value
-        self.mutation_specific=mutation_specific
-
-        if f_type == 'categorical':
-            self.category_map = {}
-            self.category_counter = 0
-            self.category_backmap = {}
-
-
-    def value_from_string(self, string):
-        value = None
-        if string in possible_na_values:
-            return None
-
-        if self.name == 'Blosum62':
-            try:
-                value = float(string)
-            except ValueError:
-                try:
-                    value = dicts.BLOSUM62[(string[0],string[-1])]
-                except KeyError:
-                    value = dicts.BLOSUM62[(string[-1],string[0])]
-            return value
-
-        try:
-            if self.f_type == 'categorical':
-                value = string
-            elif self.f_type == 'real':
-                value = float(string)
-            elif self.f_type == 'integer' or self.f_type == 'binary':
-                try:
-                    value = int(string)
-                except ValueError:
-                    value = float(string)
-                    self.f_type = 'real'
-            elif self.f_type == 'unknown':
-                try:
-                    value = int(string)
-                    if value != self.default:
-                        self.f_type = 'integer'
-                except:
-                    try:
-                        value = float(string)
-                        if value != self.default:
-                            self.f_type = 'real'
-                    except:
-                        self.f_type = 'categorical'
-                        self.category_map = {}
-                        self.category_counter = 0
-                        self.category_backmap = {}
-
-                        value = string
-            else:
-                print(f'Error in value_from_string: {self.f_type=} {self.name=} {string=}')
-                value = None
-        except:
-            print(f'Error in value_from_string: {self.f_type=} {self.name=} {string=}')
-            value = None
-        return value
-
-    def string_convert(self,value):
-        if not self.f_type == 'categorical':
-            return str(value)
-        elif value is None:
-            return 'None'
-        else:
-            return str(self.category_backmap[value])
-            #return str(value)
 
 class Iterator(xgb.DataIter):
     """A custom iterator for loading files in batches."""
@@ -142,8 +64,7 @@ class Iterator(xgb.DataIter):
         X_path, y_path, ext_path = self._file_paths[self._it]
 
         if self._ext_dat is None:
-            #with open(ext_path, 'rb') as inp:
-            #    feat_names, cat_vec, feat_id_vec = pickle.load(inp)
+
             feat_names, cat_vec, feat_id_vec = ray.get(ext_path)
             self._ext_dat = feat_names, cat_vec, feat_id_vec
         else:
@@ -1218,7 +1139,7 @@ class CrossValidationSlice(Slotted_obj):
             if config.verbosity >= 5:
                 config.logger.info('Iterator is setup in get_extmem_dtrain')
 
-            ext_dtest = xgb.ExtMemQuantileDMatrix(it, ref=dtrain, enable_categorical=True, max_bin=256, max_quantile_batches = MAX_QUANTILE_BATCHES)
+            ext_dtest = xgb.ExtMemQuantileDMatrix(it, ref=dtrain, enable_categorical=True, max_bin=512, max_quantile_batches = MAX_QUANTILE_BATCHES)
         
             ext_dtest.encoded_prot_vec = encoded_prot_vec
 
@@ -1331,7 +1252,7 @@ class CrossValidationSlice(Slotted_obj):
             if config.verbosity >= 5:
                 config.logger.info('Iterator is setup in get_extmem_dtrain')
 
-            ext_dtrain = xgb.ExtMemQuantileDMatrix(it, enable_categorical=True, max_bin=256, max_quantile_batches = MAX_QUANTILE_BATCHES)
+            ext_dtrain = xgb.ExtMemQuantileDMatrix(it, enable_categorical=True, max_bin=512, max_quantile_batches = MAX_QUANTILE_BATCHES)
             ext_dtrain.encoded_prot_vec = prot_id_vec
 
         return ext_dtrain, file_paths
@@ -1347,9 +1268,6 @@ class CrossValidationSlice(Slotted_obj):
         
         file_paths: list[tuple[str, str, str]] = []
 
-        #extra_data_path = f'{dump_precursor}_ext.dump'
-        #with open(extra_data_path, 'wb') as outf:
-        #    pickle.dump((self.feature_names, cat_vec, feat_id_vec), outf)
         extra_data_ref = ray.put((self.feature_names, cat_vec, feat_id_vec))
 
 
@@ -1436,10 +1354,6 @@ class CrossValidationSlice(Slotted_obj):
         #encoded_prot_vec = self.get_encoded_test_prot_vec()
 
         data_refs: list[tuple[ray.ObjectRef, ray.ObjectRef, ray.ObjectRef]] = []
-
-        #extra_data_path = f'{dump_precursor}_ext_test.dump'
-        #with open(extra_data_path, 'wb') as outf:
-        #    pickle.dump((self.feature_names, cat_vec, feat_id_vec), outf)
 
         extra_data_ref = ray.put((self.feature_names, cat_vec, feat_id_vec))
 

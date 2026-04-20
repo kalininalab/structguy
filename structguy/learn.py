@@ -39,7 +39,7 @@ from structguy.util import (
 )
 from structguy.consts import feature_categories
 
-from xgboost import plot_tree, DMatrix, build_info
+from xgboost import plot_tree, DMatrix, build_info, Booster
 import matplotlib.pyplot as plt
 
 
@@ -165,13 +165,14 @@ def learn(config: Config):
     feats_to_filter = set(filterCorrelatedFeats(config, samples.feat_corr_matrix, samples.feature_names, custom_tresh=0.97))
     samples.transform_matrix_dict(exclude_feats=feats_to_filter)
 
-    if config.select_samples:
-        feat_coverage_file = f"{config.outfolder}/prot_wise_feat_coverage.tsv"
-        prot_wise_feature_coverage = samples.write_feature_coverage_matrix(feat_coverage_file)
-        samples.select_bad_prots(prot_wise_feature_coverage, config)
-        config.logger.info(f'Wrote prot-wise feature coverages to {feat_coverage_file}')
+    feat_coverage_file = f"{config.outfolder}/prot_wise_feat_coverage.tsv"
+    prot_wise_feature_coverage = samples.write_feature_coverage_matrix(feat_coverage_file, config)
+    config.logger.info(f'Wrote prot-wise feature coverages to {feat_coverage_file}')
 
-    if config.weighting == "geometric" and config.regression:
+    if config.select_samples:
+        samples.select_bad_prots(prot_wise_feature_coverage, config)
+        
+    if config.weighting == "geometric":
         samples.setGeometricDistanceMap(config)
         distance_map = ray.put(samples.geometric_distance_map)
     else:
@@ -279,14 +280,9 @@ def learn(config: Config):
         accum_y_pred = []
         accum_true_vals = []
 
-        if config.regression:
-            mses = []
-            pearsons = []
-            spears = []
-        else:
-            rocs = []
-            accs = []
-            fs = []
+        mses = []
+        pearsons = []
+        spears = []
 
         forests = {}
 
@@ -345,44 +341,33 @@ def learn(config: Config):
 
             storeModel(booster_list, cv_slice.feature_names, config, modelfile, samples.feat_stats, samples.features)
 
-            if config.regression:
-                mses.append((scores.mse, len(cv_slice.test_targets)))
-                pearsons.append((scores.pearson_r, 1))
-                spears.append(scores.corr)
-                prot_wise_spearmans, mean_spearman, raw_corrs = calc_protein_wise_corr(
-                    cv_slice.test_targets,
-                    y_pred,
-                    cv_slice.test_sample_ids,
-                    stats.spearmanr,
-                )
+            mses.append((scores.mse, len(cv_slice.test_targets)))
+            pearsons.append((scores.pearson_r, 1))
+            spears.append(scores.corr)
+            prot_wise_spearmans, mean_spearman, raw_corrs = calc_protein_wise_corr(
+                cv_slice.test_targets,
+                y_pred,
+                cv_slice.test_sample_ids,
+                stats.spearmanr,
+            )
 
-                if config.verbosity >= 1:
-                    config.logger.info(f"Prot-wise RHO: {mean_spearman}")
-                    config.logger.info(prot_wise_spearmans)
-                    if scores.mean_spear_repeat_std is not None:
-                        config.logger.info(f'{scores.mean_spear_repeat_std=}')
-                    for prot_id, spear_ in raw_corrs:
-                        if spear_ < 0.3:
-                            config.logger.info(f"Low prot-wise rho: {prot_id} - {spear_}")
+            if config.verbosity >= 1:
+                config.logger.info(f"Prot-wise RHO: {mean_spearman}")
+                config.logger.info(prot_wise_spearmans)
+                if scores.mean_spear_repeat_std is not None:
+                    config.logger.info(f'{scores.mean_spear_repeat_std=}')
+                for prot_id, spear_ in raw_corrs:
+                    if spear_ < 0.3:
+                        config.logger.info(f"Low prot-wise rho: {prot_id} - {spear_}")
 
-            else:
-                rocs.append((scores.roc, len(cv_slice.test_targets)))
-                accs.append((scores.acc, len(cv_slice.test_targets)))
-                fs.append((scores.f1, len(cv_slice.test_targets)))
 
             for pred in y_pred:
                 accum_y_pred.append(pred)
             for true_value in cv_slice.test_targets:
                 accum_true_vals.append(true_value)
 
-            # if config.regression:
-            #    confusion_map, raw_conf_map = featureAnalysis.calcSliceConfusion(forest, cv_slice, remote = True, err_warping_exp = config.err_warping_exp, goodwill_interval = config.confusion_goodwill)
-            #    config.logger.info('Top 10 confusing features:')
-            #    for i in range(10):
-            #        config.logger.info(confusion_map[i])
-
             if config.outfolder is not None:
-                if config.produce_scatterplot and config.regression and config.crossValidation == "LOPO":
+                if config.produce_scatterplot and config.crossValidation == "LOPO":
                     base_name = f"{config.outfolder}/{config.dataset_name}"
                     scatterfile = "%s_%s.png" % (base_name, str(cv_counter))
                     hexbinfile = "%s_%s_hexbin.png" % (base_name, str(cv_counter))
@@ -399,26 +384,22 @@ def learn(config: Config):
                 if not append:  # Append is only False in the first loop iteration
                     append = True
 
-        if config.regression:
-            if config.verbosity >= 1:
-                printMean(mses, "MSE")
-                printMean(pearsons, "Pearson's correlation")
-            if len(accum_y_pred) > 0:
-                cum_spear, _ = stats.spearmanr(accum_y_pred, accum_true_vals)
-            else:
-                cum_spear = None
-            if len(spears) > 0:
-                mean_spear = sum(spears) / len(spears)
-            else:
-                mean_spear = None
-
-            out_value = (cum_spear, mean_spear)
+        if config.verbosity >= 1:
+            printMean(mses, "MSE")
+            printMean(pearsons, "Pearson's correlation")
+        if len(accum_y_pred) > 0:
+            cum_spear, _ = stats.spearmanr(accum_y_pred, accum_true_vals)
         else:
-            printMean(rocs, "auROC")
-            printMean(accs, "ACC")
-            printMean(fs, "F-Score")
+            cum_spear = None
+        if len(spears) > 0:
+            mean_spear = sum(spears) / len(spears)
+        else:
+            mean_spear = None
 
-        if config.outfolder is not None and config.produce_scatterplot and config.regression:
+        out_value = (cum_spear, mean_spear)
+
+
+        if config.outfolder is not None and config.produce_scatterplot:
             base_name = f"{config.outfolder}/{config.dataset_name}"
             scatterfile = "%s.png" % (base_name)
             hexbinfile = "%s_hexbin.png" % (base_name)
@@ -694,353 +675,8 @@ def evaluate_dataset(config: Config):
 
         protein_wise_results[prot_id].add_result(aac, true_value, pred_value)
 
-    if config.regression:
-        if config.target_values is not None:
-            r2 = r2_score(test_targets, y_pred)
-            mse = mean_squared_error(test_targets, y_pred)
-            corr, p_value = stats.spearmanr(test_targets, y_pred)
-        else:
-            r2 = None
-            mse = None
-            corr = None
-            p_value = None
-
-        if config.verbosity >= 1:
-            config.logger.info(f"R2-Score: {r2}")
-            config.logger.info(f"MSE: {mse}")
-            config.logger.info(f"Spearman correlation and p-value: {corr} {p_value}")
-
-        if config.target_values is not None:
-            prot_wise_spearmans, mean_spearman, _ = calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.spearmanr)
-            prot_wise_pearsons, mean_pearson, _ = calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.pearsonr)
-        else:
-            prot_wise_spearmans = None
-            mean_spearman = None
-            prot_wise_pearsons = None
-            mean_pearson = None
-
-        if config.verbosity >= 1:
-            config.logger.info(f"Number of samples: {len(sample_id_list)} {len(test_targets)} {len(y_pred)}")
-
-            config.logger.info(f"Prot-wise mean pearson: {mean_pearson}")
-            config.logger.info(f"Prot-wise mean spearman: {mean_spearman}")
-
-        if mm_y_pred is not None:
-            prot_wise_spearmans, mean_mm_spearman, _ = calc_protein_wise_corr(mm_test_targets, mm_y_pred, mm_sample_id_list, stats.spearmanr)
-            prot_wise_pearsons, mean_pearson, _ = calc_protein_wise_corr(mm_test_targets, mm_y_pred, mm_sample_id_list, stats.pearsonr)
-
-            if config.verbosity >= 1:
-                config.logger.info(f"Number of samples: {len(mm_sample_id_list)} {len(mm_test_targets)} {len(mm_y_pred)}")
-
-                config.logger.info(f"Prot-wise mean pearson for multi savs: {mean_pearson}")
-                config.logger.info(f"Prot-wise mean spearman for multi savs: {mean_mm_spearman}")
-
-            prot_wise_spearmans, mean_comb_spearman, _ = calc_protein_wise_corr(
-                combined_test_targets,
-                combined_y_pred,
-                combined_sample_id_list,
-                stats.spearmanr,
-            )
-            prot_wise_pearsons, mean_pearson, _ = calc_protein_wise_corr(
-                combined_test_targets,
-                combined_y_pred,
-                combined_sample_id_list,
-                stats.pearsonr,
-            )
-
-            if config.verbosity >= 1:
-                config.logger.info(f"Number of samples: {len(combined_sample_id_list)} {len(combined_test_targets)} {len(combined_y_pred)}")
-
-                config.logger.info(f"Prot-wise mean pearson for all variants: {mean_pearson}")
-                config.logger.info(f"Prot-wise mean spearman for all variants: {mean_comb_spearman}")
-
-        write_protein_wise_performances(
-            f"{config.outfolder}/protein_wise_results.tsv",
-            prot_wise_spearmans,
-            protein_info,
-        )
-
-        if config.trace_decisions:
-            if isinstance(forest, RandomForestRegressor):
-                decisions, pred_std_vector = featureAnalysis.explain_decisions(config, forest, y_pred, test_feature_matrix, extern_feature_names_list, feat_stats)
-            else:
-                # sample_wise_feature_influence, _ = trainForest.perturb_xgb(config, config.path_to_model, test_feature_matrix, extern_feature_names_list, y_pred, test_targets, get_sample_wise_data=True, get_feat_impacts=False)
-                forest.feature_names = extern_feature_names_list
-
-                # explainer = shap.TreeExplainer(forest)
-                # explanation = explainer(test_feature_matrix)
-                #dtest_feature_matrix = DMatrix(test_feature_matrix, feature_names=extern_feature_names_list)
-                
-                explanation = forest.predict(dtest_feature_matrix, pred_contribs=True)
-                shap_expl = shap.Explanation(explanation[:,:-1], data = test_feature_matrix, feature_names=extern_feature_names_list)
-                
-                ax = shap.plots.beeswarm(shap_expl, show=False, max_display= 30)
-                plt.subplots_adjust(left=0.5, right=0.9)
-                plt.savefig(f"{config.outfolder}/beeswarm.png")
-                plt.clf()
-
-                cat_expl = cat_shap_full_matrix(explanation, extern_feature_names_list)
-
-                cat_shap_expl = shap.Explanation(cat_expl[:,:-1], feature_names=feature_categories)
-                ax = shap.plots.beeswarm(cat_shap_expl, show=False, max_display = len(feature_categories))
-                plt.subplots_adjust(left=0.5, right=0.9)
-                plt.savefig(f"{config.outfolder}/cat_beeswarm.png")
-                plt.clf()
-
-                # config.logger.info(explanation[0])
-
-                # for pos, shap_val in enumerate(explanation[0][:-1]):
-                #    config.logger.info(f'{shap_val=} {extern_feature_names_list[pos]}')
-
-                # cat_exp, cat_shaps = categorize_shap_from_xgb(explanation[0][:-1], extern_feature_names_list)
-
-                # shap.plots.force(explanation[0][-1], cat_shaps, matplotlib=True, show=False, feature_names=feature_categories)
-                # shap.plots.force(explanation[0], matplotlib=True, show=False, feature_names=extern_feature_names_list)
-                # plt.savefig(f"{config.outfolder}/force_plot.png")
-
-                joined_sample_ids = [x[0] + x[1] for x in sample_id_list]
-                config.logger.info(f"{len(joined_sample_ids)=} {len(y_pred)=} {len(test_feature_matrix[0])=} {len(extern_feature_names_list)=}")
-
-                # plt.figure(figsize=(120, 80))
-                # plot_tree(forest, num_trees = 2)
-                # plt.savefig('xgb_viz.png')
-
-                # """
-                
-
-
-                if config.plot_trees:
-                    st = SuperTree(forest, test_feature_matrix, y_pred, extern_feature_names_list, joined_sample_ids)
-                    # st.show_tree(2)
-
-                    super_tree_folder = f"{config.outfolder}/supertrees"
-                    if not os.path.isdir(super_tree_folder):
-                        os.makedirs(super_tree_folder)
-                    tree_id = 0
-                    
-                    for tree in forest:
-                        outfile = f"{super_tree_folder}/super_tree_{tree_id}.html"
-                        st.save_html(which_tree=tree_id, filename=outfile)
-                        tree_id += 1
-
-                    
-                    # config.logger.info(tree_df)
-
-                    feat_tree_map = {}
-                    
-                    tree_df = forest.trees_to_dataframe()
-
-                    tree_id_vec = tree_df["Tree"]
-                    feat_name_vec = tree_df["Feature"]
-
-                    for pos, tree_id in enumerate(tree_id_vec):
-                        feat_name = feat_name_vec[pos]
-                        if feat_name not in feat_tree_map:
-                            feat_tree_map[feat_name] = set()
-                        feat_tree_map[feat_name].add(tree_id)
-
-                    for feat_name in feat_tree_map:
-                        config.logger.info(f"{feat_name} {feat_tree_map[feat_name]}")
-
-
-                # st.save_html()
-                # """
-        else:
-            sample_wise_feature_influence = []
-            explanation = None
-
-        if mm_y_pred is None or config.trace_decisions:
-            combined_sample_id_list = sample_id_list
-            combined_y_pred = y_pred
-            combined_test_targets = test_targets
-
-        if isinstance(booster_list[0], RandomForestRegressor):
-            header = "Protein ID\tSAV\tPredicted effect value\tTree-wise standard deviation\tFeature 1\tFeature 2\t Feature 3\t Feature 4\t Feature 5\n"
-            lines = [header]
-
-            for pos, sample_id in enumerate(combined_sample_id_list):
-                pred_value = combined_y_pred[pos]
-                prot_id, aac = sample_id
-                if config.trace_decisions:
-                    pred_std = pred_std_vector[pos]
-                    feature_decisions = decisions[pos]
-                else:
-                    pred_std = ""
-                    feature_decisions = ""
-                words = [prot_id, aac, str(pred_value), str(pred_std)]
-                for feat_name, weight, left_thresh, right_thresh in feature_decisions[:50]:
-                    if left_thresh is None and right_thresh is None:
-                        decision_string = f"{feat_name} is None (Weight: {weight})"
-                    elif left_thresh is None:
-                        decision_string = f"{feat_name} < {right_thresh} (Weight: {weight})"
-                    elif right_thresh is None:
-                        decision_string = f"{feat_name} >= {left_thresh} (Weight: {weight})"
-                    else:
-                        decision_string = f"{feat_name} in [{left_thresh}, {right_thresh}] (Weight: {weight})"
-                    words.append(decision_string)
-                line = "\t".join(words) + "\n"
-                lines.append(line)
-        else:
-            # number_of_displayed_features = 20
-            if config.calc_sd:
-                header = "Protein ID\tSAV\tPredicted effect value\tTree STD"
-            else:
-                header = "Protein ID\tSAV\tPredicted effect value"
-
-            
-            # for i in range(number_of_displayed_features):
-            #    header += f"\tFeature {i+1}"
-            for i in range(len(feature_categories)):
-                # header += f"\tFeature category {i+1}\tImpact sum\tMean impact\tMax impact feature"
-                header += f"\tFeature category {i + 1}\tShap value\tTop feature of category {i + 1}"
-            header += "\n"
-            lines = [header]
-
-            if config.target_values is not None:
-                eval_header = "Protein ID\tSAV\tPredicted effect value\tTrue value"
-                for i in range(len(feature_categories)):
-                    eval_header += f"\tFeature category {i + 1}\tShap value\tTop feature of category {i + 1}\tFeature Shap value\tFeat value"
-                eval_header += "\n"
-                eval_lines = [eval_header]
-
-                full_eval_header = "Protein ID\tSAV\tPredicted effect value\tTrue value"
-                for feat_name in extern_feature_names_list:
-                    full_eval_header += f'\t{feat_name}'
-                full_eval_header += "\n"
-                full_eval_lines = [full_eval_header]
-
-            if config.plot_sample_forces:
-                force_plot_folder = f"{config.outfolder}/force_plots"
-                if not os.path.isdir(force_plot_folder):
-                    os.makedirs(force_plot_folder)
-
-            if config.calc_sd:
-                ind_preds = []
-                for tree_id, tree in enumerate(forest):
-                    ind_pred = tree.predict(dtest_feature_matrix)
-                    ind_preds.append(ind_pred)
-
-                ind_preds = numpy.array(ind_preds).transpose()
-
-            for pos, sample_id in enumerate(combined_sample_id_list):
-                pred_value = combined_y_pred[pos]
-                prot_id, aac = sample_id
-
-                words = [prot_id, aac, str(pred_value)]
-
-                if config.target_values is not None:
-                    eval_words = words[:]
-                    eval_words.append(str(combined_test_targets[pos]))
-                    full_eval_words = eval_words[:]
-
-                if config.calc_sd:
-                    pred_std = numpy.std(ind_preds[pos])
-                    words.append(str(pred_std))
-
-                if explanation is not None:
-                    #print(f'{sample_id} {pos=} {len(explanation[pos][:-1])=} {len(extern_feature_names_list)=}')
-                    cat_exp, cat_shaps = categorize_shap_from_xgb(explanation[pos][:-1], extern_feature_names_list)
-                    if config.plot_sample_forces:
-                        modified_feat_labels = []
-                        cat_shaps = []
-                        for cat_pos, shap_val, (max_feat_shap, max_feat, feat_pos) in cat_exp:
-                            if max_feat is not None:
-                                feat_cat = feature_categories[cat_pos]
-                                if feat_pos is not None:
-                                    val = test_feature_matrix[pos][feat_pos]
-                                    val_str = val_to_str(val)
-                                    
-                                else:
-                                    val_str = "None"
-
-                                perc_shap = (100*max_feat_shap)/shap_val
-
-                                feat_st = feat_stats[max_feat]
-                                mean_val = feat_st[2]
-                                mean_val_str = val_to_str(mean_val)
-
-                                modified_feat_labels.append(f"{feat_cat}\n{max_feat}\nshap={max_feat_shap:.3f} ({perc_shap:.1f}%)\nval={val_str} (mean={mean_val_str})")
-                            else:
-                                modified_feat_labels.append('None')
-                            cat_shaps.append(shap_val)
-
-                        shap.plots.force(explanation[pos][-1], numpy.array(cat_shaps), matplotlib=True, show=False, feature_names=modified_feat_labels, figsize=(28,5))
-                        plt.savefig(f"{force_plot_folder}/{prot_id}_{aac}_cat_force_plot.png")
-                        shap.plots.force(explanation[pos][-1], explanation[pos][:-1], matplotlib=True, show=False, feature_names=extern_feature_names_list)
-                        plt.savefig(f"{force_plot_folder}/{prot_id}_{aac}_force_plot.png")
-                        plt.clf()
-
-                    for cat_pos, shap_val, (max_feat_shap, max_feat, feat_pos) in cat_exp:
-                        feat_cat = feature_categories[cat_pos]
-                        if shap_val < 0:
-                            words.append(f"{feat_cat} features skews prediction towards functional consequence")
-                        else:
-                            words.append(f"{feat_cat} features skews prediction towards wiltype-like effect")
-                        words.append(str(shap_val))
-
-                        if feat_pos is not None:
-                            val = test_feature_matrix[pos][feat_pos]
-                        else:
-                            val = None
-                        words.append(f"{max_feat} (shap={max_feat_shap}, {val=})")
-
-                        if config.target_values is not None:
-                            eval_words.append(str(feat_cat))
-                            eval_words.append(str(shap_val))
-                            eval_words.append(str(max_feat))
-                            eval_words.append(str(max_feat_shap))
-                            eval_words.append(str(val))
-
-                    for feat_pos, feat_name in enumerate(extern_feature_names_list):
-                        shap_val = explanation[pos][feat_pos]
-                        feat_val = test_feature_matrix[pos][feat_pos]
-                        if config.target_values is not None:
-                            full_eval_words.append(f'{shap_val},{feat_val}')
-
-                line = "\t".join(words) + "\n"
-                lines.append(line)
-                if config.target_values is not None:
-                    eval_line = "\t".join(eval_words) + "\n"
-                    eval_lines.append(eval_line)
-
-                    full_eval_line = "\t".join(full_eval_words) + "\n"
-                    full_eval_lines.append(full_eval_line)
-
-
-        predictions_file = f"{config.outfolder}/predictions_by_{model_name}.tsv"
-        f = open(predictions_file, "w")
-        f.write("".join(lines))
-        f.close()
-        if config.target_values is not None:
-            eval_predictions_file = f"{config.outfolder}/predictions_by_{model_name}_with_eval.tsv"
-            f = open(eval_predictions_file, "w")
-            f.write("".join(eval_lines))
-            f.close()
-
-            full_eval_predictions_file = f"{config.outfolder}/predictions_by_{model_name}_full_eval.tsv"
-            f = open(full_eval_predictions_file, "w")
-            f.write("".join(full_eval_lines))
-            f.close()
-
-        if config.produce_scatterplot and config.target_values is not None:
-            scatterfile = f"{config.outfolder}/predicted_value_scatterplot.png"
-            hexbinfile = f"{config.outfolder}/predicted_value_hexbinplot.png"
-
-            scatterplot(
-                y_pred,
-                test_targets,
-                config.target_values,
-                scatterfile,
-            )
-            hexbinplot(y_pred, test_targets, config.target_values, hexbinfile)
-
-            scatter_folder = f"{config.outfolder}/scatter_plots"
-            if not os.path.isdir(scatter_folder):
-                os.makedirs(scatter_folder)
-            protein_wise_scatter_plot(test_targets, y_pred, combined_sample_id_list, scatter_folder, config.target_values)
-
-        return mean_spearman, combined_test_targets, combined_y_pred
-    elif model_config.regression:
+    """
+    if model_config.regression:
         int_targets = []
         for x in test_targets:
             if x == "Benign":
@@ -1081,27 +717,320 @@ def evaluate_dataset(config: Config):
 
         # write_protein_wise_pearsons(f'{config.outfolder}/protein_wise_results.tsv', prot_wise_roc_aucs, protein_info)
         return mean_roc_auc, int_targets, y_pred
+    """
 
+    if config.target_values is not None:
+        r2 = r2_score(test_targets, y_pred)
+        mse = mean_squared_error(test_targets, y_pred)
+        corr, p_value = stats.spearmanr(test_targets, y_pred)
     else:
-        acc = accuracy_score(test_targets, y_pred)
-        int_targets = classToInt(test_targets, samples)
-        int_preds = classToInt(y_pred, samples)
-        roc = roc_auc_score(int_targets, int_preds)
+        r2 = None
+        mse = None
+        corr = None
+        p_value = None
 
-        f1 = f1_score(int_targets, int_preds)
+    if config.verbosity >= 1:
+        config.logger.info(f"R2-Score: {r2}")
+        config.logger.info(f"MSE: {mse}")
+        config.logger.info(f"Spearman correlation and p-value: {corr} {p_value}")
 
-        precision = precision_score(int_targets, int_preds)
-        recall = recall_score(int_targets, int_preds)
+    if config.target_values is not None:
+        prot_wise_spearmans, mean_spearman, _ = calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.spearmanr)
+        prot_wise_pearsons, mean_pearson, _ = calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.pearsonr)
+    else:
+        prot_wise_spearmans = None
+        mean_spearman = None
+        prot_wise_pearsons = None
+        mean_pearson = None
 
-        mcc = matthews_corrcoef(int_targets, int_preds)
+    if config.verbosity >= 1:
+        config.logger.info(f"Number of samples: {len(sample_id_list)} {len(test_targets)} {len(y_pred)}")
+
+        config.logger.info(f"Prot-wise mean pearson: {mean_pearson}")
+        config.logger.info(f"Prot-wise mean spearman: {mean_spearman}")
+
+    if mm_y_pred is not None:
+        prot_wise_spearmans, mean_mm_spearman, _ = calc_protein_wise_corr(mm_test_targets, mm_y_pred, mm_sample_id_list, stats.spearmanr)
+        prot_wise_pearsons, mean_pearson, _ = calc_protein_wise_corr(mm_test_targets, mm_y_pred, mm_sample_id_list, stats.pearsonr)
 
         if config.verbosity >= 1:
-            config.logger.info("F-Score: ", f1)
-            config.logger.info("Accuracy: ", acc)
-            config.logger.info("Precision:", precision)
-            config.logger.info("Recall:", recall)
-            config.logger.info("MCC:", mcc)
-    return
+            config.logger.info(f"Number of samples: {len(mm_sample_id_list)} {len(mm_test_targets)} {len(mm_y_pred)}")
+
+            config.logger.info(f"Prot-wise mean pearson for multi savs: {mean_pearson}")
+            config.logger.info(f"Prot-wise mean spearman for multi savs: {mean_mm_spearman}")
+
+        prot_wise_spearmans, mean_comb_spearman, _ = calc_protein_wise_corr(
+            combined_test_targets,
+            combined_y_pred,
+            combined_sample_id_list,
+            stats.spearmanr,
+        )
+        prot_wise_pearsons, mean_pearson, _ = calc_protein_wise_corr(
+            combined_test_targets,
+            combined_y_pred,
+            combined_sample_id_list,
+            stats.pearsonr,
+        )
+
+        if config.verbosity >= 1:
+            config.logger.info(f"Number of samples: {len(combined_sample_id_list)} {len(combined_test_targets)} {len(combined_y_pred)}")
+
+            config.logger.info(f"Prot-wise mean pearson for all variants: {mean_pearson}")
+            config.logger.info(f"Prot-wise mean spearman for all variants: {mean_comb_spearman}")
+
+    write_protein_wise_performances(
+        f"{config.outfolder}/protein_wise_results.tsv",
+        prot_wise_spearmans,
+        protein_info,
+    )
+
+    if config.trace_decisions:
+        for booster_index, (booster, extern_feature_names_list) in enumerate(booster_list):
+            
+            dtest_feature_matrix = test_feat_mats[booster_index]
+            explanation = booster.predict(dtest_feature_matrix, pred_contribs=True)
+            shap_expl = shap.Explanation(explanation[:,:-1], data = test_feature_matrix, feature_names=extern_feature_names_list)
+            
+            ax = shap.plots.beeswarm(shap_expl, show=False, max_display= 30)
+            plt.subplots_adjust(left=0.5, right=0.9)
+            plt.savefig(f"{config.outfolder}/beeswarm.png")
+            plt.clf()
+
+            cat_expl = cat_shap_full_matrix(explanation, extern_feature_names_list)
+
+            cat_shap_expl = shap.Explanation(cat_expl[:,:-1], feature_names=feature_categories)
+            ax = shap.plots.beeswarm(cat_shap_expl, show=False, max_display = len(feature_categories))
+            plt.subplots_adjust(left=0.5, right=0.9)
+            plt.savefig(f"{config.outfolder}/cat_beeswarm.png")
+            plt.clf()
+
+            # config.logger.info(explanation[0])
+
+            # for pos, shap_val in enumerate(explanation[0][:-1]):
+            #    config.logger.info(f'{shap_val=} {extern_feature_names_list[pos]}')
+
+            # cat_exp, cat_shaps = categorize_shap_from_xgb(explanation[0][:-1], extern_feature_names_list)
+
+            # shap.plots.force(explanation[0][-1], cat_shaps, matplotlib=True, show=False, feature_names=feature_categories)
+            # shap.plots.force(explanation[0], matplotlib=True, show=False, feature_names=extern_feature_names_list)
+            # plt.savefig(f"{config.outfolder}/force_plot.png")
+
+            joined_sample_ids = [x[0] + x[1] for x in sample_id_list]
+            config.logger.info(f"{len(joined_sample_ids)=} {len(y_pred)=} {len(test_feature_matrix[0])=} {len(extern_feature_names_list)=}")
+
+            # plt.figure(figsize=(120, 80))
+            # plot_tree(forest, num_trees = 2)
+            # plt.savefig('xgb_viz.png')
+
+            # """
+        
+
+
+        if config.plot_trees:
+            st = SuperTree(forest, test_feature_matrix, y_pred, extern_feature_names_list, joined_sample_ids)
+            # st.show_tree(2)
+
+            super_tree_folder = f"{config.outfolder}/supertrees"
+            if not os.path.isdir(super_tree_folder):
+                os.makedirs(super_tree_folder)
+            tree_id = 0
+            
+            for tree in forest:
+                outfile = f"{super_tree_folder}/super_tree_{tree_id}.html"
+                st.save_html(which_tree=tree_id, filename=outfile)
+                tree_id += 1
+
+            
+            # config.logger.info(tree_df)
+
+            feat_tree_map = {}
+            
+            tree_df = forest.trees_to_dataframe()
+
+            tree_id_vec = tree_df["Tree"]
+            feat_name_vec = tree_df["Feature"]
+
+            for pos, tree_id in enumerate(tree_id_vec):
+                feat_name = feat_name_vec[pos]
+                if feat_name not in feat_tree_map:
+                    feat_tree_map[feat_name] = set()
+                feat_tree_map[feat_name].add(tree_id)
+
+            for feat_name in feat_tree_map:
+                config.logger.info(f"{feat_name} {feat_tree_map[feat_name]}")
+
+
+        # st.save_html()
+        # """
+    else:
+        sample_wise_feature_influence = []
+        explanation = None
+
+    if mm_y_pred is None or config.trace_decisions:
+        combined_sample_id_list = sample_id_list
+        combined_y_pred = y_pred
+        combined_test_targets = test_targets
+
+    # number_of_displayed_features = 20
+    if config.calc_sd:
+        header = "Protein ID\tSAV\tPredicted effect value\tTree STD"
+    else:
+        header = "Protein ID\tSAV\tPredicted effect value"
+
+    
+    # for i in range(number_of_displayed_features):
+    #    header += f"\tFeature {i+1}"
+    for i in range(len(feature_categories)):
+        # header += f"\tFeature category {i+1}\tImpact sum\tMean impact\tMax impact feature"
+        header += f"\tFeature category {i + 1}\tShap value\tTop feature of category {i + 1}"
+    header += "\n"
+    lines = [header]
+
+    if config.target_values is not None:
+        eval_header = "Protein ID\tSAV\tPredicted effect value\tTrue value"
+        for i in range(len(feature_categories)):
+            eval_header += f"\tFeature category {i + 1}\tShap value\tTop feature of category {i + 1}\tFeature Shap value\tFeat value"
+        eval_header += "\n"
+        eval_lines = [eval_header]
+
+        full_eval_header = "Protein ID\tSAV\tPredicted effect value\tTrue value"
+        for feat_name in extern_feature_names_list:
+            full_eval_header += f'\t{feat_name}'
+        full_eval_header += "\n"
+        full_eval_lines = [full_eval_header]
+
+    if config.plot_sample_forces:
+        force_plot_folder = f"{config.outfolder}/force_plots"
+        if not os.path.isdir(force_plot_folder):
+            os.makedirs(force_plot_folder)
+
+    if config.calc_sd:
+        ind_preds = []
+        for tree_id, tree in enumerate(forest):
+            ind_pred = tree.predict(dtest_feature_matrix)
+            ind_preds.append(ind_pred)
+
+        ind_preds = numpy.array(ind_preds).transpose()
+
+    for pos, sample_id in enumerate(combined_sample_id_list):
+        pred_value = combined_y_pred[pos]
+        prot_id, aac = sample_id
+
+        words = [prot_id, aac, str(pred_value)]
+
+        if config.target_values is not None:
+            eval_words = words[:]
+            eval_words.append(str(combined_test_targets[pos]))
+            full_eval_words = eval_words[:]
+
+        if config.calc_sd:
+            pred_std = numpy.std(ind_preds[pos])
+            words.append(str(pred_std))
+
+        if explanation is not None:
+            #print(f'{sample_id} {pos=} {len(explanation[pos][:-1])=} {len(extern_feature_names_list)=}')
+            cat_exp, cat_shaps = categorize_shap_from_xgb(explanation[pos][:-1], extern_feature_names_list)
+            if config.plot_sample_forces:
+                modified_feat_labels = []
+                cat_shaps = []
+                for cat_pos, shap_val, (max_feat_shap, max_feat, feat_pos) in cat_exp:
+                    if max_feat is not None:
+                        feat_cat = feature_categories[cat_pos]
+                        if feat_pos is not None:
+                            val = test_feature_matrix[pos][feat_pos]
+                            val_str = val_to_str(val)
+                            
+                        else:
+                            val_str = "None"
+
+                        perc_shap = (100*max_feat_shap)/shap_val
+
+                        feat_st = feat_stats[max_feat]
+                        mean_val = feat_st[2]
+                        mean_val_str = val_to_str(mean_val)
+
+                        modified_feat_labels.append(f"{feat_cat}\n{max_feat}\nshap={max_feat_shap:.3f} ({perc_shap:.1f}%)\nval={val_str} (mean={mean_val_str})")
+                    else:
+                        modified_feat_labels.append('None')
+                    cat_shaps.append(shap_val)
+
+                shap.plots.force(explanation[pos][-1], numpy.array(cat_shaps), matplotlib=True, show=False, feature_names=modified_feat_labels, figsize=(28,5))
+                plt.savefig(f"{force_plot_folder}/{prot_id}_{aac}_cat_force_plot.png")
+                shap.plots.force(explanation[pos][-1], explanation[pos][:-1], matplotlib=True, show=False, feature_names=extern_feature_names_list)
+                plt.savefig(f"{force_plot_folder}/{prot_id}_{aac}_force_plot.png")
+                plt.clf()
+
+            for cat_pos, shap_val, (max_feat_shap, max_feat, feat_pos) in cat_exp:
+                feat_cat = feature_categories[cat_pos]
+                if shap_val < 0:
+                    words.append(f"{feat_cat} features skews prediction towards functional consequence")
+                else:
+                    words.append(f"{feat_cat} features skews prediction towards wiltype-like effect")
+                words.append(str(shap_val))
+
+                if feat_pos is not None:
+                    val = test_feature_matrix[pos][feat_pos]
+                else:
+                    val = None
+                words.append(f"{max_feat} (shap={max_feat_shap}, {val=})")
+
+                if config.target_values is not None:
+                    eval_words.append(str(feat_cat))
+                    eval_words.append(str(shap_val))
+                    eval_words.append(str(max_feat))
+                    eval_words.append(str(max_feat_shap))
+                    eval_words.append(str(val))
+
+            for feat_pos, feat_name in enumerate(extern_feature_names_list):
+                shap_val = explanation[pos][feat_pos]
+                feat_val = test_feature_matrix[pos][feat_pos]
+                if config.target_values is not None:
+                    full_eval_words.append(f'{shap_val},{feat_val}')
+
+        line = "\t".join(words) + "\n"
+        lines.append(line)
+        if config.target_values is not None:
+            eval_line = "\t".join(eval_words) + "\n"
+            eval_lines.append(eval_line)
+
+            full_eval_line = "\t".join(full_eval_words) + "\n"
+            full_eval_lines.append(full_eval_line)
+
+
+    predictions_file = f"{config.outfolder}/predictions_by_{model_name}.tsv"
+    f = open(predictions_file, "w")
+    f.write("".join(lines))
+    f.close()
+    if config.target_values is not None:
+        eval_predictions_file = f"{config.outfolder}/predictions_by_{model_name}_with_eval.tsv"
+        f = open(eval_predictions_file, "w")
+        f.write("".join(eval_lines))
+        f.close()
+
+        full_eval_predictions_file = f"{config.outfolder}/predictions_by_{model_name}_full_eval.tsv"
+        f = open(full_eval_predictions_file, "w")
+        f.write("".join(full_eval_lines))
+        f.close()
+
+    if config.produce_scatterplot and config.target_values is not None:
+        scatterfile = f"{config.outfolder}/predicted_value_scatterplot.png"
+        hexbinfile = f"{config.outfolder}/predicted_value_hexbinplot.png"
+
+        scatterplot(
+            y_pred,
+            test_targets,
+            config.target_values,
+            scatterfile,
+        )
+        hexbinplot(y_pred, test_targets, config.target_values, hexbinfile)
+
+        scatter_folder = f"{config.outfolder}/scatter_plots"
+        if not os.path.isdir(scatter_folder):
+            os.makedirs(scatter_folder)
+        protein_wise_scatter_plot(test_targets, y_pred, combined_sample_id_list, scatter_folder, config.target_values)
+
+    return mean_spearman, combined_test_targets, combined_y_pred
+
 
 
 def writeOutput(config, y_pred, cv_slice, sampleSpace, append=False):
@@ -1126,10 +1055,7 @@ def writeOutput(config, y_pred, cv_slice, sampleSpace, append=False):
             color_map[u_ac][aac_base] = []
 
         predicted_value = y_pred[pos]
-        if config.regression:
-            error = abs(target_value - predicted_value)
-        else:
-            error = target_value == predicted_value
+        error = abs(target_value - predicted_value)
 
         color_map[u_ac][aac_base].append(error)
 
@@ -1190,7 +1116,8 @@ def buildFinalModel(samples, config, raw_feature_matrix_store_id, internal_cv=No
         gpu_share = config.multi_gpu
     else:
         gpu_share = None
-    booster_list, scores = trainForest.trainForest(
+    booster_list: list[tuple[Booster, list[str]]]
+    booster_list, _ = trainForest.trainForest(
         config,
         full_slice,
         samples.feat_corr_matrix,

@@ -34,10 +34,9 @@ from rmm.mr import PoolMemoryResource, CudaAsyncMemoryResource, set_current_devi
 
 #from filelock import FileLock, Timeout
 from structguy import featureSelection, util
-from structman.base_utils.base_utils import pack, unpack, add_to_times, print_times, aggregate_times
-from structman.lib.sdsc.sdsc_utils import deep_get_size_of, sizeof_fmt
+from structman.base_utils.base_utils import pack, unpack, add_to_times, print_times, aggregate_times, deep_get_size_of, sizeof_fmt
 from structguy.support_classes import CrossValidationSlice
-from structguy.sampleSpace import DataSAIL_cv, SampleSpace
+from structguy.sampleSpace import DataSAIL_cv
 import numpy
 #from ray.util.queue import Queue
 #from ray.train import RunConfig
@@ -422,7 +421,7 @@ def xgb_train_wrapper(
         dtrain: xgb.DMatrix,
         dtest_feature_matrix: xgb.DMatrix,
         second_round = False,
-        ):
+        ) -> xgb.Booster:
         
     es_list = []
     evals: list[tuple[xgb.DMatrix, str]] = []
@@ -473,7 +472,7 @@ def xgb_train_wrapper(
                 "max_cat_threshold": int(config.max_cat_threshold),
                 'random_state' : int(time.time())
                 }
-            forest = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees), early_stopping_rounds= config.early_stopping, evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
+            booster: xgb.Booster = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees), early_stopping_rounds= config.early_stopping, evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
         else:
             es = xgb.callback.EarlyStopping(
                 rounds=config.early_stopping_1,
@@ -509,9 +508,9 @@ def xgb_train_wrapper(
                 "max_cat_threshold": int(config.max_cat_threshold_1),
                 'random_state' : int(time.time())
                 }
-            forest = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees_1), early_stopping_rounds=int(config.early_stopping_1), evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
+            booster: xgb.Booster = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees_1), early_stopping_rounds=int(config.early_stopping_1), evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
 
-    return forest
+    return booster
 
 def setup_memory_resources(config: util.Config, sub_share: float, cuda_setup=True):
     if cuda_setup:
@@ -754,7 +753,7 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
         if proc_id == '0_0_0':
             util.dump_ray_logs_snapshot(f'{config.outfolder}/ray_dump_snapshot_1.log')
 
-    booster_2 = xgb_train_wrapper(config, dtrain, dtest_feature_matrix, second_round=True)
+    booster_2: xgb.Booster = xgb_train_wrapper(config, dtrain, dtest_feature_matrix, second_round=True)
     ta = add_to_times(times, ta) #11
 
     if config.verbosity >= 3:
@@ -1034,7 +1033,7 @@ def trainRegressionForest(
         sub_gpu_share = None
 
     if config.forest_type == "xgboost" and not skip_feature_selection:
-        booster_list = []
+        
         if sub_gpu_share is not None:
             sub_share = sub_gpu_share/len(cv_slice.slice_slices)
             if sub_share < 1.0 and sub_share > 0.5:
@@ -1083,7 +1082,7 @@ def trainRegressionForest(
             done = False
             y_preds = []
             x_preds = []
-            booster_2_list = []
+            booster_2_list: list[tuple[xgb.Booster, list[str]]] = []
 
             ray_dumped = False
 
@@ -1147,7 +1146,7 @@ def trainRegressionForest(
         else:
             y_preds = []
             x_preds = []
-            booster_2_list = []
+            booster_2_list: list[tuple[xgb.Booster, list[str]]] = []
             for nested_proc_id, packed_slice_slice in enumerate(cv_slice.slice_slices):
                 res = double_booster(packed_slice_slice, f'{proc_id}_{nested_proc_id}', 1.0, config, feats_to_filter, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, remote)
 
@@ -1316,7 +1315,7 @@ def trainForest(
     gpu_share=None,
     proc_id=0,
     config_ref_container: list[ray.ObjectRef] | None =None
-) -> tuple[None, util.Scores, CrossValidationSlice | DataSAIL_cv, None | list[CrossValidationSlice] | dict[int, list[CrossValidationSlice]]]:
+) -> tuple[None | list[tuple[xgb.Booster, list[str]]], util.Scores, CrossValidationSlice | DataSAIL_cv, None | list[CrossValidationSlice] | dict[int, list[CrossValidationSlice]]]:
     # if cv_repeat is False, the cross_val_object is a cross validation slice object instead
     zero_scores_obj = util.Scores(zero=True)
     # if para_number == 1:
@@ -1530,6 +1529,7 @@ def trainForest(
                     ) = res
                     booster_list = None
                 else:
+                    booster_list: list[tuple[xgb.Booster, list[str]]]
                     (
                         booster_list,
                         scores_obj,

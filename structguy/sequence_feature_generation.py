@@ -203,7 +203,7 @@ def estimate_cost(config, prot_id, msa_ref_dbs, gpw_ref_dbs, seq_len, n_of_mappe
 def para_mmseqs(store, db, indeces, temp_fasta, n_threads):
     config, mmseqs2_search_dbs, max_seqs = store
     util.reset_logger_for_remotes(config)
-    sequence_maps = {}
+    sequence_maps: dict[str , dict[str, str]] = {}
     n_mapped_sequences = 0
     for index in indeces:
         mmseqs2_search_db = mmseqs2_search_dbs[db].replace('_search_db', f'_{index}_search_db')
@@ -279,7 +279,7 @@ def do_mmseqs_search(
         mmseqs2_search_dbs,
         n_splits = n_of_unifref_splits
         ):
-    sequence_maps = {}
+    sequence_maps: dict[str, dict[str, dict[str, str]]] = {}
     for db in dbs:
         sequence_maps[db] = {}
     
@@ -319,8 +319,13 @@ def do_mmseqs_search(
                     procs.append(para_mmseqs.remote(store, db, indeces, temp_fasta, distribution_factor))
 
                 results = ray.get(procs)
+                remote_sequence_maps: dict[str, dict[str, str]]
                 for remote_sequence_maps, remote_n_mapped_sequences, remote_db in results:
-                    sequence_maps[remote_db].update(remote_sequence_maps)
+                    for gene in remote_sequence_maps:
+                        if gene in sequence_maps[remote_db]:
+                            sequence_maps[remote_db][gene].update(remote_sequence_maps[gene])
+                        else:
+                            sequence_maps[remote_db][gene] = remote_sequence_maps[gene]
                     n_mapped_sequences += remote_n_mapped_sequences
 
             os.remove(temp_fasta)
@@ -779,6 +784,9 @@ def afdb_msa_pipeline(config, samples: SampleSpace):
     for prot_id in samples.sequence_map:
         cl_pr_id = clean_prot_id(prot_id)
         prot_id_back_map[cl_pr_id] = prot_id
+
+    if not os.path.isdir(config.msa_folder_path):
+        os.makedirs(config.msa_folder_path)
 
     for prot_id in os.listdir(config.msa_folder_path):
         subfolder = f'{config.msa_folder_path}/{prot_id}'

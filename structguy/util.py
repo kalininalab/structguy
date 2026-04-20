@@ -5,7 +5,6 @@ import logging
 import getopt
 import statistics
 import numpy as np
-import subprocess
 from psutil import virtual_memory
 from scipy import stats
 import math
@@ -18,9 +17,9 @@ import matplotlib.pyplot as plt
 import xgboost as xgb
 
 from structguy.scripts import radarplot
-from structman.base_utils.base_utils import Errorlog, resolve_path, pack, unpack
-from structman.lib.sdsc.sdsc_utils import deep_get_size_of, sizeof_fmt
+from structman.base_utils.base_utils import Errorlog, resolve_path, pack, unpack, deep_get_size_of, sizeof_fmt
 from structguy.consts import feat_name_category_dict, feature_categories
+from structguy.base_classes import Feature
 
 class OutputCapture:
     def __init__(self):
@@ -2049,14 +2048,21 @@ if __name__ == "__main__":
         plotMPP(config,indatafile,outfile)
 
 
-def storeModel(model, feature_names, config, fn, feat_stats, features):
+def storeModel(
+        model: list[tuple[xgb.Booster, list[str]]],
+        feature_names: list[str],
+        config: Config,
+        fn: str,
+        feat_stats: dict[str, tuple[float, float, float, float]],
+        features: dict[str, Feature]
+        ) -> None:
     with open(fn, "wb") as output:
         pickle.dump((model, feature_names, config, feat_stats, pack(features)), output, pickle.HIGHEST_PROTOCOL)
     if config.verbosity >= 1:
         print("\n============\nStored model in %s\n============\n" % fn)
 
 
-def loadModel(fn):
+def loadModel(fn: str) -> tuple[list[tuple[xgb.Booster, list[str]]], list[str], None, Config, dict[str, tuple[float, float, float, float]], dict[str, Feature]]:
     with open(fn, "rb") as inp:
         data_tuple = pickle.load(inp)
         model, feature_names, config, feat_stats, packed_features = data_tuple

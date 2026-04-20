@@ -15,13 +15,13 @@ from scipy import stats
 from datasail.sail import datasail
 
 from structguy.sequence_util import parseFromFasta
-from structguy.support_classes import CrossValidationSlice, Feature
+from structguy.base_classes import Feature
+from structguy.support_classes import CrossValidationSlice
 from structguy.util import median, get_gpu_memory, Config
 from structguy.prefiltering import detectBiasedFeaturesByMeanCorrelation
 from structguy.class_utils import get_feat_matrix_from_ids, get_feat_matrix, get_raw_feat_matrix_from_sample_ids
 
-from structman.base_utils.base_utils import pack, unpack
-from structman.lib.sdsc.sdsc_utils import Slotted_obj
+from structman.base_utils.base_utils import pack, unpack, Slotted_obj
 
 class Sample(Slotted_obj):
     __slots__ = ['sample_id', 'targetValue', 'nr', 'amount_of_structures', 'tags']
@@ -41,7 +41,7 @@ def para_calc_feat_corr(data_store, left, right):
     corr_values = []
     #none_replacement = -1_000_000
     tv_corrs = {}
-    feat_stats = {}
+    feat_stats: dict[int, tuple[float, float, float, float]] = {}
     for index, value_vec in enumerate(feat_matrix[left:right]):
         feat_nr_a = index + left
         corr_values.append([])
@@ -430,7 +430,7 @@ class SampleSpace(Slotted_obj):
 
         results = ray.get(feat_corr_processes)
 
-        complete_feat_stats = {}
+        complete_feat_stats: dict[str, tuple[float, float, float, float]] = {}
         for feat_corr_slice, left, right, feat_stats in results:
             #config.logger.info(f'{left=} {right=} {len(feat_corr_slice)=} {feat_stats=}')
             for index in range(left,right):
@@ -662,8 +662,8 @@ class SampleSpace(Slotted_obj):
                 f.write('\n'.join(class_out_lines[class_name]))
                 f.close()
 
-    def write_feature_coverage_matrix(self, outfile):
-        prot_wise_feature_coverage = {}
+    def write_feature_coverage_matrix(self, outfile, config: Config):
+        prot_wise_feature_coverage = {'total':{}}
         feat_name_list = list(self.features.keys())
         
         sample_id_list = list(self.samples.keys())
@@ -678,12 +678,28 @@ class SampleSpace(Slotted_obj):
                 if feat_name not in prot_wise_feature_coverage[prot_id]:
                     prot_wise_feature_coverage[prot_id][feat_name] = [0, 0, 0]
 
-                if val_list[index] is not None:
-                    prot_wise_feature_coverage[prot_id][feat_name][0] += 1
-                if val_list[index] == 0:
-                    prot_wise_feature_coverage[prot_id][feat_name][1] += 1
+                if feat_name not in prot_wise_feature_coverage['total']:
+                    prot_wise_feature_coverage['total'][feat_name] = [0, 0, 0]
+
+                if val_list is not None:
+                    if val_list[index] is not None:
+                        prot_wise_feature_coverage[prot_id][feat_name][0] += 1
+                        prot_wise_feature_coverage['total'][feat_name][0] += 1
+                    if val_list[index] == 0:
+                        prot_wise_feature_coverage[prot_id][feat_name][1] += 1
+                        prot_wise_feature_coverage['total'][feat_name][1] += 1
                 prot_wise_feature_coverage[prot_id][feat_name][2] += 1
+                prot_wise_feature_coverage['total'][feat_name][2] += 1
             
+        for feat_name in prot_wise_feature_coverage['total']:
+            n_non_nulls, n_zeros, total_n = prot_wise_feature_coverage['total'][feat_name]
+            cov = n_non_nulls/total_n
+            zero_cov = n_zeros/total_n
+            if cov < 0.2:
+                config.logger.info(f'Low coverage feature: {feat_name} {cov=} {zero_cov=}')
+            if zero_cov > 0.8:
+                config.logger.info(f'High zero features: {feat_name} {cov=} {zero_cov=}')
+
         prot_id_list = list(prot_wise_feature_coverage.keys())
         
         header_words = ['']
@@ -816,7 +832,10 @@ class SampleSpace(Slotted_obj):
         return feat_value
 
     def get_feature_value_vector(self, sample_ids, feat_name):
-        feature_id = self.feat_pos_dict[feat_name]
+        try:
+            feature_id = self.feat_pos_dict[feat_name]
+        except KeyError:
+            return None
         feature_value_vector = []
         sample_positions = []
         for sample_id in sample_ids:
