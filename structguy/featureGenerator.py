@@ -29,6 +29,14 @@ def expand_structural_feature_table(config):
     config.add_entry_to_project_file("path_to_features_file", outfile)
     return
 
+def msa_bench(config):
+    samples = SampleSpace(config)
+    # strfg.initFeatures(samples)
+    # seqfg.initFeatures(config, samples)
+
+    parse_structural_features(samples, config)
+
+    seqfg.msa_bench(config, samples)
 
 @ray.remote(max_calls=1)
 def parseLines_remote_wrapper(store, left, right):

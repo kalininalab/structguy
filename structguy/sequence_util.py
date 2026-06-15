@@ -129,7 +129,7 @@ def split_fasta_db():
         p = subprocess.Popen(cmds)
         p.wait()
 
-def check_psic_file(infile):
+def check_psic_file(infile, target_len = None):
     if not os.path.isfile(infile):
         return
     
@@ -139,5 +139,9 @@ def check_psic_file(infile):
 
     if len(lines) < 2:
         os.remove(infile)
+
+    if target_len is not None:
+        if len(lines) < target_len + 2:
+            os.remove(infile)
 
     return

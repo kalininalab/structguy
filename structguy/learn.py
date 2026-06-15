@@ -166,8 +166,9 @@ def learn(config: Config):
     samples.transform_matrix_dict(exclude_feats=feats_to_filter)
 
     feat_coverage_file = f"{config.outfolder}/prot_wise_feat_coverage.tsv"
-    prot_wise_feature_coverage = samples.write_feature_coverage_matrix(feat_coverage_file, config)
-    config.logger.info(f'Wrote prot-wise feature coverages to {feat_coverage_file}')
+    if not os.path.exists(feat_coverage_file) or config.overwrite:
+        prot_wise_feature_coverage = samples.write_feature_coverage_matrix(feat_coverage_file, config)
+        config.logger.info(f'Wrote prot-wise feature coverages to {feat_coverage_file}')
 
     if config.select_samples:
         samples.select_bad_prots(prot_wise_feature_coverage, config)
@@ -543,8 +544,9 @@ def evaluate_dataset(config: Config):
 
     if config.verbosity >= 3:
         feat_coverage_file = f"{config.outfolder}/prot_wise_feat_coverage.tsv"
-        samples.write_feature_coverage_matrix(feat_coverage_file)
-        config.logger.info(f'Wrote prot-wise feature coverages to {feat_coverage_file}')
+        if not os.path.exists(feat_coverage_file) or config.overwrite:
+            samples.write_feature_coverage_matrix(feat_coverage_file, config)
+            config.logger.info(f'Wrote prot-wise feature coverages to {feat_coverage_file}')
 
     external_feat_pos_dict = dict(zip(extern_feature_names_list, range(len(extern_feature_names_list))))
 
@@ -1116,6 +1118,7 @@ def buildFinalModel(samples, config, raw_feature_matrix_store_id, internal_cv=No
         gpu_share = config.multi_gpu
     else:
         gpu_share = None
+
     booster_list: list[tuple[Booster, list[str]]]
     booster_list, _ = trainForest.trainForest(
         config,

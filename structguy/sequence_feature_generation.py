@@ -9,12 +9,16 @@ import traceback
 import ray
 import gzip
 import shutil
+import requests
+import json
+import numpy as np
+#import xml.etree.ElementTree as ET
 
 from pathlib import Path
 from ray.util.queue import Queue
 
 from structguy import msa, consts, util
-from structguy.msa import computeMSA
+from structguy.msa import computeMSA, calcGPW
 from structguy.sequence_util import parseFromFasta, parseFasta, check_psic_file
 from structman.base_utils.base_utils import pack, unpack
 from structman.base_utils.ray_utils import ray_init
@@ -23,6 +27,11 @@ from structguy.sampleSpace import SampleSpace
 from structguy.psic_wrapper import psicFromFasta
 from structguy.consts import n_of_unifref_splits
 import stat
+from scipy import stats
+
+import matplotlib as mpl
+mpl.use('Agg')
+import matplotlib.pyplot as plt
 
 def initFeatures(config, samples):
     dbs = []
@@ -49,15 +58,17 @@ def initFeatures(config, samples):
         samples.addFeature(f"Window median dPSIC {feature_name_tag} {db_name}", "real", group="sequence")
         samples.addFeature(f"Protein median dPSIC {feature_name_tag} {db_name}", "real", group="sequence")
 
+        samples.addFeature(f"gemme_evolInd {feature_name_tag} {db_name}", "real", group="sequence")
+        samples.addFeature(f"gemme_evolEpi {feature_name_tag} {db_name}", "real", group="sequence")
+        samples.addFeature(f"gemme_evolCombi {feature_name_tag} {db_name}", "real", group="sequence")
+
+        samples.addFeature(f"MSA depth {feature_name_tag} {db_name}", "integer", group="sequence")
+
     samples.addFeature("Sequence Position Number", "integer", group="amino acid property")
     samples.addFeature("Relative Sequence Position", "real", group="amino acid property")
     samples.addFeature("Protein Size", "integer", group="amino acid property")
 
-    samples.addFeature("gemme_Ind", "real", group="sequence")
-    samples.addFeature("gemme_Epi", "real", group="sequence")
-    samples.addFeature("gemme_Combi", "real", group="sequence")
-
-
+    
 
 def prepare_gemme(config: util.Config):
     gene_seq_map = parseFasta(config.path_to_sequence_fasta)
@@ -205,6 +216,9 @@ def para_mmseqs(store, db, indeces, temp_fasta, n_threads):
     util.reset_logger_for_remotes(config)
     sequence_maps: dict[str , dict[str, str]] = {}
     n_mapped_sequences = 0
+
+    coverage_cut_off = 0.7
+
     for index in indeces:
         mmseqs2_search_db = mmseqs2_search_dbs[db].replace('_search_db', f'_{index}_search_db')
 
@@ -221,7 +235,7 @@ def para_mmseqs(store, db, indeces, temp_fasta, n_threads):
 
 
         temp_outfile = f"{temp_subfolder}/tmp_outfile_{randomString()}.fasta"
-        #FNULL = open(os.devnull, 'w')
+        FNULL = open(os.devnull, 'w')
         p = subprocess.Popen(
             [
                 config.mmseqs_path,
@@ -233,12 +247,12 @@ def para_mmseqs(store, db, indeces, temp_fasta, n_threads):
                 "--max-seqs",
                 max_seqs,
                 "--format-output",
-                "query,target,tseq",
+                "query,target,tseq,qcov,pident",
                 "--max-seq-len",
-                "999999",
+                "200000",
                 '--min-aln-len', '30',
                 '--threads', str(n_threads)
-            ]#, stdout=FNULL
+            ], stdout=FNULL
         )
         p.wait()
 
@@ -255,14 +269,21 @@ def para_mmseqs(store, db, indeces, temp_fasta, n_threads):
             if line == "":
                 continue
             words = line.split()
-            # print line
+
+            #config.logger.info(f'{mmseqs2_search_db=} {line=}')
+
             gene = words[0]
             hit = words[1]
             tseq = words[2]
+            coverage = float(words[3])
+            seq_id = float(words[4])
+
+            if coverage < coverage_cut_off:
+                continue
 
             if gene not in sequence_maps:
-                sequence_maps[gene] = {}
-            sequence_maps[gene][hit] = tseq
+                sequence_maps[gene] = []
+            sequence_maps[gene].append((hit,tseq, coverage, seq_id))
 
             n_mapped_sequences += 1
 
@@ -279,7 +300,7 @@ def do_mmseqs_search(
         mmseqs2_search_dbs,
         n_splits = n_of_unifref_splits
         ):
-    sequence_maps: dict[str, dict[str, dict[str, str]]] = {}
+    sequence_maps: dict[str, dict[str, list[tuple[str, str, float, float]]]] = {}
     for db in dbs:
         sequence_maps[db] = {}
     
@@ -319,11 +340,11 @@ def do_mmseqs_search(
                     procs.append(para_mmseqs.remote(store, db, indeces, temp_fasta, distribution_factor))
 
                 results = ray.get(procs)
-                remote_sequence_maps: dict[str, dict[str, str]]
+                remote_sequence_maps: dict[str, list[tuple[str, str, float, float]]]
                 for remote_sequence_maps, remote_n_mapped_sequences, remote_db in results:
                     for gene in remote_sequence_maps:
                         if gene in sequence_maps[remote_db]:
-                            sequence_maps[remote_db][gene].update(remote_sequence_maps[gene])
+                            sequence_maps[remote_db][gene] += remote_sequence_maps[gene]
                         else:
                             sequence_maps[remote_db][gene] = remote_sequence_maps[gene]
                     n_mapped_sequences += remote_n_mapped_sequences
@@ -546,6 +567,36 @@ def local_ali_pipeline(config, samples, n_of_processes=6, update_mode=False):
 
     return msa_map, gpw_map
 
+def parseGemmeFileToMap(infile, gemme_pred_type, seq, config, prot_id, prot_mut_map, feature_name_tag, db_name, none_value=None):
+    f = open(infile, 'r')
+    lines = f.readlines()
+    f.close()
+
+    feat_name = f'gemme_{gemme_pred_type} {db_name} {feature_name_tag}'
+
+    config.logger.info(f'Call of parseGemmeFileMap: {infile=} {feat_name=}')
+
+    for line in lines[1:]:
+        words = line[:-1].split()
+        mut_aa = words[0][1:-1].upper()
+        for seq_pos, gemme_val_str in enumerate(words[1:]):
+            
+            try:
+                wt_aa = seq[seq_pos]
+            except IndexError as e:
+                config.logger.info(f'IndexError found:\n{prot_id=} {len(seq)=} {infile=} {line=}')
+                os.remove(infile)
+                return None
+                #raise e
+            aac = f'{wt_aa}{seq_pos+1}{mut_aa}'
+            
+            if gemme_val_str == 'NA':
+                gemme_val = none_value
+            else:
+                gemme_val = float(gemme_val_str)
+
+            if aac in prot_mut_map:
+                prot_mut_map[aac].append((gemme_val, feat_name))
 
 def parseGemmeFile(config, infile, prot_id: str, samples: SampleSpace, gemme_pred_type, ori_prot_id):
     seq = samples.sequence_map[ori_prot_id][0]
@@ -644,41 +695,45 @@ def clean_msa(msa_page, overwrite = False):
             else:
                 current_seq.append(line[:-1])
 
-    masked_seq = []
-    current_seq = ''.join(current_seq)
-    for pos, char in enumerate(current_seq):
-        if not gap_mask[pos]:
-            masked_seq.append(char)
-    masked_seq = ''.join(masked_seq)
-    if masked_seq == len(masked_seq) * masked_seq[0]:
-        del outlines[-1]
-    else:
-        outlines.append(f'{masked_seq}\n')
+    if len(current_seq) > 0:
+        masked_seq = []
+        current_seq = ''.join(current_seq)
+        for pos, char in enumerate(current_seq):
+            if not gap_mask[pos]:
+                masked_seq.append(char)
+        masked_seq = ''.join(masked_seq)
+        if masked_seq == len(masked_seq) * masked_seq[0]:
+            del outlines[-1]
+        else:
+            outlines.append(f'{masked_seq}\n')
 
     return ''.join(outlines)
 
-@ray.remote
-def para_gemme(chunk, msa_folder_path, proc_id, overwrite):
+def call_gemme(chunk, msa_folder_path, proc_id, overwrite, clean = True, scope = 1):
     lines = []
     for msa_path in chunk:
-        f = open(f'{msa_folder_path}/{msa_path}', 'r')
-        page = f.read()
-        f.close()
+        if clean:
+            f = open(f'{msa_folder_path}/{msa_path}', 'r')
+            page = f.read()
+            f.close()
 
-        msa = clean_msa(page, overwrite=overwrite)
+            msa = clean_msa(page, overwrite=overwrite)
 
-        f = open(f'{msa_folder_path}/{msa_path}', 'w')
-        f.write(msa)
-        f.close()
+            f = open(f'{msa_folder_path}/{msa_path}', 'w')
+            f.write(msa)
+            f.close()
 
-        subfolder, msaf = msa_path.split('/')
+        subfolder, msaf = msa_path.rsplit('/',1)
         lines.append(f'cd "{subfolder}"\n')
         lines.append(f'echo "{msaf}"\n')
         #lines.append(f'head -n 1 "{msaf}"\n')
         line = f'python2.7 $GEMME_PATH/gemme.py "{msaf}" -r input -f "{msaf}"\n'
         lines.append(line)
 
-        lines.append('cd ..\n')
+        if scope == 1:
+            lines.append('cd ..\n')
+        elif scope == 2:
+            lines.append('cd ../..\n')
 
     f = open(f'{msa_folder_path}/call_gemme_inside_container_{proc_id}.sh', 'w')
     f.write(''.join(lines))
@@ -696,6 +751,9 @@ def para_gemme(chunk, msa_folder_path, proc_id, overwrite):
     p = subprocess.Popen(cmds, shell=True, cwd=msa_folder_path)
     p.wait()
 
+@ray.remote
+def para_gemme(chunk, msa_folder_path, proc_id, overwrite, clean, scope):
+    call_gemme(chunk, msa_folder_path, proc_id, overwrite, clean = clean, scope = scope)
     
 
 def calc_gemme_feats(config, samples, prot_id_back_map):
@@ -719,7 +777,7 @@ def calc_gemme_feats(config, samples, prot_id_back_map):
 
     process_ids = []
     for proc_id, chunk in enumerate(chunks):
-        process_ids.append(para_gemme.remote(chunk, config.msa_folder_path, proc_id, config.overwrite))
+        process_ids.append(para_gemme.remote(chunk, config.msa_folder_path, proc_id, config.overwrite, True, 1))
 
     ray.get(process_ids)        
 
@@ -742,40 +800,228 @@ def calc_gemme_feats(config, samples, prot_id_back_map):
                         _ = parseGemmeFile(config, f'{subfolder}/{sfn}', prot_id, samples, gemme_pred_type, mapped_id)
 
 @ray.remote
+def para_mafft_remote_wrapper(chunk, config):
+    para_mafft(chunk, config)
+
 def para_mafft(chunk, config):
     util.reset_logger_for_remotes(config)
-    for prot_id, msa_index, sequence_map, seq in chunk:
+    for prot_id, tag, sequence_map, seq, target_file in chunk:
+        if target_file is None:
+            target_folder = f'{config.msa_folder_path}/{clean_prot_id(prot_id)}'
+            if not os.path.isdir(target_folder):
+                os.makedirs(target_folder)
+            sfn = f'{clean_prot_id(prot_id)}_msa.fasta'
+            target_file = f'{target_folder}/{sfn}'
+
+        single_mafft(config, prot_id, tag, sequence_map, target_file, seq)
+        
+
+def single_mafft(config, prot_id, tag, seq_list, target_file, seq=None):
+    config.logger.info(f'Calc MSA for {prot_id} {tag}')
+
+    msa, _, _ = computeMSA(
+        seq,
+        prot_id,
+        search_db=tag,
+        keep_raw_seq_map=True,
+        sequence_map=seq_list,
+        sub_threads=config.proc_n,
+        target_file = target_file
+    )
+
+    if msa is None:
+        return
+
+    #config.logger.info(f'MSA for {prot_id} {seq_list_id} {msa=}')
+
+    if len(seq_list) > 1:
+        msa = clean_msa(msa)
+
+    f = open(target_file, 'w')
+    f.write(msa)
+    f.close()
+
+def gpw_pipeline(config, samples: SampleSpace):
+    gpw_map = {}
+    psic_jobs = []
+    current_job = 0
+    config_store = ray.put(config)
+
+    prot_id_back_map = {}
+    for prot_id in samples.sequence_map:
+        cl_pr_id = clean_prot_id(prot_id)
+        prot_id_back_map[cl_pr_id] = prot_id
+
+    if not os.path.isdir(config.msa_folder_path):
+        os.makedirs(config.msa_folder_path)
+
+    for prot_id in os.listdir(config.msa_folder_path):
+        subfolder = f'{config.msa_folder_path}/{prot_id}'
+        if not os.path.isdir(subfolder):
+            continue
+        
+        distant_folder = f'{subfolder}/gpw_distant'
+
+        if not os.path.isdir(distant_folder):
+            os.makedirs(distant_folder)
+
+        for sfn in os.listdir(distant_folder):
+            if sfn.endswith('_gpw_distant.fasta'):
+                gpw_distant_file = f'{distant_folder}/{sfn}'
+
+                gpw_map[prot_id] = {'gpw_distant': gpw_distant_file}
+                psic_distant_file = f'{gpw_distant_file[:-6]}.psic'
+                check_psic_file(psic_distant_file)
+
+                if not os.path.isfile(psic_distant_file):
+                    if config.verbosity >= 3:
+                        config.logger.info(f"Calc psic profiles from gpw_pipeline {sfn}")
+                    if len(psic_jobs) == current_job:
+                        psic_jobs.append([])
+                    psic_jobs[current_job].append((gpw_distant_file, psic_distant_file))
+                    current_job += 1
+                    if current_job >= config.proc_n:
+                        current_job = 0
+
+        close_folder = f'{subfolder}/gpw_close'
+
+        if not os.path.isdir(close_folder):
+            os.makedirs(close_folder)
+
+        for sfn in os.listdir(close_folder):
+            if sfn.endswith('_gpw_close.fasta'):
+                gpw_close_file = f'{close_folder}/{sfn}'
+
+                if prot_id not in gpw_map:
+                    gpw_map[prot_id] = {}
+
+                gpw_map[prot_id]['gpw_close'] = gpw_close_file
+                
+                psic_close_file = f'{gpw_close_file[:-6]}.psic'
+                check_psic_file(psic_close_file)
+                if not os.path.isfile(psic_close_file):
+                    if config.verbosity >= 3:
+                        config.logger.info(f"Calc psic profiles from gpw_pipeline {sfn}")
+                    if len(psic_jobs) == current_job:
+                        psic_jobs.append([])
+                    psic_jobs[current_job].append((gpw_close_file, psic_close_file))
+                    current_job += 1
+                    if current_job >= config.proc_n:
+                        current_job = 0
+
+    N = 0
+    mmseq_searchs = []
+    mmseq_search = {}
+
+    for prot_id in samples.sequence_map:
+        if not config.overwrite:
+            if clean_prot_id(prot_id) in gpw_map or prot_id in gpw_map:
+                continue
+        mmseq_search[prot_id] = samples.sequence_map[prot_id]
+
+        N += 1
+        if N == 5000:
+            mmseq_searchs.append(mmseq_search)
+            mmseq_search = {}
+            N = 0
+
+    if N > 0:
+        mmseq_searchs.append(mmseq_search)
+
+    db_id = 'ref90'
+    mmseqs2_search_dbs = {db_id: config.mmseqs_search_db_ref90}
+
+    sequence_maps, n_mapped_sequences = do_mmseqs_search(config, mmseq_searchs, [db_id], mmseqs2_search_dbs)
+
+
+    seq_lists = []
+    for prot_id in sequence_maps[db_id]:
+
+        if config.verbosity >= 3:
+            config.logger.info(f'Subset slicing: {prot_id=}')
+
+        seq_list = sequence_maps[db_id][prot_id]
+        seq_list = msa.rank_and_cut(seq_list, max_number=None)
+
+        try:
+            seq = samples.sequence_map[prot_id][0]
+        except KeyError:
+            try:
+                seq = samples.sequence_map[prot_id_back_map[prot_id]][0]
+            except KeyError:
+                config.logger.info(f'Warning in gpw_pipeline - {prot_id=} not in sampleSpace')
+                continue
+
+        slice_subset(seq_lists, seq_list, 0.85, 25., 80., prot_id, seq, db_id, seq_list_id='gpw_distant')
+        slice_subset(seq_lists, seq_list, 1., 50., 100., prot_id, seq, db_id, seq_list_id='gpw_close')
+
+    chunks = []
+    current_chunk = 0
+
+    for prot_id, seq_list_id, seq_list in seq_lists:
         target_folder = f'{config.msa_folder_path}/{clean_prot_id(prot_id)}'
         if not os.path.isdir(target_folder):
             os.makedirs(target_folder)
-        sfn = f'{clean_prot_id(prot_id)}_msa.fasta'
 
-        config.logger.info(f'Calc MSA for {prot_id} {msa_index}')
+        sub_folder = f'{target_folder}/{seq_list_id}'
 
-        msa, _, _ = computeMSA(
-            config,
-            seq,
-            prot_id,
-            search_db='ref90',
-            debug=config.verbosity,
-            sequence_map=sequence_map,
-            sub_threads=config.proc_n,
-            target_file = f'{target_folder}/{sfn}'
-        )
+        if not os.path.isdir(sub_folder):
+            os.makedirs(sub_folder)
 
-        if msa is None:
-            continue
+        psic_file = f'{sub_folder}/{clean_prot_id(prot_id)}_{seq_list_id}.psic'
+        target_file = f'{sub_folder}/{clean_prot_id(prot_id)}_{seq_list_id}.fasta'
 
-        msa = clean_msa(msa)
+        if not os.path.exists(target_file) or config.overwrite:
+            calcGPW(seq_list, target_file, sub_threads = config.proc_n)
 
-        f = open(f'{target_folder}/{sfn}', 'w')
-        f.write(msa)
-        f.close()
+        check_psic_file(psic_file)
+        if not os.path.isfile(psic_file) or config.overwrite:
+            if config.verbosity >= 3:
+                config.logger.info(f"Calc psic profiles from gpw_pipeline {target_file=}")
+            if len(psic_jobs) == current_job:
+                psic_jobs.append([])
+            psic_jobs[current_job].append((target_file, psic_file))
+            current_job += 1
+            if current_job >= config.proc_n:
+                current_job = 0        
 
+        if prot_id not in gpw_map:
+            gpw_map[prot_id] = {}
+        gpw_map[prot_id][seq_list_id] = target_file
+
+        gemme_files = []
+
+        for fi in os.listdir(sub_folder):
+            if fi[-4:] != '.txt':
+                continue
+            if fi.count('normPred') > 0:
+                gemme_files.append(fi)
+
+        if len(gemme_files) == 0:
+            path_pieces = target_file.split('/')
+            path_part = '/'.join(path_pieces[-3:])
+
+            if len(chunks) == current_chunk:
+                chunks.append([])
+            chunks[current_chunk].append(path_part)
+
+            current_chunk += 1
+            if current_chunk >= config.proc_n:
+                current_chunk = 0
+
+    process_ids = []
+    for proc_id, chunk in enumerate(chunks):
+        process_ids.append(para_gemme.remote(chunk, config.msa_folder_path, proc_id, config.overwrite, False, 2))
+
+    proc_ids = []
+    for package in psic_jobs:
+        proc_ids.append(para_psic.remote(package, config_store))
+    ray.get(proc_ids)
+
+    return gpw_map, prot_id_back_map
 
 def afdb_msa_pipeline(config, samples: SampleSpace):
     msa_map = {}
-    gemme_predictions = {}
     psic_jobs = []
     current_job = 0
     config_store = ray.put(config)
@@ -865,24 +1111,28 @@ def afdb_msa_pipeline(config, samples: SampleSpace):
 
     sequence_maps, n_mapped_sequences = do_mmseqs_search(config, mmseq_searchs, dbs, mmseqs2_search_dbs)
 
-    n_of_para_maffts = min([5, config.proc_n])
+    n_of_para_maffts = 1 #min([2, config.proc_n])
 
     current_chunk = 0
     chunks = []
-    for msa_index, prot_id in enumerate(sequence_maps['ref90']):
+    for prot_id in sequence_maps['ref90']:
         if len(chunks) == current_chunk:
             chunks.append([])
 
-        chunks[current_chunk].append((prot_id, msa_index, sequence_maps['ref90'][prot_id], samples.sequence_map[prot_id]))
+        chunks[current_chunk].append((prot_id, 'ref90', sequence_maps['ref90'][prot_id], samples.sequence_map[prot_id], None))
         current_chunk += 1
         if current_chunk >= n_of_para_maffts:
             current_chunk = 0
 
     process_ids = []
     for chunk in chunks:
-        process_ids.append(para_mafft.remote(chunk, config_store))
+        if n_of_para_maffts > 1:
+            process_ids.append(para_mafft_remote_wrapper.remote(chunk, config_store))
+        else:
+            para_mafft(chunk, config)
 
-    ray.get(process_ids)
+    if n_of_para_maffts > 1:
+        ray.get(process_ids)
         
     for msa_index, prot_id in enumerate(sequence_maps['ref90']):
         target_folder = f'{config.msa_folder_path}/{clean_prot_id(prot_id)}'
@@ -911,18 +1161,645 @@ def afdb_msa_pipeline(config, samples: SampleSpace):
 
     calc_gemme_feats(config, samples, prot_id_back_map)
 
-    return msa_map, gemme_predictions, prot_id_back_map
+    return msa_map, prot_id_back_map
 
+
+def get_uniref_members_from_upi(upi):
+
+    params = {
+        "id": upi
+    }
+    headers = {
+        "accept": "application/json"
+    }
+    base_url = "https://rest.uniprot.org/uniref/%7Bid%7D/members"
+
+    response = requests.get(base_url, headers=headers, params=params)
+    if not response.ok:
+        #response.raise_for_status()
+        return []
+
+    data = response.json()
+
+    u_ids = []
+    u100s = set()
+    for entry in data['results']:
+        u100_id = entry['uniref100Id']
+        if u100_id in u100s:
+            continue
+        u100s.add(u100_id)
+        u_ids.append(entry['memberId'])
+
+    return u_ids
+
+def get_uniprot_sequences(id_list):
+
+    max_retrieve = 50
+    seq_list = []
+
+    iter_index = 0
+    while iter_index*max_retrieve < len(id_list):
+        id_list_chunk = id_list[iter_index*max_retrieve:(iter_index+1)*max_retrieve]
+        iter_index += 1
+
+        params = {
+            "query": ' OR '.join(id_list_chunk),
+            "fields": [
+                "id",
+                "sequence"
+        ]
+        }
+        headers = {
+            "accept": "application/json"
+        }
+        base_url = "https://rest.uniprot.org/uniprotkb/stream"
+
+        response = requests.get(base_url, headers=headers, params=params)
+        if not response.ok:
+            response.raise_for_status()
+            return None
+
+        data = response.json()
+
+        
+        id_set = set(id_list_chunk)
+
+        for entry in data['results']:
+            u_id = entry['uniProtkbId']
+            if u_id not in id_set:
+                continue
+            seq = entry['sequence']['value']
+
+            seq_list.append((u_id, seq, 1.0, 100.0))
+        
+    return seq_list
+
+def parse_gpw_fasta(gpw_fasta_file):
+    seq_list = []
+    f = open(gpw_fasta_file, 'r')
+    lines = f.readlines()
+    f.close()
+
+    target_prot_id = lines[0][1:-1]
+    target_seq = lines[1][:-1]
+
+    seq_list.append((target_prot_id, target_seq, 1.0, 100.0))
+
+    for line in lines[2:]:
+        if line[0] == '>':
+            entry_id = line[1:-1]
+        else:
+            aligned_seq = line[:-1]
+
+            n_matched = 0
+            n_gaps = 0
+            seq = []
+            for al_index, al_char in enumerate(aligned_seq):
+                if al_char == '-':
+                    n_gaps += 1
+                elif al_char == target_seq[al_index]:
+                    n_matched += 1
+                if al_char != '-':
+                    seq.append(al_char)
+            seq_id = (100*n_matched)/len(aligned_seq)
+            cov = (len(aligned_seq) - n_gaps)/(len(aligned_seq))
+
+            seq_list.append((entry_id, ''.join(seq), cov, seq_id))
+
+    return seq_list
+
+def slice_subset(seq_lists, ordered_seq_list, cov_thresh, seq_id_min, seq_id_max, prot_id, target_seq, id_tag, seq_list_id = None):
+    seq_id_capped_list = [entry for entry in ordered_seq_list if entry[3] > seq_id_min and entry[3] < seq_id_max and entry[2] >= cov_thresh]
+    if len(seq_id_capped_list) == 0:
+        return
+    if seq_id_capped_list[0][3] < 100. and seq_id_capped_list[0][2] < 1.0:
+        seq_id_capped_list = [(clean_prot_id(prot_id), target_seq, 1.0, 100.0)] + seq_id_capped_list
+    else:
+        seq_id_capped_list[0] = (clean_prot_id(prot_id), target_seq, 1.0, 100.0)
+
+    if seq_list_id is None:
+        seq_list_id = f'seq_id_{int(seq_id_min)}-{int(seq_id_max)}_cov_{int(cov_thresh*100)}_{id_tag}'
+    seq_lists.append((clean_prot_id(prot_id), seq_list_id, seq_id_capped_list))
+
+def prepare_seq_lists(config, samples: SampleSpace):
+    #xml_file = f'{os.path.dirname(config.mmseqs_search_db_ref50)}/uniref90.xml.gz'
+    
+    mmseqs2_search_dbs = {"ref50": config.mmseqs_search_db_ref50, "ref90": config.mmseqs_search_db_ref90}#, "ref100": config.mmseqs_search_db_ref100}
+
+    #mmseqs2_search_dbs = {"ref90": config.mmseqs_search_db_ref90}
+
+    dbs = mmseqs2_search_dbs.keys()
+
+    mmseq_searchs = []
+    mmseq_search = {}
+
+    for prot_id in samples.sequence_map:
+        mmseq_search[prot_id] = samples.sequence_map[prot_id]
+
+    mmseq_searchs.append(mmseq_search)
+
+    sequence_maps, n_mapped_sequences = do_mmseqs_search(config, mmseq_searchs, dbs, mmseqs2_search_dbs)
+
+    #print(f'{sequence_maps=}')
+
+    seq_lists = []
+
+    for db_id in sequence_maps:
+        for prot_id in sequence_maps[db_id]:
+            seq_list = sequence_maps[db_id][prot_id]
+            #for entry in seq_list:
+            #    config.logger.info((f'{db_id=} {prot_id=} {entry=} '))
+            ordered_seq_list = msa.rank_and_cut(seq_list)
+
+            target_cluster_head = ordered_seq_list[0][0]
+            target_seq = ordered_seq_list[0][1]
+
+            #all_members = []
+            #for entry in ordered_seq_list:
+            #    all_members += get_uniref_members_from_upi(entry[0])
+
+            ordered_seq_list[0] = (prot_id, ordered_seq_list[0][1], ordered_seq_list[0][2], ordered_seq_list[0][3])
+
+            seq_lists.append((prot_id, f'raw_{db_id}', ordered_seq_list))
+
+            min_seq_ids = [0., 25., 30., 35., 40., 50., 70., 80., 90.]
+            max_seq_ids = [70., 80., 90., 95., 99., 100.]
+            cov_threshs = [0., 0.8, 0.85, 0.9, 0.95, 1.]
+
+            thresh_combinations = []
+
+            for min_seq_id in min_seq_ids:
+                for max_seq_id in max_seq_ids:
+                    if min_seq_id >= max_seq_id:
+                        continue
+                    for cov_thresh in cov_threshs:
+                        thresh_combinations.append((min_seq_id, max_seq_id, cov_thresh))
+
+            for (min_seq_id, max_seq_id, cov_thresh) in thresh_combinations:
+                slice_subset(seq_lists, ordered_seq_list, cov_thresh, min_seq_id, max_seq_id, prot_id, target_seq, db_id)
+
+           
+            #member_seqs = get_uniprot_sequences(all_members)
+
+            target_folder = f'{config.msa_folder_path}/{clean_prot_id(prot_id)}'
+            all_member_folder = f'{target_folder}/gpw_all_members_{db_id}/'
+            all_member_gpw_fasta_file = f'{all_member_folder}/{prot_id}_gpw_all_members_{db_id}.fasta'
+
+            member_seqs = parse_gpw_fasta(all_member_gpw_fasta_file)
+
+            for (min_seq_id, max_seq_id, cov_thresh) in thresh_combinations:
+                slice_subset(seq_lists, member_seqs, cov_thresh, min_seq_id, max_seq_id, prot_id, target_seq, f'member_{db_id}')
+
+
+    return seq_lists
+
+def make_msas(seq_lists, config, overwrite = False, make_plots=False):
+    msa_lists = []
+
+    n_of_para_maffts = 10 #min([2, config.proc_n])
+
+    current_chunk = 0
+    chunks = []
+
+    for prot_id, seq_list_id, seq_list in seq_lists:
+        target_folder = f'{config.msa_folder_path}/{clean_prot_id(prot_id)}'
+        if not os.path.isdir(target_folder):
+            os.makedirs(target_folder)
+        sfn = f'{clean_prot_id(prot_id)}_msa_{seq_list_id}.fasta'
+        
+        if not os.path.isdir(f'{target_folder}/{seq_list_id}'):
+            os.makedirs(f'{target_folder}/{seq_list_id}')
+
+        if make_plots:
+            seq_id_list = sorted([x[3] for x in seq_list[1:]], reverse=True)
+
+            plt.plot([i for i in range(1,len(seq_id_list)+1)], seq_id_list, color = 'blue')
+
+            cov_list = sorted([100.*x[2] for x in seq_list[1:]], reverse=True)
+
+            plt.plot([i for i in range(1,len(cov_list)+1)], cov_list, color = 'red')
+
+            plt.savefig(f'{target_folder}/{seq_list_id}/{clean_prot_id(prot_id)}_{seq_list_id}_seq_id_distribution.png')
+            plt.clf()
+            plt.cla()
+            plt.close()
+
+        target_file = f'{target_folder}/{seq_list_id}/{sfn}'
+        if not os.path.exists(target_file) or overwrite:
+
+            if len(chunks) == current_chunk:
+                chunks.append([])
+
+            chunks[current_chunk].append((prot_id, seq_list_id, seq_list, None, target_file))
+            current_chunk += 1
+            if current_chunk >= n_of_para_maffts:
+                current_chunk = 0
+
+            #single_mafft(config, prot_id, seq_list_id, seq_list, target_file)
+
+    config_store = ray.put(config)
+
+    process_ids = []
+    for chunk in chunks:
+        if n_of_para_maffts > 1:
+            process_ids.append(para_mafft_remote_wrapper.remote(chunk, config_store))
+        else:
+            para_mafft(chunk, config)
+
+    if n_of_para_maffts > 1:
+        ray.get(process_ids)
+
+    for prot_id, seq_list_id, seq_list in seq_lists:
+        target_folder = f'{config.msa_folder_path}/{clean_prot_id(prot_id)}'
+        if not os.path.isdir(target_folder):
+            os.makedirs(target_folder)
+        sfn = f'{clean_prot_id(prot_id)}_msa_{seq_list_id}.fasta'
+        psic_file = f'{target_folder}/{seq_list_id}/{clean_prot_id(prot_id)}_msa_{seq_list_id}.psic'
+        target_file = f'{target_folder}/{seq_list_id}/{sfn}'
+
+        if not os.path.exists(psic_file) or overwrite:
+            f = open(target_file, "r")
+            try:
+                msa = f.read()
+            except UnicodeDecodeError as e:
+                print(f'Error reading msa: {target_file=}')
+                config.logger.info(f'Error reading msa: {target_file=}')
+                raise e
+            f.close()
+            psicFromFasta(msa, psic_file, config)
+
+        msa_lists.append((prot_id, target_file, psic_file, seq_list_id))
+
+        if not os.path.isdir(f'{target_folder}/gpw_{seq_list_id}'):
+            os.makedirs(f'{target_folder}/gpw_{seq_list_id}')
+
+        gpw_path = f'{target_folder}/gpw_{seq_list_id}/{clean_prot_id(prot_id)}_gpw_{seq_list_id}.fasta'
+
+        if not os.path.exists(gpw_path) or overwrite:
+            calcGPW(seq_list, gpw_path, sub_threads = config.proc_n)
+
+        gpw_psic_path = f'{target_folder}/gpw_{seq_list_id}/{clean_prot_id(prot_id)}_gpw_{seq_list_id}.psic'
+
+        check_psic_file(gpw_psic_path, target_len=len(seq_list[0][1]))
+
+        if not os.path.exists(gpw_psic_path) or overwrite:
+            f = open(gpw_path, "r")
+            try:
+                gpw = f.read()
+            except UnicodeDecodeError as e:
+                print(f'Error reading msa: {gpw_path=}')
+                config.logger.info(f'Error reading msa: {gpw_path=}')
+                raise e
+            f.close()
+            psicFromFasta(gpw, gpw_psic_path, config)
+
+        msa_lists.append((prot_id, gpw_path, gpw_psic_path, f'gpw_{seq_list_id}'))
+
+    for prot_id in os.listdir(config.msa_folder_path):
+        subfolder = f'{config.msa_folder_path}/{prot_id}'
+        if not os.path.isdir(subfolder):
+            continue
+        for sfn in os.listdir(subfolder):
+            if sfn[-10:] == '_msa.fasta':
+                msa_file = f'{subfolder}/{sfn}'
+                
+                psic_file = f'{subfolder}/{sfn[:-6]}.psic'
+                check_psic_file(psic_file, target_len=len(seq_list[0][1]))
+                if not os.path.isfile(psic_file):
+                    f = open(msa_file, "r")
+                    try:
+                        msa = f.read()
+                    except UnicodeDecodeError as e:
+                        print(f'Error reading msa: {msa_file=}')
+                        config.logger.info(f'Error reading msa: {msa_file=}')
+                        raise e
+                    f.close()
+                    psicFromFasta(msa, psic_file, config)
+
+                #af_msa_id = sfn.split('_')[-2] + '_msa'
+                af_msa_id = 'af_msa'
+
+                target_msa_file = f'{subfolder}/{af_msa_id}/{sfn}'
+                target_psic_file = f'{subfolder}/{af_msa_id}/{sfn[:-6]}.psic'
+
+                if not os.path.isdir(f'{subfolder}/{af_msa_id}/'):
+                    os.makedirs(f'{subfolder}/{af_msa_id}/')
+
+                shutil.copy(msa_file, target_msa_file)
+                shutil.copy(psic_file, target_psic_file)
+
+                msa_lists.append((prot_id, target_msa_file, target_psic_file, af_msa_id))
+
+    return msa_lists
+
+def featurize(msa_lists: list[tuple[str, str, str, str]], samples: SampleSpace, config):
+
+    #chunk = []
+    chunks = []
+    current_chunk = 0
+    for prot_id, msa_file, psic_file, seq_list_id in msa_lists:
+        path_pieces = msa_file.split('/')
+
+        subfolder = '/'.join(path_pieces[:-1])
+
+        gemme_files = []
+
+        for fi in os.listdir(subfolder):
+            if fi[-4:] != '.txt':
+                continue
+            if fi.count('normPred') > 0:
+                gemme_files.append(fi)
+
+        if len(gemme_files) == 0:
+            path_part = '/'.join(path_pieces[-3:])
+
+            if len(chunks) == current_chunk:
+                chunks.append([])
+            chunks[current_chunk].append(path_part)
+
+            current_chunk += 1
+            if current_chunk >= config.proc_n:
+                current_chunk = 0
+
+            #chunk.append(path_part)
+        
+
+    process_ids = []
+    for proc_id, chunk in enumerate(chunks):
+        process_ids.append(para_gemme.remote(chunk, config.msa_folder_path, proc_id, config.overwrite, False, 2))
+
+    #call_gemme(chunk, config.msa_folder_path, 0, None, clean=False, scope=2)
+
+    aac_map = {}
+    for u_ac, aac in samples.samples:
+        if u_ac not in aac_map:
+            aac_map[u_ac] = []
+        aac_map[u_ac].append(aac)
+
+    results = []
+
+    for prot_id, msa_file, psic_file, seq_list_id in msa_lists:
+        aac_list = aac_map[prot_id]
+        prot_mut_map = {}
+        for aac in aac_list:
+            prot_mut_map[aac] = []
+
+        if msa_file[-3:] == '.gz':
+            f = gzip.open(msa_file, "r")
+        else:
+            f = open(msa_file, 'rb')
+        msa_page = f.read()
+        f.close()
+
+        if len(msa_page) == 0:
+            continue
+
+        seq_map, seed = msa.parseMsaFasta(msa_page)
+        try:
+            seed_seq = seq_map[seed].replace("-", "")
+        except KeyError as err:
+            raise KeyError(f'{err=} {prot_id=} {seq_list_id=} {msa_file=} {msa_page=}')
+        pos_wise_map = msa.getPosWiseMSA(seq_map, seed)
+
+        feats = fill_prot_mut_map(
+            config,
+            prot_id,
+            aac_list,
+            pos_wise_map,
+            seed_seq,
+            prot_mut_map,
+            seq_list_id,
+            '',
+            True,
+            False,
+            psic_file
+            )
+        
+        path_pieces = msa_file.split('/')
+        subfolder = '/'.join(path_pieces[:-1])
+
+        #print(f'{(prot_id, msa_file, psic_file, seq_list_id)=} {subfolder=}')
+
+        for fi in os.listdir(subfolder):
+            if fi[-4:] != '.txt':
+                continue
+            if fi.count('normPred') > 0:
+                gemme_pred_type = fi[:-4].split('_')[-1]
+                feat_name = f'gemme_{gemme_pred_type}'
+                feats.append(feat_name)
+                #print(f'{fi=}')
+                parseGemmeFileToMap(f'{subfolder}/{fi}', gemme_pred_type, seed_seq, config, prot_id, prot_mut_map, '', seq_list_id, none_value=0.)
+
+        results.append((prot_id, seq_list_id, prot_mut_map, feats))
+
+    return results
+
+def bench(featurized_lists, samples: SampleSpace, config):
+    prot_wise_lists = {}
+    for sample_id in samples.samples:
+        u_ac,aac = sample_id
+        target_value = samples.samples[sample_id].targetValue
+        if target_value is None:
+            continue
+
+        if u_ac not in prot_wise_lists:
+            prot_wise_lists[u_ac] = ([], [])
+
+        prot_wise_lists[u_ac][0].append(aac)
+        prot_wise_lists[u_ac][1].append(target_value)
+
+    max_list = {}
+    msa_type_max = {}
+    gemme_combi_vals = {}
+    prot_ids = set()
+
+    spear_lines = ['Protein\tMSA ID\tMSA depth\tFeat name\tSpear\n']
+
+    for (prot_id, seq_list_id, prot_mut_map, feats) in featurized_lists:
+        prot_ids.add(prot_id)
+        feat_value_lists = {}
+        for aac in prot_wise_lists[prot_id][0]:
+            for feat_index, feat_name in enumerate(feats):
+            #for value, feat_name in prot_mut_map[aac]:
+                try:
+                    value = prot_mut_map[aac][feat_index][0]
+                except IndexError as err:
+                    #value = np.nan
+                    value = 0.
+                    #raise IndexError(f'{err=} {prot_id=} {seq_list_id=} {aac=} {feat_name=} {prot_mut_map[aac]=}')
+                if value is None:
+                    value = 0.
+                if feat_name not in feat_value_lists:
+                    feat_value_lists[feat_name] = []
+                feat_value_lists[feat_name].append(value)
+
+        msa_depth = feat_value_lists['MSA depth'][0]
+
+        spear_tuples = []
+
+        for feat_name in feat_value_lists:
+            feat_vec = feat_value_lists[feat_name]
+
+            try:
+                spear, _= stats.spearmanr(prot_wise_lists[prot_id][1] ,feat_vec)
+            except (TypeError, ValueError) as err:
+                print(f'Catched {err=} {prot_id=} {seq_list_id=} {feat_name=} {len(feat_vec)=} {len(prot_wise_lists[prot_id][1])=} {len(prot_wise_lists[prot_id][0])=}')
+                spear = None
+
+            if spear is not None and not np.isnan(spear):
+                spear_tuples.append((feat_name, spear))
+
+                if prot_id not in max_list:
+                    max_list[prot_id] = (seq_list_id, spear, msa_depth, feat_name)
+                elif abs(spear) > abs(max_list[prot_id][1]):
+                    max_list[prot_id] = (seq_list_id, spear, msa_depth, feat_name)
+
+                if seq_list_id not in msa_type_max:
+                    msa_type_max[seq_list_id] = {}
+                    gemme_combi_vals[seq_list_id] = [], {}
+                if prot_id not in msa_type_max[seq_list_id]:
+                    msa_type_max[seq_list_id][prot_id] = (spear, msa_depth, feat_name)
+                elif abs(spear) > msa_type_max[seq_list_id][prot_id][0]:
+                    msa_type_max[seq_list_id][prot_id] = (spear, msa_depth, feat_name)
+
+                if feat_name == 'gemme_evolCombi':
+                    gemme_combi_vals[seq_list_id][0].append(spear)
+                    gemme_combi_vals[seq_list_id][1][prot_id] = feat_vec
+
+            spear_lines.append(f'{prot_id}\t{seq_list_id}\t{msa_depth}\t{feat_name}\t{spear}\n')
+
+            #print(f'{seq_list_id=} {prot_id=} {msa_depth=} {feat_name=} {spear=}')
+
+        spear_tuples = sorted(spear_tuples, key=lambda x:abs(x[1]), reverse=True)
+
+        config.logger.info(f'{seq_list_id=} {prot_id=} {msa_depth=} {spear_tuples[0:3]=}')
+    prot_ids = list(prot_ids)
+
+    config.logger.info(f'{max_list=}')
+
+    all_spears_file = f'{config.msa_folder_path}/all_spears.tsv'
+
+    f = open(all_spears_file, 'w')
+    f.write(''.join(spear_lines))
+    f.close()
+
+    prot_wise_max_file = f'{config.msa_folder_path}/prot_wise_max.tsv'
+    lines = ['Prot\tMSA ID\tMSA depth\tFeat name\tSpear\n']
+    for prot_id in max_list:
+        (seq_list_id, spear, msa_depth, feat_name) = max_list[prot_id]
+        lines.append(f'{prot_id}\t{seq_list_id}\t{msa_depth}\t{feat_name}\t{spear}\n')
+
+    f = open(prot_wise_max_file, 'w')
+    f.write(''.join(lines))
+    f.close()
+
+    avg_msa_type_spears = []
+
+    for seq_list_id in msa_type_max:
+        spears = []
+        feat_names = set()
+        depths = []
+        for prot_id in msa_type_max[seq_list_id]:
+            spears.append(abs(msa_type_max[seq_list_id][prot_id][0]))
+            feat_names.add(msa_type_max[seq_list_id][prot_id][2])
+            depths.append(msa_type_max[seq_list_id][prot_id][1])
+        avg_spear = sum(spears)/len(spears)
+        avg_depth = sum(depths)/len(depths)
+
+        avg_msa_type_spears.append((seq_list_id, avg_spear, avg_depth, feat_names))
+
+    avg_msa_type_spears = sorted(avg_msa_type_spears, key= lambda x:x[1], reverse=True)
+
+    config.logger.info(f'{avg_msa_type_spears=}')
+
+    avg_msa_spears_file = f'{config.msa_folder_path}/avg_msa_spears.tsv'
+    lines = ['MSA ID\tAvg MSA depth\tFeat names\tAvg Spear\n']
+    for seq_list_id, avg_spear, avg_depth, feat_names in avg_msa_type_spears:
+        lines.append(f'{seq_list_id}\t{avg_depth}\t{feat_names}\t{avg_spear}\n')
+
+    f = open(avg_msa_spears_file, 'w')
+    f.write(''.join(lines))
+    f.close()
+
+    avg_gemme_combi_vals = []
+    for seq_list_id in gemme_combi_vals:
+        if len(gemme_combi_vals[seq_list_id][0]) == 0:
+            continue
+        avg = sum(gemme_combi_vals[seq_list_id][0])/len(gemme_combi_vals[seq_list_id][0])
+        feat_vecs = []
+        try:
+            for prot_id in prot_ids:
+                feat_vecs.append(gemme_combi_vals[seq_list_id][1][prot_id])
+        except KeyError:
+            continue
+        avg_gemme_combi_vals.append((seq_list_id, avg, feat_vecs))
+
+    combination = []
+
+    for seq_list_id_a, val_a, feat_vecs_a in avg_gemme_combi_vals:
+        for seq_list_id_b, val_b, feat_vecs_b in avg_gemme_combi_vals:
+            if seq_list_id_a == seq_list_id_b:
+                continue
+            spears = []
+            for index, feat_vec_a in enumerate(feat_vecs_a):
+                feat_vec_b = feat_vecs_b[index]
+                spear, _= stats.spearmanr(feat_vec_a, feat_vec_b)
+                spears.append(spear)
+
+            avg_spear = sum(spears)/len(spears)
+
+            combi_score = abs(val_a) + abs(val_b) - abs(avg_spear)
+
+            combination.append((seq_list_id_a, seq_list_id_b, val_a, val_b, avg_spear, combi_score))
+
+    combination = sorted(combination, key=lambda x:x[5], reverse=True)
+
+    combi_file = f'{config.msa_folder_path}/msa_combinations.tsv'
+    lines = ['MSA ID A\tMSA ID B\tAvg Spear A\tAvg Spear B\tAvg Gemme Combi Spear\tCombi score\n']
+    for seq_list_id_a, seq_list_id_b, val_a, val_b, avg_spear, combi_score in combination:
+        lines.append(f'{seq_list_id_a}\t{seq_list_id_b}\t{val_a}\t{val_b}\t{avg_spear}\t{combi_score}\n')
+
+    f = open(combi_file, 'w')
+    f.write(''.join(lines))
+    f.close()
+
+    config.logger.info(f'{combination[:100]=}')
+
+def msa_bench(config, samples: SampleSpace):
+    t0 = time.time()
+
+    seq_lists = prepare_seq_lists(config, samples)
+
+    t1 = time.time()
+    print(f'prepare_seq_lists done: {t1-t0}')
+
+    msa_lists = make_msas(seq_lists, config)
+
+    t2 = time.time()
+    print(f'make_msas done: {t2-t1}')
+
+    featurized_lists = featurize(msa_lists, samples, config)
+
+    t3 = time.time()
+    print(f'featurize done: {t3-t2}')
+
+    bench(featurized_lists, samples, config)
+
+    t4 = time.time()
+    print(f'bench done: {t4-t3}')
 
 def getSequenceFeatures(config, samples, n_of_processes=6, update_mode=False):
     
     
-    config.msa_dbs = ['smsa']
+    #config.msa_dbs = ['smsa']
+    config.msa_dbs = ['gpw_distant', 'gpw_close']
     config.gpw_dbs = []
     initFeatures(config, samples)
     #msa_map, gpw_map = local_ali_pipeline(config, samples, n_of_processes=n_of_processes, update_mode=update_mode)
 
-    msa_map, gemme_predictions, prot_id_back_map = afdb_msa_pipeline(config, samples)
+    #msa_map, prot_id_back_map = afdb_msa_pipeline(config, samples)
+    msa_map, prot_id_back_map = gpw_pipeline(config, samples)
+    
     gpw_map = {}
 
     packages = []
@@ -946,10 +1823,6 @@ def getSequenceFeatures(config, samples, n_of_processes=6, update_mode=False):
         current_package += 1
         if current_package >= config.proc_n:
             current_package = 0
-
-    if config.verbosity >=3:
-        config.logger.info(f'{msa_map=}')
-
     
     if len(packages) > 1:
         msa_store = ray.put((msa_map, gpw_map, config))
@@ -972,6 +1845,32 @@ def getSequenceFeatures(config, samples, n_of_processes=6, update_mode=False):
                 prot_id = prot_id_back_map[u_ac]
             else:
                 prot_id = u_ac
+            
+
+            target_folder = f'{config.msa_folder_path}/{clean_prot_id(prot_id)}'
+            
+            seq = samples.sequence_map[prot_id][0]
+
+            for seq_list_id in config.msa_dbs:
+                sub_folder = f'{target_folder}/{seq_list_id}'
+                target_file = f'{sub_folder}/{clean_prot_id(prot_id)}_{seq_list_id}.fasta'
+
+                path_pieces = target_file.split('/')
+                subfolder = '/'.join(path_pieces[:-1])
+
+                if not os.path.exists(subfolder):
+                    continue
+                    #raise FileNotFoundError(f'{subfolder=} {u_ac=} {prot_id=} {target_folder=} {seq_list_id=} {target_file=}')
+
+                for fi in os.listdir(subfolder):
+                    if fi[-4:] != '.txt':
+                        continue
+                    if fi.count('normPred') > 0:
+                        gemme_pred_type = fi[:-4].split('_')[-1]
+                        feat_name = f'gemme_{gemme_pred_type}'
+
+                        parseGemmeFileToMap(f'{subfolder}/{fi}', gemme_pred_type, seq, config, prot_id, prot_mut_map, seq_list_id, 'MSA')
+
             for aac in prot_mut_map:
                 for value, feat_name in prot_mut_map[aac]:
                     samples.addValue((prot_id, aac), value, feat_name, config=config)
@@ -1040,11 +1939,11 @@ def calcSeqFeat(package, msa_map, gpw_map, config):
                     u_ac = clean_prot_id(u_ac)
                 else:
                     if config.verbosity >= 1:
-                        config.logger.info(f"Filtered {u_ac}, since it was not in the results_map: {db_name} ({is_gpw})")
+                        config.logger.info(f"Filtered {u_ac}, since it was not in the results_map: {db_name} ({is_gpw=})")
                     continue
             if db_name not in results_map[u_ac]:
                 if config.verbosity >= 1:
-                    config.logger.info(f"Filtered {u_ac} since db_name {db_name} was not in the results_map_map[u_ac], {is_gpw}")
+                    config.logger.info(f"Filtered {u_ac} since db_name {db_name} was not in the results_map[u_ac], {is_gpw=}")
                 continue
 
             gpw_file_path = results_map[u_ac][db_name]
@@ -1092,78 +1991,129 @@ def calcSeqFeat(package, msa_map, gpw_map, config):
                 pos_wise_map = msa.getPosWiseMSA(seq_map, seed)
                 psic_name = f'{gpw_file_path[:-6]}.psic'
 
-            (psic_wt_map, psic_mut_map, dpsic_map, positional_dpsic_map, window_dpsic_map, protein_median_dpsic) = msa.calcPsicProfiles(config, u_ac, aacs, seed_seq, db_name, gpw=is_gpw, psic_name=psic_name)
+            fill_prot_mut_map(
+                config,
+                u_ac,
+                aacs,
+                pos_wise_map,
+                seed_seq,
+                prot_mut_map,
+                feature_name_tag,
+                db_name,
+                first_db,
+                is_gpw,
+                psic_name
+                )
 
-            config.logger.info(f'After calcPSicProfiles: {u_ac=} {len(aacs)=} {len(psic_wt_map)=} {len(dpsic_map)=}')
-            
-            err_count = 0
-            for aac in aacs:
-                aa1 = aac[0]
-                aa2 = aac[-1]
-                pos = int(aac[1:-1]) - 1
-                if pos > 38 and pos < 40:
-                    config.logger.info(f'dpsic slice: {u_ac=} {aac=} {dpsic_map[aac]=}')
-                if pos >= len(pos_wise_map):
-                    if config.verbosity >= 1:
-                        config.logger.info(f"Filtered {u_ac=}, {pos=} {aac=}, since it was outside of the seed_seq, {len(seed_seq)=} {len(pos_wise_map)=}")
-                    continue
-
-                if aac not in psic_wt_map:
-                    if config.verbosity >= 1 and err_count < 5:
-                        config.logger.info(f"Filtered {u_ac=} {aac=} not in {len(psic_wt_map)=}")
-                        err_count += 1
-                    continue
-
-                n_wt_aa = 0.0
-                n_mut_aa = 0.0
-                n_gap = 0.0
-                n_dif_aa = 0.0
-                s = float(len(pos_wise_map[0]))
-                for al_seq_aa in pos_wise_map[pos]:
-                    if al_seq_aa == aa1:
-                        n_wt_aa += 1.0
-                    elif al_seq_aa == aa2:
-                        n_mut_aa += 1.0
-                    elif al_seq_aa == "-":
-                        n_gap += 1.0
-                    else:
-                        n_dif_aa += 1.0
-                wt_rate = n_wt_aa / s
-                mut_rate = n_mut_aa / s
-                gl_wt_rate = n_wt_aa / (s - n_gap)
-                gl_mut_rate = n_mut_aa / (s - n_gap)
-                coverage = (s - n_gap) / s
-                dif_rate = n_dif_aa / s
-                gl_dif_rate = n_dif_aa / (s - n_gap)
-
-                prot_mut_map[aac].append((wt_rate, f"Wildtype AA rate {feature_name_tag} {db_name}"))
-                prot_mut_map[aac].append((mut_rate, f"Mutant AA rate {feature_name_tag} {db_name}"))
-
-                prot_mut_map[aac].append((gl_wt_rate, f"Wildtype AA rate gapless {feature_name_tag} {db_name}"))
-                prot_mut_map[aac].append((gl_mut_rate, f"Mutant AA rate gapless {feature_name_tag} {db_name}"))
-                prot_mut_map[aac].append((coverage, f"MSA allel freq {feature_name_tag} {db_name}"))
-                prot_mut_map[aac].append((dif_rate, f"Other mutant AA rate {feature_name_tag} {db_name}"))
-                prot_mut_map[aac].append((gl_dif_rate, f"Other mutant AA rate gapless {feature_name_tag} {db_name}"))
-
-                prot_mut_map[aac].append((psic_wt_map[aac], f"PSIC wildtype AA {feature_name_tag} {db_name}"))
-                prot_mut_map[aac].append((psic_mut_map[aac], f"PSIC mutant AA {feature_name_tag} {db_name}"))
-                prot_mut_map[aac].append((dpsic_map[aac], f"dPSIC {feature_name_tag} {db_name}"))
-
-                prot_mut_map[aac].append((positional_dpsic_map[aac], f"Positional median dPSIC {feature_name_tag} {db_name}"))
-                try:
-                    wdpsic = window_dpsic_map[aac]
-                except KeyError:
-                    wdpsic = None
-                prot_mut_map[aac].append((wdpsic, f"Window median dPSIC {feature_name_tag} {db_name}"))
-                prot_mut_map[aac].append((protein_median_dpsic, f"Protein median dPSIC {feature_name_tag} {db_name}"))
-                if first_db:
-                    prot_mut_map[aac].append((pos, "Sequence Position Number"))
-                    prot_mut_map[aac].append((pos / len(seed_seq), "Relative Sequence Position"))
-                    prot_mut_map[aac].append((len(seed_seq), "Protein Size"))
             first_db = False
         config.logger.info(f'Adding to results: {u_ac=} {len(prot_mut_map)=}')
         results.append((u_ac, prot_mut_map))
     return results
+
+def fill_prot_mut_map(
+        config,
+        u_ac,
+        aacs,
+        pos_wise_map,
+        seed_seq,
+        prot_mut_map,
+        feature_name_tag,
+        db_name,
+        first_db,
+        is_gpw,
+        psic_name
+        ):
+    (psic_wt_map, psic_mut_map, dpsic_map, positional_dpsic_map, window_dpsic_map, protein_median_dpsic) = msa.calcPsicProfiles(config, u_ac, aacs, seed_seq, db_name, gpw=is_gpw, psic_name=psic_name)
+
+    config.logger.info(f'After calcPSicProfiles: {u_ac=} {len(aacs)=} {len(psic_wt_map)=} {len(dpsic_map)=}')
+    
+    err_count = 0
+    for aac in aacs:
+        aa1 = aac[0]
+        aa2 = aac[-1]
+        pos = int(aac[1:-1]) - 1
+        
+        if pos >= len(pos_wise_map):
+            if config.verbosity >= 1:
+                config.logger.info(f"Filtered {u_ac=}, {pos=} {aac=}, since it was outside of the seed_seq, {len(seed_seq)=} {len(pos_wise_map)=}")
+            continue
+
+        if aac not in psic_wt_map:
+            if config.verbosity >= 1 and err_count < 5:
+                config.logger.info(f"Filtered {u_ac=} {aac=} not in {len(psic_wt_map)=}")
+                err_count += 1
+            continue
+
+        n_wt_aa = 0.0
+        n_mut_aa = 0.0
+        n_gap = 0.0
+        n_dif_aa = 0.0
+        s = float(len(pos_wise_map[0]))
+        for al_seq_aa in pos_wise_map[pos]:
+            if al_seq_aa == aa1:
+                n_wt_aa += 1.0
+            elif al_seq_aa == aa2:
+                n_mut_aa += 1.0
+            elif al_seq_aa == "-":
+                n_gap += 1.0
+            else:
+                n_dif_aa += 1.0
+        wt_rate = n_wt_aa / s
+        mut_rate = n_mut_aa / s
+        gl_wt_rate = n_wt_aa / (s - n_gap)
+        gl_mut_rate = n_mut_aa / (s - n_gap)
+        coverage = (s - n_gap) / s
+        dif_rate = n_dif_aa / s
+        gl_dif_rate = n_dif_aa / (s - n_gap)
+
+        prot_mut_map[aac].append((wt_rate, f"Wildtype AA rate {feature_name_tag} {db_name}"))
+        prot_mut_map[aac].append((mut_rate, f"Mutant AA rate {feature_name_tag} {db_name}"))
+
+        prot_mut_map[aac].append((gl_wt_rate, f"Wildtype AA rate gapless {feature_name_tag} {db_name}"))
+        prot_mut_map[aac].append((gl_mut_rate, f"Mutant AA rate gapless {feature_name_tag} {db_name}"))
+        prot_mut_map[aac].append((coverage, f"MSA allel freq {feature_name_tag} {db_name}"))
+        prot_mut_map[aac].append((dif_rate, f"Other mutant AA rate {feature_name_tag} {db_name}"))
+        prot_mut_map[aac].append((gl_dif_rate, f"Other mutant AA rate gapless {feature_name_tag} {db_name}"))
+
+        prot_mut_map[aac].append((psic_wt_map[aac], f"PSIC wildtype AA {feature_name_tag} {db_name}"))
+        prot_mut_map[aac].append((psic_mut_map[aac], f"PSIC mutant AA {feature_name_tag} {db_name}"))
+        prot_mut_map[aac].append((dpsic_map[aac], f"dPSIC {feature_name_tag} {db_name}"))
+
+        prot_mut_map[aac].append((positional_dpsic_map[aac], f"Positional median dPSIC {feature_name_tag} {db_name}"))
+        try:
+            wdpsic = window_dpsic_map[aac]
+        except KeyError:
+            wdpsic = None
+        prot_mut_map[aac].append((wdpsic, f"Window median dPSIC {feature_name_tag} {db_name}"))
+        prot_mut_map[aac].append((protein_median_dpsic, f"Protein median dPSIC {feature_name_tag} {db_name}"))
+        prot_mut_map[aac].append((s, f"MSA depth {feature_name_tag} {db_name}"))
+        if first_db:
+            
+            prot_mut_map[aac].append((pos, "Sequence Position Number"))
+            prot_mut_map[aac].append((pos / len(seed_seq), "Relative Sequence Position"))
+            prot_mut_map[aac].append((len(seed_seq), "Protein Size"))
+
+    feats = [
+        f"Wildtype AA rate {feature_name_tag} {db_name}",
+        f"Mutant AA rate {feature_name_tag} {db_name}",
+        f"Wildtype AA rate gapless {feature_name_tag} {db_name}",
+        f"Mutant AA rate gapless {feature_name_tag} {db_name}",
+        f"MSA allel freq {feature_name_tag} {db_name}",
+        f"Other mutant AA rate {feature_name_tag} {db_name}",
+        f"Other mutant AA rate gapless {feature_name_tag} {db_name}",
+        f"PSIC wildtype AA {feature_name_tag} {db_name}",
+        f"PSIC mutant AA {feature_name_tag} {db_name}",
+        f"dPSIC {feature_name_tag} {db_name}",
+        f"Positional median dPSIC {feature_name_tag} {db_name}",
+        f"Window median dPSIC {feature_name_tag} {db_name}",
+        f"Protein median dPSIC {feature_name_tag} {db_name}",
+        f"MSA depth {feature_name_tag} {db_name}",
+        "Sequence Position Number",
+        "Relative Sequence Position",
+        "Protein Size",
+    ]
+    return feats
+
 
 def getPosMap(seq):
     # print seq

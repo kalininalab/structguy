@@ -79,8 +79,10 @@ class Config:
         self.python_env_expanded_for_ray = False
         self.gpu_mode = False
 
+        self.vram_limit = 1.0
         self.setup_cuda_mem = False
         self.use_external_memory_qdm = False
+        self.extMem_max_bin = 128
 
         self.plot_trees = False
 
@@ -102,8 +104,10 @@ class Config:
         self.mmseqs_path = ""
 
         self.search_dbs = []
-        self.msa_dbs = [] #['ref50']
-        self.gpw_dbs = ['ref50', 'ref90']
+        #self.msa_dbs = [] #['ref50']
+        self.msa_dbs = ['gpw_distant', 'gpw_close']
+        #self.gpw_dbs = ['ref50', 'ref90']
+        self.gpw_dbs = []
 
         self.mmseqs_search_db_ref50 = ""
         self.mmseqs_search_db_ref90 = ""

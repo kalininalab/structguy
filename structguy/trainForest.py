@@ -436,6 +436,11 @@ def xgb_train_wrapper(
     else:
         mem_context = xgb.config_context()
 
+    if not config.use_external_memory_qdm:
+        max_bin = 512
+    else:
+        max_bin = config.extMem_max_bin
+
     with mem_context:
         if not second_round:
             es = xgb.callback.EarlyStopping(
@@ -451,7 +456,7 @@ def xgb_train_wrapper(
             xgb_params = {
                 "tree_method": "hist",
                 "device": "cuda",
-                'max_bin' : 512,
+                'max_bin' : max_bin,
                 'sampling_method': 'gradient_based',
                 "max_depth": config.tree_depth,
                 "reg_alpha": config.xgb_alpha,
@@ -487,7 +492,7 @@ def xgb_train_wrapper(
             xgb_params = {
                 "tree_method": "hist",
                 "device": "cuda",
-                'max_bin' : 512,
+                'max_bin' : max_bin,
                 'sampling_method': 'gradient_based',
                 "max_depth": int(config.tree_depth_1),
                 "reg_alpha": config.xgb_alpha_1,
@@ -524,7 +529,7 @@ def setup_cuda_memory(config: util.Config, sub_share: float):
     # Set the release threshold to 90% of total device memory
     status, free, total = cudart.cudaMemGetInfo()
 
-    pool_size = int(total * 0.9 * sub_share)
+    pool_size = int(total * 0.9 * sub_share*config.vram_limit)
 
     if config.verbosity >= 4:
         config.logger.info(f'Setup cuda memory resources: {pool_size=}')
@@ -542,11 +547,11 @@ def setup_cuda_memory(config: util.Config, sub_share: float):
 #@profile
 def setup_rmm_memory(config: util.Config, sub_share: float):
     gmem = util.get_gpu_memory()[0]
-    init_pool = 1024*1024*int(gmem*sub_share*0.7)
-    max_pool = 1024*1024*int(gmem*sub_share*0.99)
+    init_pool = 1024*1024*int(gmem*sub_share*0.7*config.vram_limit)
+    max_pool = 1024*1024*int(gmem*sub_share*0.99*config.vram_limit)
 
     if config.verbosity >= 4:
-        config.logger.info(f'Setup memory resources: {init_pool=} {max_pool=} {config.multi_gpu=}')
+        config.logger.info(f'Setup memory resources: {sub_share=} {init_pool=:_} {max_pool=:_} {config.multi_gpu=}')
         
     # It's important to use RMM for GPU-based external memory to improve performance.
     # If XGBoost is not built with RMM support, a warning will be raised.
@@ -672,7 +677,7 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
     ta = add_to_times(times, ta) #3
 
     if config.verbosity >= 3:
-        config.logger.info(f'Reached after first data retrieval in double_booster_remote {proc_id}')
+        config.logger.info(f'Reached after first data retrieval in double_booster_remote {proc_id} {type(dtrain)=}')
 
 
     booster = xgb_train_wrapper(config, dtrain, dtest_feature_matrix)
@@ -1035,7 +1040,10 @@ def trainRegressionForest(
     if config.forest_type == "xgboost" and not skip_feature_selection:
         
         if sub_gpu_share is not None:
-            sub_share = sub_gpu_share/len(cv_slice.slice_slices)
+            if config.slice_by_slice:
+                sub_share = sub_gpu_share
+            else:
+                sub_share = sub_gpu_share/len(cv_slice.slice_slices)
             if sub_share < 1.0 and sub_share > 0.5:
                 sub_share = 0.5
             if config.verbosity >= 3:
@@ -1075,9 +1083,14 @@ def trainRegressionForest(
             if config_ref_container is None:
                 config_ref_container = [ray.put(config)]
             store = ray.put((feats_to_filter, pack(cv_slice), skip_scoring, score_train, raw_feature_matrix_store_id, remote))
+            
             for nested_proc_id, packed_slice_slice in enumerate(cv_slice.slice_slices):
 
                 remote_proc_ids.append(remote_function.remote(packed_slice_slice, store, f'{proc_id}_{nested_proc_id}', sub_share, config_ref_container))
+                if config.slice_by_slice:
+                    current_slice = 1
+                    break
+
 
             done = False
             y_preds = []
@@ -1135,6 +1148,13 @@ def trainRegressionForest(
                             x_preds.append(x_pred)
 
                         os.kill(db_p_id, signal.SIGTERM)
+
+                    if config.slice_by_slice:
+                        if current_slice < len(cv_slice.slice_slices):
+                            nested_proc_id = current_slice
+                            packed_slice_slice = cv_slice.slice_slices[current_slice]
+                            remote_proc_ids.append(remote_function.remote(packed_slice_slice, store, f'{proc_id}_{nested_proc_id}', sub_share, config_ref_container))
+                            current_slice += 1
 
                 remote_proc_ids = not_ready
                 if len(remote_proc_ids) == 0:

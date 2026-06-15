@@ -50,7 +50,9 @@ def parse_arguments(argument_start = 2, manual_args = None):
                 'select_samples',
                 'tpgpu=',
                 'nCV=',
-                'extmem'
+                'extmem',
+                'vram=',
+                'slice_by_slice'
             ]
             opts, args = getopt.getopt(argv, "i:n:m:d", long_paras)
 
@@ -75,7 +77,7 @@ def parse_arguments(argument_start = 2, manual_args = None):
     debug = False
 
     overwrite_proc_n = None
-    forest_type = None
+    forest_type = 'xgboost'
     test_config_path = None
 
     path_to_splits_file = None
@@ -98,6 +100,8 @@ def parse_arguments(argument_start = 2, manual_args = None):
     repeat = None
     n_cv = None
     use_external_memory_qdm = False
+    vram_limit = 1.0
+    slice_by_slice = False
 
     for opt, arg in opts:
         if opt == '-i':
@@ -196,6 +200,12 @@ def parse_arguments(argument_start = 2, manual_args = None):
         if opt == '--extmem':
             use_external_memory_qdm = True
 
+        if opt == '--vram':
+            vram_limit = float(arg)
+
+        if opt == '--slice_by_slice':
+            slice_by_slice = True
+
     if path_to_model is not None:
         if path_to_model.count('/') > 0:
             model_name = path_to_model.rsplit("/",1)[1].rsplit('.',1)[0]
@@ -214,6 +224,9 @@ def parse_arguments(argument_start = 2, manual_args = None):
 
     if skip_final_model is not None:
         config.skip_final_model = True
+
+    config.vram_limit = vram_limit
+    config.slice_by_slice = slice_by_slice
 
     config.path_to_model = path_to_model
     config.model_name = model_name
@@ -347,6 +360,12 @@ def prep_gemme():
     prepare_gemme(config)
 
 
+def bench_msas():
+    config, _ = parse_arguments()
+
+    featureGenerator.msa_bench(config)
+
+
 def generate_info():
     config: util.Config
     config, _ = parse_arguments()
@@ -357,7 +376,7 @@ def generate_info():
 def main():
 
     start_time = time.time()
-    possible_key_words = set(['generate_features', 'build_model', 'predict', 'info', 'violins', 'prep_gemme'])
+    possible_key_words = set(['generate_features', 'build_model', 'predict', 'info', 'violins', 'prep_gemme', 'bench_msas'])
 
     if len(sys.argv) < 2:
         print(disclaimer)
@@ -386,6 +405,9 @@ def main():
 
     if key_word == 'prep_gemme':
         prep_gemme()
+
+    if key_word == 'bench_msas':
+        bench_msas()
 
     print("--- %s seconds ---" % (time.time() - start_time))
 

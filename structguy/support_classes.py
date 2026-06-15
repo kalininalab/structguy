@@ -19,6 +19,7 @@ from structguy.class_utils import get_feat_matrix_from_ids, get_raw_feat_matrix_
 from structman.base_utils.base_utils import Slotted_obj
 
 MAX_QUANTILE_BATCHES = 8
+CACHE_HOST_RATIO = 0.8
 
 def calculate_chunksizes(n_of_chunks, n_of_items):
     small_chunksize = n_of_items // n_of_chunks
@@ -1139,7 +1140,13 @@ class CrossValidationSlice(Slotted_obj):
             if config.verbosity >= 5:
                 config.logger.info('Iterator is setup in get_extmem_dtrain')
 
-            ext_dtest = xgb.ExtMemQuantileDMatrix(it, ref=dtrain, enable_categorical=True, max_bin=512, max_quantile_batches = MAX_QUANTILE_BATCHES)
+            ext_dtest = xgb.ExtMemQuantileDMatrix(
+                it,
+                ref=dtrain,
+                enable_categorical=True,
+                max_bin=config.extMem_max_bin,
+                max_quantile_batches = MAX_QUANTILE_BATCHES,
+                cache_host_ratio = CACHE_HOST_RATIO)
         
             ext_dtest.encoded_prot_vec = encoded_prot_vec
 
@@ -1252,7 +1259,12 @@ class CrossValidationSlice(Slotted_obj):
             if config.verbosity >= 5:
                 config.logger.info('Iterator is setup in get_extmem_dtrain')
 
-            ext_dtrain = xgb.ExtMemQuantileDMatrix(it, enable_categorical=True, max_bin=512, max_quantile_batches = MAX_QUANTILE_BATCHES)
+            ext_dtrain = xgb.ExtMemQuantileDMatrix(
+                it,
+                enable_categorical=True,
+                max_bin=config.extMem_max_bin,
+                max_quantile_batches = MAX_QUANTILE_BATCHES,
+                cache_host_ratio = CACHE_HOST_RATIO)
             ext_dtrain.encoded_prot_vec = prot_id_vec
 
         return ext_dtrain, file_paths

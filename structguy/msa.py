@@ -4,6 +4,7 @@ import traceback
 import gzip
 import subprocess
 import ray
+import numpy as np
 
 from Bio.Align.Applications import MafftCommandline
 
@@ -152,9 +153,9 @@ def parseFasta(path, lines=None):
 
 def write_fasta(seq_map, outfile=None):
     lines = []
-    for prot_id in seq_map:
+    for prot_id, seq, _, _ in seq_map:
         lines.append(f">{prot_id}\n")
-        lines.append(f"{seq_map[prot_id]}\n")
+        lines.append(f"{seq}\n")
     page = "".join(lines)
     if outfile is None:
         return page
@@ -244,20 +245,25 @@ def blast(config, seq, name, search_db, search_db_path, search_db_sequences={}):
     page = "\n".join(fasta_lines)
     return page, search_db_sequences
 
+def rank_and_cut(seq_map: list[tuple[str, str, float, float]], max_number: int = 10_000):
+    sorted_seq_map = sorted(seq_map, key=lambda x:(x[3], x[2]), reverse=True)
+    if max_number is None:
+        return sorted_seq_map
+    cutted_map = sorted_seq_map[:max_number]
+    return cutted_map
 
 def computeMSA(
-    config,
     seq,
     u_ac,
     search_db="ref50",
     search_db_path="",
-    debug=0,
     search_db_sequences={},
     sequence_map=None,
+    keep_raw_seq_map=False,
     sub_threads=1,
     target_file=None
 ):
-    mafft_exe = config.mafft_path
+    #mafft_exe = config.mafft_path
     print("Compute MSA: ", u_ac, search_db)
 
     if sequence_map is None:
@@ -288,8 +294,12 @@ def computeMSA(
             u_ac.replace("(", "").replace(")", "").replace('/','_'),
             search_db,
         )
-        sequence_map[u_ac] = seq
+        if not keep_raw_seq_map:
+            sequence_map = rank_and_cut(sequence_map)
+            sequence_map.append((u_ac,seq,1.0,1.0))
         fasta_page = write_fasta(sequence_map, outfile=temp_fasta)
+        if len(sequence_map) == 1:
+            return fasta_page, None, None
 
     stderr = None
     # Run mafft
@@ -297,6 +307,7 @@ def computeMSA(
 
         cmds = ' '.join([
             'mafft',
+            '--nomemsave',
             '--thread',
             str(sub_threads),
             f'"{temp_fasta}"'
@@ -430,6 +441,79 @@ def updateGPW(filename, search_db, seq, sequence_map, u_ac):
 
     return gpw
 
+@ray.remote
+def remote_calcGPW(target_entry, seq_matrix, package):
+    prot_id, target_seq, _, _ = target_entry
+    aligner_class = init_bp_aligner_class()
+
+    gpw_lines = []#[f'>{prot_id}\n', f'{target_seq}\n']
+
+    for hit_id, seq_matrix_index in package:
+   
+        hit_seq = seq_matrix[seq_matrix_index].decode()
+        (target_aligned_sequence, hit_aligned_sequence) = (
+            call_biopython_alignment(
+                target_seq, hit_seq, aligner_class=aligner_class
+            )
+        )
+
+        truncated_hit_seq = []
+        for alignment_index, target_char in enumerate(target_aligned_sequence):
+            if target_char != '-':
+                truncated_hit_seq.append(hit_aligned_sequence[alignment_index])
+
+        truncated_hit_seq = ''.join(truncated_hit_seq)
+
+        gpw_lines.append(f">{hit_id}\n")
+        gpw_lines.append(f"{truncated_hit_seq}\n")
+
+    return gpw_lines
+
+def calcGPW(
+        seqlist: list[tuple[str, str, float, float]],
+        outfile: str,
+        sub_threads: int = 1,
+        ):
+    target_entry = seqlist[0]
+    target_entry_store = ray.put(target_entry)
+
+    max_len = max([len(x[1]) for x in seqlist])
+    
+    seq_matrix = np.empty(len(seqlist)-1, dtype=f'|S{max_len}')
+
+    packages = []
+    current_package = 0
+
+    for entry_index, entry in enumerate(seqlist[1:]):
+        seq_matrix[entry_index] = entry[1].encode()
+
+        if len(packages) == current_package:
+            packages.append([])
+        packages[current_package].append((entry[0], entry_index))
+        current_package += 1
+        if current_package >= sub_threads:
+            current_package = 0
+
+    seq_store = ray.put(seq_matrix)
+
+    para_alignment_ray_process_ids = []
+    for package in packages:
+        para_alignment_ray_process_ids.append(
+            remote_calcGPW.remote(target_entry_store, seq_store, package)
+        )
+
+    alignment_results = ray.get(para_alignment_ray_process_ids)
+    
+    total_gpw_lines = [f'>{target_entry[0]}\n', f'{target_entry[1]}\n']
+
+    for gpw_lines in alignment_results:
+        total_gpw_lines += gpw_lines
+
+    gpw_page = ''.join(total_gpw_lines)
+
+    f = open(outfile, 'w')
+    f.write(gpw_page)
+    f.close()
 
 def computeGPW(
     config,
@@ -438,7 +522,6 @@ def computeGPW(
     sequence_store,
     aligner_class=None,
     search_db="ref50",
-    search_db_path={},
     fasta_page=None,
     sequence_map=None,
     search_db_sequences={},
@@ -449,20 +532,9 @@ def computeGPW(
     )
 
     if sequence_map is None:
-        if fasta_page is None:
-            pass
-            # not supported at the moment
-            """
-            #Blast against search database
-            if debug >= 1:
-                print('In computeGPW sequence_map is None and fasta_page is None, try BLAST:',prot_id,search_db)
-            fasta_page,search_db_sequences = blast(seq,'%s_%s' % (prot_id,search_db),search_db,search_db_path,search_db_sequences=search_db_sequences)
-            """
+        
         if fasta_page is None:
             return None, search_db_sequences
-
-        if config.verbosity >= 1:
-            print("Blast result size: ", len(fasta_page))
 
         seq_map = parseFasta("", lines=fasta_page.split("\n"))
 
@@ -537,7 +609,7 @@ def computeGPW(
     return "".join(out_fasta_lines), search_db_sequences
 
 
-@ray.remote(max_calls=1)
+@ray.remote
 def para_align_seqs(store, sequence_store, package):
     prot_id, target_seq = store
     aligner_class = init_bp_aligner_class()
@@ -668,13 +740,13 @@ def parsePsicFile(infile):
 
 # called by sequence_feature_generation
 def calcPsicProfiles(config, prot_id, aacs, seq, ref_db_id, gpw=False, psic_name = None):
-    out_directory = get_out_directory(prot_id, config)
 
     if psic_name is None:
+        out_directory = get_out_directory(prot_id, config)
         psic_name = util.get_msa_path(out_directory, prot_id, ref_db_id, gpw=gpw, psic=True)
 
     if config.verbosity >= 2:
-        config.logger.info(f'calcPsicProfiles: {prot_id=} {len(seq)=} {ref_db_id=} {gpw=} {psic_name=} {out_directory=}')
+        config.logger.info(f'calcPsicProfiles: {prot_id=} {len(seq)=} {ref_db_id=} {gpw=} {psic_name=}')
 
     psic_profiles = parsePsicFile(psic_name)
 
