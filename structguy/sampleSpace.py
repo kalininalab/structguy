@@ -672,6 +672,7 @@ class SampleSpace(Slotted_obj):
             val_list = self.get_feature_value_vector(sample_id_list, feat_name)
             for index, sample_id in enumerate(sample_id_list):
                 prot_id ,aac = sample_id
+
                 if prot_id not in prot_wise_feature_coverage:
                     prot_wise_feature_coverage[prot_id] = {}
                 
@@ -682,7 +683,7 @@ class SampleSpace(Slotted_obj):
                     prot_wise_feature_coverage['total'][feat_name] = [0, 0, 0]
 
                 if val_list is not None:
-                    if val_list[index] is not None:
+                    if val_list[index] is not None and not np.isnan(val_list[index]):
                         prot_wise_feature_coverage[prot_id][feat_name][0] += 1
                         prot_wise_feature_coverage['total'][feat_name][0] += 1
                     if val_list[index] == 0:
@@ -696,7 +697,7 @@ class SampleSpace(Slotted_obj):
             cov = n_non_nulls/total_n
             zero_cov = n_zeros/total_n
             if cov < 0.2:
-                config.logger.info(f'Low coverage feature: {feat_name} {cov=} {zero_cov=}')
+                config.logger.info(f'Low coverage feature: {feat_name} {cov=} {zero_cov=} {n_non_nulls=}')
             if zero_cov > 0.8:
                 config.logger.info(f'High zero features: {feat_name} {cov=} {zero_cov=}')
 
@@ -787,7 +788,7 @@ class SampleSpace(Slotted_obj):
                 self.raw_feature_matrix = list(self.raw_feature_matrix)
                 del self.raw_feature_matrix[pos]
 
-    def transform_matrix_dict(self, exclude_feats = None):
+    def transform_matrix_dict(self, exclude_feats = None, config= None):
         raw_feature_matrix = []
         fixed_feat_names = []
         
@@ -809,11 +810,16 @@ class SampleSpace(Slotted_obj):
             self.sample_pos_dict[sample_id] = sample_pos
             raw_feature_matrix.append([])
             if sample_pos == 0:
+                #print(f'{sample_id=} {feature_matrix_dict[sample_id]=}')
                 for feat_name in feature_matrix_dict[sample_id]:
                     if exclude_feats is not None:
                         if feat_name in exclude_feats:
                             continue
                     self.feat_pos_dict[feat_name] = len(self.feat_pos_dict)
+
+                    if config is not None:
+                        config.logger.info(f'Setting {feat_name=} to feat_pos_dict')
+
                     fixed_feat_names.append(feat_name)
             for feat_name in fixed_feat_names:
                 try:
@@ -834,7 +840,8 @@ class SampleSpace(Slotted_obj):
     def get_feature_value_vector(self, sample_ids, feat_name):
         try:
             feature_id = self.feat_pos_dict[feat_name]
-        except KeyError:
+        except KeyError as err:
+            print(f'Error in get_feature_value_vector: {err=}')
             return None
         feature_value_vector = []
         sample_positions = []

@@ -54,4 +54,5 @@ feat_name_category_dict = {
     'simple_class' : (12, 3),
     'structural_classification' : (12, 3),
     'ssa' : (7, 0),
+    'link_length': (7, 0)
 }

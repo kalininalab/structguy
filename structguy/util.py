@@ -2094,8 +2094,9 @@ def categorize_feat_by_name(featname):
         return feat_name_category_dict[featname]
     if featname.count('GPW ref') > 0:
         return 0, None
-    if featname.count('MSA smsa') > 0:
+    if featname.count('MSA ') > 0:
         return 0, None
+
     if featname[:5] == 'gemme':
         return 0, None
     if featname[1:3] == 'c ':

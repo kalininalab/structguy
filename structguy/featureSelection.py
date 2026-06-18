@@ -682,11 +682,15 @@ def filterCorrelatedFeats(
                 
                 if feat_score_a > feat_score_b:
                     feats_to_filter.add(feat_name_b)
+                    if config.verbosity >= 3:
+                        config.logger.info(f'Filtering {feat_name_b} due its {corr=} to {feat_name_a}')
                 else:
-                    feats_to_filter.add(feat_name_b)
+                    feats_to_filter.add(feat_name_a)
+                    if config.verbosity >= 3:
+                        config.logger.info(f'Filtering {feat_name_a} due its {corr=} to {feat_name_b}')
 
     if config.verbosity >= 3:
-        print(f'Filtering correlated features {thresh=} {len(feats_to_filter)=}')
+        config.logger.info(f'Filtering correlated features {thresh=} {len(feats_to_filter)=}')
 
     return list(feats_to_filter)
 

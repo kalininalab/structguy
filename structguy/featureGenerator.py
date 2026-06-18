@@ -376,10 +376,10 @@ def createTrainingSet(
             config.path_to_processed_features_file = f"{config.outfolder}/{config.dataset_name}_structguy_features_processed.dump"
             if not stop_matrix_transformation:
                 t_0 = time.time()
-                samples.transform_matrix_dict()
+                samples.transform_matrix_dict(config = config)
                 samples.calc_subsamples_feat_corr_matrix(config)
                 t_1 = time.time()
-                config.logger.info(f'Time for calculating feat_corr_matrix: {t_1-t_0}')
+                config.logger.info(f'Time for calculating feat_corr_matrix 1: {t_1-t_0}')
                 stop_matrix_transformation = True
             samples.dump(config.path_to_processed_features_file)
 
@@ -402,7 +402,7 @@ def createTrainingSet(
                     samples.transform_matrix_dict()
                     samples.calc_subsamples_feat_corr_matrix(config)
                     t_1 = time.time()
-                    config.logger.info(f'Time for calculating feat_corr_matrix: {t_1-t_0}')
+                    config.logger.info(f'Time for calculating feat_corr_matrix 2: {t_1-t_0}')
                     stop_matrix_transformation = True
                 samples.dump(config.path_to_processed_features_file)
 
@@ -424,7 +424,7 @@ def createTrainingSet(
         samples.transform_matrix_dict()
         samples.calc_subsamples_feat_corr_matrix(config)
         t_1 = time.time()
-        config.logger.info(f'Time for calculating feat_corr_matrix: {t_1-t_0}')
+        config.logger.info(f'Time for calculating feat_corr_matrix 3: {t_1-t_0}')
     return samples
 
 
