@@ -372,11 +372,72 @@ def generate_info():
 
     featureAnalysis.get_model_info(config)
 
+def check_data():
+    config: util.Config
+    config, _ = parse_arguments()
+
+    samples = featureGenerator.createTrainingSet(config, for_prediction=True)
+
+    pos_to_sample_id = {pos: sample_id for sample_id, pos in samples.sample_pos_dict.items()}
+
+    outfile = f"{config.outfolder}/{config.dataset_name}_structguy_feature_stats.tsv"
+    outlines = ['Feature\tN\tMinimum\tMin Sample\tMaximum\tMax Sample\tMean\tVariance\tMedian']
+    for feat_name in samples.feature_names:
+        feat_pos = samples.feat_pos_dict[feat_name]
+
+        min_val = None
+        max_val = None
+        min_sample_id = None
+        max_sample_id = None
+        values = []
+        for pos, row in enumerate(samples.raw_feature_matrix):
+            value = row[feat_pos]
+            if value is None:
+                continue
+            values.append(value)
+            sample_id = pos_to_sample_id[pos]
+            if min_val is None or value < min_val:
+                min_val = value
+                min_sample_id = sample_id
+            if max_val is None or value > max_val:
+                max_val = value
+                max_sample_id = sample_id
+
+        n = len(values)
+        if n == 0:
+            outlines.append(f'{feat_name}\t0\tNA\tNA\tNA\tNA\tNA\tNA\tNA')
+            continue
+
+        u_ac, aac = min_sample_id
+        min_sample_str = f'{u_ac}_{aac}'
+        u_ac, aac = max_sample_id
+        max_sample_str = f'{u_ac}_{aac}'
+
+        mean_val = sum(values) / n
+        variance_val = sum((value - mean_val) ** 2 for value in values) / n
+        median_val = util.median(values)
+
+        outlines.append(f'{feat_name}\t{n}\t{min_val}\t{min_sample_str}\t{max_val}\t{max_sample_str}\t{mean_val}\t{variance_val}\t{median_val}')
+
+    with open(outfile, 'w') as f:
+        f.write('\n'.join(outlines))
+
+    config.logger.info(f'Wrote feature statistics to {outfile}')
+
 #@profile
 def main():
 
     start_time = time.time()
-    possible_key_words = set(['generate_features', 'build_model', 'predict', 'info', 'violins', 'prep_gemme', 'bench_msas'])
+    possible_key_words = set([
+        'generate_features', 
+        'build_model', 
+        'predict', 
+        'info', 
+        'violins', 
+        'prep_gemme', 
+        'bench_msas',
+        'check_data'
+        ])
 
     if len(sys.argv) < 2:
         print(disclaimer)
@@ -408,6 +469,9 @@ def main():
 
     if key_word == 'bench_msas':
         bench_msas()
+
+    if key_word == 'check_data':
+        check_data()
 
     print("--- %s seconds ---" % (time.time() - start_time))
 

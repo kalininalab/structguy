@@ -282,13 +282,16 @@ class CrossValidationSlice(Slotted_obj):
 
         for sample_id in self.train_sample_ids:
             sample = sample_dict[sample_id]
+            if sample.targetValue is None or numpy.isnan(sample.targetValue):
+                config.logger.info(f'Warning in CrossValidationSlice init: {sample.targetValue=} {sample_id=}')
+                continue
             self.train_targets.append(sample.targetValue)
             self.slice_specific_features[sample_id] = {}
             if train_equal_test:
                 self.test_targets.append(sample.targetValue)
 
-        self.train_targets = numpy.array(self.train_targets)
-        self.test_targets = numpy.array(self.test_targets)
+        self.train_targets = numpy.array(self.train_targets, dtype=float)
+        self.test_targets = numpy.array(self.test_targets, dtype=float)
 
         self.sub_sampled_train_targets = []
 
@@ -504,8 +507,11 @@ class CrossValidationSlice(Slotted_obj):
 
     def printBalance(self, config):
         if config.regression:
-            if len(self.test_targets) > 0:
-                config.logger.info(f'{self.name} Mean train target value: {sum(self.train_targets)/len(self.train_targets)} Mean test target value: {sum(self.test_targets)/len(self.test_targets)}')
+            if len(self.test_targets) > 0 and len(self.train_targets) > 0:
+                try:
+                    config.logger.info(f'{self.name} Mean train target value: {sum(self.train_targets)/len(self.train_targets)} Mean test target value: {sum(self.test_targets)/len(self.test_targets)}')
+                except TypeError as err:
+                    raise TypeError(f'{err=} {self.test_targets=}')
             config.logger.info(f'{self.name} Test set size: {len(self.test_targets)}, Train set size: {len(self.train_targets)}, Feats: {len(self.feature_names)}')
             try:
                 config.logger.info(f'{self.feature_names[:5]}\n...\n{self.feature_names[-5:]}')
@@ -935,13 +941,13 @@ class CrossValidationSlice(Slotted_obj):
         except TypeError:
             self.feature_names = list(self.feature_names)
             del self.feature_names[del_pos]
-        except:    
+        except BaseException as err:    
             if feat_name not in self.feature_names:
                 return
             [e, f, g] = sys.exc_info()
             g = traceback.format_exc()
-            print('Remove feature failed: ', feat_name, e, f, g, '\n', feat_pos, feat_name in self.feature_names, '\n', self.feature_names)
-            sys.exit()
+            raise(f'Remove feature failed: {err=} {feat_name=}, {e=}, {f=}, {g=}\n {feat_pos=}, {feat_name in self.feature_names=}\n {self.feature_names=}')
+            
 
     def deactivateFeature(self,feat_name, print_out = False):
         if print_out:

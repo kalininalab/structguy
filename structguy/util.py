@@ -115,8 +115,15 @@ class Config:
 
         for (opt, arg) in search_db_opt_args:
             if opt == 'search_db_folder':
-                self.mmseqs_search_db_ref50 = f'{arg}/uniref50_search_db'
-                self.mmseqs_search_db_ref90 = f'{arg}/uniref90_search_db'
+                u50_stem = f'{arg}/uniref50_search_db'
+                u90_stem = f'{arg}/uniref90_search_db'
+
+                self.mmseqs_search_db_ref50 = u50_stem
+                self.mmseqs_search_db_ref90 = u90_stem
+
+                print(f'Setting mmseqs_search_db_ref50 to {u50_stem}')
+                print(f'Setting mmseqs_search_db_ref90 to {u90_stem}')
+
 
         self.mmseqs_tmp_folder = ''
         self.tmp_folder = None
@@ -1221,20 +1228,23 @@ class Scores:
             return self.roc
 
 
-def calc_protein_wise_corr(y_test, y_pred, prot_id_vec, corr_function, mono_return_score_function = False):
+def calc_protein_wise_corr(y_test, y_pred, prot_id_vec, corr_function, mono_return_score_function = False, y_std = None):
     test_pred_pairs = {}
     for sample_nr, yt_value in enumerate(y_test):
         prot_id = prot_id_vec[sample_nr]
         if isinstance(prot_id, tuple):
             prot_id = prot_id[0]
         if prot_id not in test_pred_pairs:
-            test_pred_pairs[prot_id] = [], []
+            test_pred_pairs[prot_id] = [], [], []
         test_pred_pairs[prot_id][0].append(yt_value)
         test_pred_pairs[prot_id][1].append(y_pred[sample_nr])
+        if y_std is not None:
+            test_pred_pairs[prot_id][2].append(y_std[sample_nr])
 
     prot_wise_corrs = []
     prot_wise_raw_corrs = []
     corrs = []
+    err_corrs = []
     for prot_id in test_pred_pairs:
         try:
             if not mono_return_score_function:
@@ -1243,15 +1253,26 @@ def calc_protein_wise_corr(y_test, y_pred, prot_id_vec, corr_function, mono_retu
                 raw_corr = corr_function(test_pred_pairs[prot_id][0], test_pred_pairs[prot_id][1])
         except ValueError:
             continue
+
+        if y_std is not None:
+            error_vector = np.absolute(np.array(test_pred_pairs[prot_id][0]) - np.array(test_pred_pairs[prot_id][1]))
+            if not mono_return_score_function:
+                err_corr, _ = corr_function(error_vector, np.array(test_pred_pairs[prot_id][2]))
+            else:
+                err_corr = corr_function(error_vector, np.array(test_pred_pairs[prot_id][2]))
+            err_corrs.append(err_corr)
         corr = abs(raw_corr)
         prot_wise_corrs.append((prot_id, corr))
-        prot_wise_raw_corrs.append((prot_id, corr))
+        prot_wise_raw_corrs.append((prot_id, raw_corr))
         corrs.append(corr)
     if len(corrs) > 0:
         mean_corr = sum(corrs)/len(corrs)
     else:
         mean_corr = 0
-    return prot_wise_corrs, mean_corr, prot_wise_raw_corrs
+    if y_std is not None:
+        return prot_wise_corrs, mean_corr, prot_wise_raw_corrs, err_corrs
+    else:
+        return prot_wise_corrs, mean_corr, prot_wise_raw_corrs
 
 
 def rho_eval_for_xgboost(predt: np.ndarray, dtest: xgb.DMatrix) -> tuple[str, float]:

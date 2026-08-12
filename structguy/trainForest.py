@@ -393,13 +393,20 @@ def booster_list_process_and_predict(booster_list, cv_slice: CrossValidationSlic
     y_pred = numpy.mean(y_preds, axis=0)
     return y_pred
 
-def booster_list_predict(booster_list, feat_mats: list[xgb.DMatrix], n_row_slice = 50_000):
+def booster_list_predict(
+        booster_list: list[tuple[xgb.Booster, any]],
+        feat_mats: list[xgb.DMatrix],
+        n_row_slice = 50_000,
+        get_std_vec = False
+        ):
     y_preds = []
+    y_stds = []
     for booster_index, (booster, _) in enumerate(booster_list):
         feat_mat = feat_mats[booster_index]
         total_rows = feat_mat.num_row()
 
         y_pred = numpy.array([])
+        y_std_vec = numpy.array([])
         for i in range(0, total_rows, n_row_slice):
             # Calculate end index, ensuring we don't exceed total_rows
             end = min(i + n_row_slice, total_rows)
@@ -409,11 +416,29 @@ def booster_list_predict(booster_list, feat_mats: list[xgb.DMatrix], n_row_slice
             
             # Slice the DMatrix
             dslice = feat_mat.slice(indices)
-            y_pred = numpy.concatenate((y_pred, booster.predict(dslice)))
+
+            if get_std_vec:
+                
+                full_pred_matrix = booster.predict(dslice, pred_contribs=True)
+
+                pred_vector = numpy.mean(full_pred_matrix, axis=1)
+                STD_vector = numpy.std(full_pred_matrix[:, :-1], axis=1)
+
+                y_pred = numpy.concatenate((y_pred, pred_vector))
+                y_std_vec = numpy.concatenate((y_std_vec, STD_vector))
+            else:
+                pred_vector = booster.predict(dslice)
+                y_pred = numpy.concatenate((y_pred, pred_vector))
 
         y_preds.append(y_pred)
+        if get_std_vec:
+            y_stds.append(y_std_vec)
     y_pred = numpy.mean(y_preds, axis=0)
-    return y_pred
+    if get_std_vec:
+        y_std = numpy.mean(y_stds, axis=0)
+        return y_pred, y_std
+    else:
+        return y_pred
 
 #@profile
 def xgb_train_wrapper(

@@ -40,11 +40,17 @@ from structguy.util import (
 from structguy.consts import feature_categories
 
 from xgboost import plot_tree, DMatrix, build_info, Booster
+import xgboost as xgb
 import matplotlib.pyplot as plt
 
 
 def xgbFeatureImportances(bst, config):
-    feat_importance_map = bst.get_score(importance_type='gain')
+    try:
+        feat_importance_map = bst.get_score(importance_type='gain')
+    except xgb._c_api.XGBoostError as err:
+        print(f'Catched in xgbFeatureImportances {err=}')
+        return {}
+
     feat_score_tuples = []
     for feature_name in feat_importance_map:
         score = feat_importance_map[feature_name]
@@ -525,7 +531,7 @@ def evaluate_dataset(config: Config):
     booster_list, extern_feature_names_list, impute_map, model_config, feat_stats, extern_features = loadModel(config.path_to_model)
     t1 = time.time()
 
-    config.logger.info(f"Time for loading model: {t1 - t0}")
+    config.logger.info(f"Time for loading model: {t1 - t0} {config.path_to_model=}")
 
     if config.verbosity >= 4:
         config.logger.info(f"{feat_stats=}")
@@ -597,7 +603,7 @@ def evaluate_dataset(config: Config):
             enable_categorical=True,
             feature_names = extern_feature_names_list)
         test_feat_mats.append(dtest_feature_matrix)
-    y_pred = trainForest.booster_list_predict(booster_list, test_feat_mats)
+    y_pred, y_std = trainForest.booster_list_predict(booster_list, test_feat_mats, get_std_vec=True)
 
     if config.path_to_multi_savs_table is not None:
         multi_savs = parse_multi_savs_table(config)
@@ -605,6 +611,7 @@ def evaluate_dataset(config: Config):
         effect_dict = {}
         mm_y_pred = []
         combined_y_pred = []
+        combined_y_std = []
         mm_test_targets = []
         combined_test_targets = []
         mm_sample_id_list = []
@@ -617,10 +624,13 @@ def evaluate_dataset(config: Config):
             effect_dict[sample_id] = pred_value
             true_value = test_targets[pos]
 
+            pred_std = y_std[pos]
+
             if true_value is not None:
                 combined_test_targets.append(true_value)
                 combined_sample_id_list.append(sample_id)
                 combined_y_pred.append(pred_value)
+                
                 new_test_targets.append(true_value)
                 new_sample_id_list.append(sample_id)
                 new_y_pred.append(pred_value)
@@ -629,6 +639,8 @@ def evaluate_dataset(config: Config):
                 new_y_pred.append(pred_value)
                 combined_sample_id_list.append(sample_id)
                 combined_y_pred.append(pred_value)
+
+            combined_y_std.append(pred_std)
 
         for prot_id, aacs, effect in multi_savs:
             individual_effect_preds = []
@@ -639,6 +651,7 @@ def evaluate_dataset(config: Config):
             combined_test_targets.append(effect)
             combined_sample_id_list.append((prot_id, ":".join(aacs)))
             combined_y_pred.append(combined_effect)
+            combined_y_std.append(None)
 
             mm_test_targets.append(effect)
             mm_sample_id_list.append((prot_id, ":".join(aacs)))
@@ -741,13 +754,14 @@ def evaluate_dataset(config: Config):
         config.logger.info(f"Spearman correlation and p-value: {corr} {p_value}")
 
     if config.target_values is not None:
-        prot_wise_spearmans, mean_spearman, _ = calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.spearmanr)
+        prot_wise_spearmans, mean_spearman, _, err_corrs = calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.spearmanr, y_std=y_std)
         prot_wise_pearsons, mean_pearson, _ = calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.pearsonr)
     else:
         prot_wise_spearmans = None
         mean_spearman = None
         prot_wise_pearsons = None
         mean_pearson = None
+        err_corrs = None
 
     if config.verbosity >= 1:
         config.logger.info(f"Number of samples: {len(sample_id_list)} {len(test_targets)} {len(y_pred)}")
@@ -788,6 +802,7 @@ def evaluate_dataset(config: Config):
         f"{config.outfolder}/protein_wise_results.tsv",
         prot_wise_spearmans,
         protein_info,
+        err_corrs
     )
 
     if config.trace_decisions:
@@ -869,21 +884,17 @@ def evaluate_dataset(config: Config):
         # st.save_html()
         # """
     else:
-        sample_wise_feature_influence = []
         explanation = None
 
     if mm_y_pred is None or config.trace_decisions:
         combined_sample_id_list = sample_id_list
         combined_y_pred = y_pred
         combined_test_targets = test_targets
+        combined_y_std = y_std
 
     # number_of_displayed_features = 20
-    if config.calc_sd:
-        header = "Protein ID\tSAV\tPredicted effect value\tTree STD"
-    else:
-        header = "Protein ID\tSAV\tPredicted effect value"
+    header = "Protein ID\tSAV\tPredicted effect value\tTree STD"
 
-    
     # for i in range(number_of_displayed_features):
     #    header += f"\tFeature {i+1}"
     for i in range(len(feature_categories)):
@@ -910,28 +921,18 @@ def evaluate_dataset(config: Config):
         if not os.path.isdir(force_plot_folder):
             os.makedirs(force_plot_folder)
 
-    if config.calc_sd:
-        ind_preds = []
-        for tree_id, tree in enumerate(forest):
-            ind_pred = tree.predict(dtest_feature_matrix)
-            ind_preds.append(ind_pred)
-
-        ind_preds = numpy.array(ind_preds).transpose()
+    
 
     for pos, sample_id in enumerate(combined_sample_id_list):
         pred_value = combined_y_pred[pos]
         prot_id, aac = sample_id
 
-        words = [prot_id, aac, str(pred_value)]
+        words = [prot_id, aac, str(pred_value), str(combined_y_std[pos])]
 
         if config.target_values is not None:
             eval_words = words[:]
             eval_words.append(str(combined_test_targets[pos]))
             full_eval_words = eval_words[:]
-
-        if config.calc_sd:
-            pred_std = numpy.std(ind_preds[pos])
-            words.append(str(pred_std))
 
         if explanation is not None:
             #print(f'{sample_id} {pos=} {len(explanation[pos][:-1])=} {len(extern_feature_names_list)=}')
