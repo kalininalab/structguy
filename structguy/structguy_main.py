@@ -6,7 +6,7 @@ import time
 import logging
 from datetime import datetime
 
-from structguy import featureGenerator, util, learn, featureAnalysis
+from structguy import featureGenerator, util, learn, featureAnalysis, baseline
 from structguy.sequence_feature_generation import prepare_gemme
 from ray.train import ScalingConfig
 
@@ -16,6 +16,8 @@ import structman.base_utils.ray_utils as ray_utils
 disclaimer = """
 structguy_main.py generate_features [-i -o --verbosity]\n
 structguy_main.py build_model [-i -o --verbosity]\n
+structguy_main.py build_lasso [-i -o --verbosity]\n
+structguy_main.py predict_lasso [-i -m --verbosity]\n
 MORE TODO\n
 """
 
@@ -52,7 +54,10 @@ def parse_arguments(argument_start = 2, manual_args = None):
                 'nCV=',
                 'extmem',
                 'vram=',
-                'slice_by_slice'
+                'slice_by_slice',
+                'ablation',
+                'no_evo',
+                'cuda_async_pool'
             ]
             opts, args = getopt.getopt(argv, "i:n:m:d", long_paras)
 
@@ -102,6 +107,9 @@ def parse_arguments(argument_start = 2, manual_args = None):
     use_external_memory_qdm = False
     vram_limit = 1.0
     slice_by_slice = False
+    ablation = False
+    no_evo = False
+    cuda_async_pool = False
 
     for opt, arg in opts:
         if opt == '-i':
@@ -206,6 +214,15 @@ def parse_arguments(argument_start = 2, manual_args = None):
         if opt == '--slice_by_slice':
             slice_by_slice = True
 
+        if opt == '--ablation':
+            ablation = True
+
+        if opt == '--no_evo':
+            no_evo = True
+
+        if opt == '--cuda_async_pool':
+            cuda_async_pool = True
+
     if path_to_model is not None:
         if path_to_model.count('/') > 0:
             model_name = path_to_model.rsplit("/",1)[1].rsplit('.',1)[0]
@@ -227,7 +244,8 @@ def parse_arguments(argument_start = 2, manual_args = None):
 
     config.vram_limit = vram_limit
     config.slice_by_slice = slice_by_slice
-
+    config.ablation = ablation
+    config.no_evo = no_evo
     config.path_to_model = path_to_model
     config.model_name = model_name
     config.overwrite = overwrite
@@ -239,6 +257,7 @@ def parse_arguments(argument_start = 2, manual_args = None):
     config.multi_gpu = multi_gpu
     config.threads_per_gpu = threads_per_gpu
     config.use_external_memory_qdm = use_external_memory_qdm
+    config.setup_cuda_mem = cuda_async_pool
 
     if repeat is not None:
         config.repeat_training = repeat
@@ -261,7 +280,7 @@ def parse_arguments(argument_start = 2, manual_args = None):
         config.crossValidation = 'LOPO'
 
     if random_split:
-        config.crossValidation = 'Random'
+        #config.crossValidation = 'Random'
         config.prot_based_separation = False
 
     if skip_cv is not None:
@@ -351,7 +370,27 @@ def predict_main(manual_args = None):
     config, test_config = parse_arguments(manual_args = manual_args)
     config.predict_mode = True
     ray_utils.ray_init(config, overwrite_logging_level = 0)
-    score, y_true, y_pred = learn.evaluate_dataset(config)
+    score, y_true, y_pred, sample_id_list = learn.evaluate_dataset(config)
+    return score, y_true, y_pred
+
+#@profile
+def build_lasso_main(manual_args = None):
+    config, test_config = parse_arguments(manual_args = manual_args)
+
+    logging_level = 0
+    if config.verbosity >= 4:
+        logging_level = 20
+
+    ray_utils.ray_init(config, overwrite_logging_level = logging_level, total_memory_quantile = 0.74)
+
+    modelfile = baseline.build_lasso(config)
+    return modelfile
+
+def predict_lasso_main(manual_args = None):
+    config, test_config = parse_arguments(manual_args = manual_args)
+    config.predict_mode = True
+    ray_utils.ray_init(config, overwrite_logging_level = 0)
+    score, y_true, y_pred, sample_id_list = baseline.predict_lasso(config)
     return score, y_true, y_pred
 
 def prep_gemme():
@@ -429,12 +468,14 @@ def main():
 
     start_time = time.time()
     possible_key_words = set([
-        'generate_features', 
-        'build_model', 
-        'predict', 
-        'info', 
-        'violins', 
-        'prep_gemme', 
+        'generate_features',
+        'build_model',
+        'build_lasso',
+        'predict',
+        'predict_lasso',
+        'info',
+        'violins',
+        'prep_gemme',
         'bench_msas',
         'check_data'
         ])
@@ -455,8 +496,14 @@ def main():
     if key_word == 'build_model':
         build_model_main()
 
+    if key_word == 'build_lasso':
+        build_lasso_main()
+
     if key_word == 'predict':
         predict_main()
+
+    if key_word == 'predict_lasso':
+        predict_lasso_main()
 
     if key_word == 'info':
         generate_info()

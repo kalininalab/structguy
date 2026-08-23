@@ -14,7 +14,6 @@ from sklearn.metrics import matthews_corrcoef
 import time
 import sys
 import os
-import signal
 import traceback
 import ray
 #import contextlib
@@ -649,7 +648,7 @@ def retrieve_dmatrix(
 
     return dtrain, dtest_feature_matrix, t_file_paths, test_data_refs, times
 
-@ray.remote(max_retries=0)
+@ray.remote(max_retries=0, max_calls=1)
 #@profile
 def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: float, config_ref_container: list[ray.ObjectRef]):
     config: util.Config
@@ -1157,7 +1156,6 @@ def trainRegressionForest(
                             if config.verbosity >= 1:
                                 config.logger.info('double_booster_remote returned None')
 
-                            os.kill(res, signal.SIGTERM)
                             return zero_return
                         if skip_scoring:
                             booster, sl_sl_feat_names, db_p_id = res
@@ -1172,14 +1170,12 @@ def trainRegressionForest(
                             y_preds.append(y_pred)
                             x_preds.append(x_pred)
 
-                        os.kill(db_p_id, signal.SIGTERM)
-
-                    if config.slice_by_slice:
-                        if current_slice < len(cv_slice.slice_slices):
-                            nested_proc_id = current_slice
-                            packed_slice_slice = cv_slice.slice_slices[current_slice]
-                            remote_proc_ids.append(remote_function.remote(packed_slice_slice, store, f'{proc_id}_{nested_proc_id}', sub_share, config_ref_container))
-                            current_slice += 1
+                    if config.slice_by_slice and current_slice < len(cv_slice.slice_slices):
+                        nested_proc_id = current_slice
+                        packed_slice_slice = cv_slice.slice_slices[current_slice]
+                        remote_proc_ids.append(remote_function.remote(packed_slice_slice, store, f'{proc_id}_{nested_proc_id}', sub_share, config_ref_container))
+                        not_ready = remote_proc_ids
+                        current_slice += 1
 
                 remote_proc_ids = not_ready
                 if len(remote_proc_ids) == 0:
@@ -1192,8 +1188,15 @@ def trainRegressionForest(
             y_preds = []
             x_preds = []
             booster_2_list: list[tuple[xgb.Booster, list[str]]] = []
+            # double_booster() calls cv_slice.filterFeatures() in place. Handing it the
+            # shared cv_slice would accumulate the feature removals of every sub-booster,
+            # so later sub-boosters would predict on a test matrix that no longer matches
+            # the features their model was trained on. The remote branch above avoids this
+            # by giving every worker its own unpacked copy; do the same here.
+            packed_cv_slice = pack(cv_slice)
             for nested_proc_id, packed_slice_slice in enumerate(cv_slice.slice_slices):
-                res = double_booster(packed_slice_slice, f'{proc_id}_{nested_proc_id}', 1.0, config, feats_to_filter, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, remote)
+                cv_slice_copy = unpack(packed_cv_slice)
+                res = double_booster(packed_slice_slice, f'{proc_id}_{nested_proc_id}', 1.0, config, feats_to_filter, cv_slice_copy, skip_scoring, score_train, raw_feature_matrix_store_id, remote)
 
                 if isinstance(res, int):
                     if config.verbosity >= 1:
@@ -1371,10 +1374,9 @@ def trainForest(
     if config.suppress_remote_forests:
         remote = False
 
-    if not cv_repeat:
-        if len(cross_val_object.feature_names) < 1:
-            config.logger.info(f"Call of trainForest without features: {cross_val_object.name}")
-            return None, zero_scores_obj, cross_val_object
+    if not cv_repeat and len(cross_val_object.feature_names) < 1:
+        config.logger.info(f"Call of trainForest without features: {cross_val_object.name}")
+        return None, zero_scores_obj, cross_val_object
 
     if config.verbosity >= 3 or debug:
         config.logger.info(f"Call of trainForest: {repeat=}, {cv_repeat=}, {remote=}, {para_number=}, {skip_feature_selection=}, {debug=}")
@@ -1431,8 +1433,6 @@ def trainForest(
                 scores_obj = util.mean_scores(scores_list)
 
     else:  # This can be used to perform a hyperparameter optimization on the whole dataset
-        slice_result_ids = []
-
         if config.cv_hpo_limiter is not None:
             if config.cv_counters is not None:
                 cv_counters = config.cv_counters
@@ -1472,6 +1472,14 @@ def trainForest(
         cv_repeat_first_scores = []
 
         for i in range(0, repeat):
+            # Both of these have to be reset per repeat. Keeping slice_result_ids across
+            # repeats makes ray.get() return the cached results of the previous repeats
+            # again, so repeat i would average i*len(cv_counters) results and weight the
+            # early repeats far more heavily than the late ones. Keeping worst_scores
+            # across repeats turns it into the worst score over all repeats so far.
+            slice_result_ids = []
+            worst_scores = None
+            scores_list = []
 
             for cv_id, cv_counter in enumerate(cv_counters):
                 if cv_id == 0:
@@ -1609,7 +1617,6 @@ def trainForest(
             if repeat > 1:
                 cv_repeat_scores.append(scores_obj)
                 cv_repeat_first_scores.append(first_scores)
-                scores_list = []
 
         if repeat > 1:
             scores_obj = util.mean_scores(cv_repeat_scores)

@@ -187,9 +187,9 @@ def calc_gdm_submatrix(store,i):
     return geometric_distance_map
 
 
-def splitDataSet(config, sample_dict, specific_id=None, protein_wise=False, debug=0, skip_protein = None, ignore_samples = None):
+def splitDataSet(config, sample_id_list: list[tuple[str, str]], specific_id=None, protein_wise=False, debug=0, skip_protein = None, ignore_samples = None):
     split_rate = config.split_rate
-    total_size = len(sample_dict)
+    total_size = len(sample_id_list)
     test_size = max([1,int(total_size*split_rate)])
     train_size = total_size-test_size
 
@@ -200,28 +200,28 @@ def splitDataSet(config, sample_dict, specific_id=None, protein_wise=False, debu
         #simple random split
         if specific_id is None:
             test_nrs = set(np.random.choice(total_size,test_size,replace=False))
-            for sample_id in sample_dict:
-                sample = sample_dict[sample_id]
-                if sample.nr in test_nrs:
+            for nr, sample_id in enumerate(sample_id_list):
+                
+                if nr in test_nrs:
                     test_ids.append(sample_id)
                 else:
                     train_ids.append(sample_id)
         else:
-            for sample_id in sample_dict:
+            for sample_id in sample_id_list:
                 if sample_id in specific_id:
                     test_ids.append(sample_id)
                 else:
                     train_ids.append(sample_id)
 
         if debug >= 1:
-            config.logger.info('Train size: ',train_size,' ,Test size: ',test_size)
+            config.logger.info(f'Train size: {train_size}, Test size: {test_size}')
     else:
         # Protein-nested split
         test_proteins = set()
         test_set_sum = 0
         if specific_id is None:
             protein_sizes = {}
-            for u_ac,aac in sample_dict:
+            for u_ac,aac in sample_id_list:
                 if u_ac not in protein_sizes:
                     protein_sizes[u_ac] = 1
                 else:
@@ -235,13 +235,11 @@ def splitDataSet(config, sample_dict, specific_id=None, protein_wise=False, debu
         else:
             test_proteins = specific_id
 
-        for (u_ac,aac) in sample_dict:
-            if skip_protein is not None:
-                if u_ac == skip_protein:
-                    continue
-            if ignore_samples is not None:
-                if (u_ac, aac) in ignore_samples:
-                    continue
+        for (u_ac,aac) in sample_id_list:
+            if skip_protein is not None and u_ac == skip_protein:
+                continue
+            if ignore_samples is not None and (u_ac, aac) in ignore_samples:
+                continue
 
             if u_ac in test_proteins:
                 test_ids.append((u_ac,aac))
@@ -250,7 +248,7 @@ def splitDataSet(config, sample_dict, specific_id=None, protein_wise=False, debu
 
         #print 'Protein Id based sample splitting:\nTest set Ids: ',test_proteins,'\nTestset size: ',test_set_sum
         if debug >= 1:
-            config.logger.info('Train size: ',train_size,' ,Test size: ',test_size)
+            config.logger.info(f'Train size: {train_size}, Test size: {test_size}')
     if len(test_ids) == 0:
         if ignore_samples is not None:
             ignored_prots = set()
@@ -1023,6 +1021,10 @@ class SampleSpace(Slotted_obj):
 
         cat_vec = []
         for feat_name in extern_feature_list:
+            if extern_features[feat_name].category_map is None:
+                extern_features[feat_name].category_map = {}
+                extern_features[feat_name].category_counter = 0
+                extern_features[feat_name].category_backmap = {}
             if self.features[feat_name].f_type == 'categorical':
                 cat_vec.append('c')
                 for sample_id, _ in enumerate(test_feature_matrix):
@@ -1240,7 +1242,7 @@ class X_fold_cv(CrossValidation):
                     test_samples.add(self.sample_ids[n_of_assigned_samples])
                     n_of_assigned_samples += 1
                     slice_size += 1
-            config.logger.info('Next crossvalidation slice, size: ',slice_size)
+            config.logger.info(f'Next crossvalidation slice, size: {slice_size}')
 
             if config.prot_based_separation:
                 test_ids, train_ids = splitDataSet(config, sampleSpace.samples, specific_id=test_prots, protein_wise=True)
@@ -1251,10 +1253,10 @@ class X_fold_cv(CrossValidation):
             self.slices[cv_counter] = cv_slice
 
 @ray.remote(max_calls = 1)
-def init_lopo_slice(store, test_prots, train_prots, cv_counter = None):
+def init_lopo_slice(store, test_prots, train_prots, cv_counter = None, protein_wise=True):
     config, sample_dict, raw_feature_names, sample_list = store
 
-    test_ids, train_ids = splitDataSet(config, sample_list, specific_id=test_prots, protein_wise=True)
+    test_ids, train_ids = splitDataSet(config, sample_list, specific_id=test_prots, protein_wise=protein_wise)
 
     if cv_counter is None:
         for name in test_prots:
@@ -1362,9 +1364,70 @@ class Given_split(CrossValidation):
             cv_slice.slice_slices = slice_slices
             self.slice_slices[slice_id] = slice_slices
 
+def get_datasail_protein_split_assignment(config) -> dict[str, int]:
+    # Sequence-identity aware clustering of the proteins in config.path_to_sequence_fasta into
+    # config.crossValidation_fold folds, so that similar/related proteins don't end up split
+    # across folds (which DataSAIL_cv itself relies on for the xgboost cross validation).
+    datasail_test_size = 100 // config.crossValidation_fold
+    splits = [datasail_test_size] * config.crossValidation_fold
+    names = [f'split_{x}' for x in range(config.crossValidation_fold)]
+
+    eps = 0.05
+    if config.random_split:
+        technique = ['R']
+    else:
+        technique = ['C1e']
+
+    try:
+        if config.verbosity >= 4:
+            config.logger.info(f'Call of datasail with: e_data: {config.path_to_sequence_fasta}, splits: {splits}, names: {names}')
+            raw_datasail_splits = datasail(
+                e_data = config.path_to_sequence_fasta,
+                splits = splits,
+                techniques = technique,
+                names = names,
+                e_type = 'P',
+                solver = 'SCIP',
+                epsilon = eps,
+                overflow = 'assign',
+                e_sim = 'mmseqs',
+                verbose = 'I')
+        else:
+            with contextlib.redirect_stdout(None):
+                raw_datasail_splits = datasail(
+                    e_data = config.path_to_sequence_fasta,
+                    splits = splits,
+                    techniques = technique,
+                    names = names,
+                    e_type = 'P',
+                    solver = 'SCIP',
+                    epsilon = eps,
+                    overflow = 'assign',
+                    e_sim = 'mmseqs')
+    except ValueError:
+        raw_datasail_splits = datasail(
+                e_data = config.path_to_sequence_fasta,
+                splits = splits,
+                techniques = technique,
+                names = names,
+                e_type = 'P',
+                solver = 'SCIP',
+                epsilon = eps,
+                overflow = 'assign'
+                )
+
+    datasail_splits = raw_datasail_splits[0][technique[0]][0]
+
+    prot_fold = {}
+    for prot_id in datasail_splits:
+        split_name = datasail_splits[prot_id]
+        prot_fold[prot_id] = int(split_name.split('_')[1])
+    return prot_fold
+
+
 class DataSAIL_cv(CrossValidation):
     __slots__ = cv_slots + ['prots', 'subslice_refs']
-    def __init__(self, samples_store_id = None, sampleSpace: SampleSpace | None = None, config = None, as_list = None):
+    def __init__(self, samples_store_id = None, sampleSpace: SampleSpace | None = None, config: Config = None, as_list = None):
         t0 = time.time()
         if as_list is not None:
             for slot_number, slot in enumerate(self.__slots__):
@@ -1374,104 +1437,40 @@ class DataSAIL_cv(CrossValidation):
         if sampleSpace is None:
             return
 
-        weight_map = {}
         prots = set()
-        sample_list = list(sampleSpace.samples.keys())
+        sample_list: list[tuple[str, str]] = list(sampleSpace.samples.keys())
 
         for (prot_id, aac) in sample_list:
-            if prot_id not in weight_map:
-                weight_map[prot_id] = 0
-                prots.add(prot_id)
-            weight_map[prot_id] += 1
+            prots.add(prot_id)
 
         self.prots = list(prots)
 
-        datasail_test_size = 100 // config.crossValidation_fold
-        #datasail_train_size = 100 - datasail_test_size
-
-        splits = [datasail_test_size] * config.crossValidation_fold
-
-        names = [f'split_{x}' for x in range(config.crossValidation_fold)]
-
-        eps = 0.05
-        if config.random_split:
-            technique = ['R']
-        else:
-            technique = ['C1e']
-
         t1 = time.time()
         if config.verbosity >= 2:
-            config.logger.info(f'Time for init DataSAIL_cv Part 1: {t1-t0} {eps=}')
-        try:
-            if config.verbosity >= 4:
-                config.logger.info(f'Call of datasail with: e_data: {config.path_to_sequence_fasta}, e_weights: {len(weight_map)=}, splits: {splits}, names: {names}')
+            config.logger.info(f'Time for init DataSAIL_cv Part 1: {t1-t0}')
 
-                write_weight_map(weight_map, 'weight_map_for_datasail.tsv')
+        if not config.random_split:
+            prot_fold = get_datasail_protein_split_assignment(config)
 
-                raw_datasail_splits = datasail(
-                    e_data = config.path_to_sequence_fasta,
-                    #e_weights = weight_map,
-                    splits = splits,
-                    techniques = technique,
-                    names = names,
-                    e_type = 'P',
-                    solver = 'SCIP',
-                    epsilon = eps,
-                    overflow = 'assign',
-                    e_sim = 'mmseqs',
-                    verbose = 'I')
-
-            else:
-                with contextlib.redirect_stdout(None):
-                    raw_datasail_splits = datasail(
-                        e_data = config.path_to_sequence_fasta,
-                        #e_weights = weight_map,
-                        splits = splits,
-                        techniques = technique,
-                        names = names,
-                        e_type = 'P',
-                        solver = 'SCIP',
-                        epsilon = eps,
-                        overflow = 'assign',
-                        e_sim = 'mmseqs',
-                        )
-        except ValueError:
-            raw_datasail_splits = datasail(
-                    e_data = config.path_to_sequence_fasta,
-                    #e_weights = weight_map,
-                    splits = splits,
-                    techniques = technique,
-                    names = names,
-                    e_type = 'P',
-                    solver = 'SCIP',
-                    epsilon = eps,
-                    overflow = 'assign'
-                    )
         t2 = time.time()
         if config.verbosity >= 2:
             config.logger.info(f'Time for init DataSAIL_cv Part 2: {t2-t1}')
 
-        #config.logger.info(raw_datasail_splits)
-
-        datasail_splits = raw_datasail_splits[0][technique[0]][0]
-        #config.logger.info(datasail_splits)
-
         train_test_pairs = {}
-        for cv_counter in range(config.crossValidation_fold):
-            train_test_pairs[cv_counter] = [[], [], {}] #train - test - subslices test 
+        if not config.random_split:
+            
+            for cv_counter in range(config.crossValidation_fold):
+                train_test_pairs[cv_counter] = [[], [], {}] #train - test - subslices test
 
-        for prot_id in datasail_splits:
-            split_name = datasail_splits[prot_id]
-            cv_counter = int(split_name.split('_')[1])
-
-            for cv in train_test_pairs:
-                if cv == cv_counter:
-                    train_test_pairs[cv][1].append(prot_id)
-                else:
-                    train_test_pairs[cv][0].append(prot_id)
-                    if cv_counter not in train_test_pairs[cv][2]:
-                        train_test_pairs[cv][2][cv_counter] = set()
-                    train_test_pairs[cv][2][cv_counter].add(prot_id)
+            for prot_id, cv_counter in prot_fold.items():
+                for cv in train_test_pairs:
+                    if cv == cv_counter:
+                        train_test_pairs[cv][1].append(prot_id)
+                    else:
+                        train_test_pairs[cv][0].append(prot_id)
+                        if cv_counter not in train_test_pairs[cv][2]:
+                            train_test_pairs[cv][2][cv_counter] = set()
+                        train_test_pairs[cv][2][cv_counter].add(prot_id)
 
         t3 = time.time()
         if config.verbosity >= 2:
@@ -1487,13 +1486,20 @@ class DataSAIL_cv(CrossValidation):
             config.logger.info(f'Time for init DataSAIL_cv Part 4: {t4-t3}')
 
         init_ids = []
-        for cv_counter in train_test_pairs:
-            train_set, test_set, _ = train_test_pairs[cv_counter]
+        if not config.random_split:
+            for cv_counter in train_test_pairs:
+                train_set, test_set, _ = train_test_pairs[cv_counter]
 
-            if config.verbosity >= 2:
-                config.logger.info(f'Init datasail slice {cv_counter=}: {len(test_set)=}')
+                if config.verbosity >= 2:
+                    config.logger.info(f'Init datasail slice {cv_counter=}: {len(test_set)=}')
 
-            init_ids.append(init_lopo_slice.remote(store, test_set, train_set, cv_counter = cv_counter))
+                init_ids.append(init_lopo_slice.remote(store, test_set, train_set, cv_counter = cv_counter))
+        else:
+            for cv_counter in range(config.crossValidation_fold):
+                if config.verbosity >= 2:
+                    config.logger.info(f'Init datasail slice {cv_counter=}')
+
+                init_ids.append(init_lopo_slice.remote(store, None, None, cv_counter = cv_counter, protein_wise=False))
 
         init_results = ray.get(init_ids)
 
@@ -1520,10 +1526,16 @@ class DataSAIL_cv(CrossValidation):
                 cv_slice.featureSanityCheck(verbose = True)
 
             self.slice_ids.append(cv_counter)
-            if train_test_pairs[cv_counter][2] is not None:
+            if not config.random_split:
+                if train_test_pairs[cv_counter][2] is not None:
+                    cv_slice.subslices = {}
+                    for subslice_counter in train_test_pairs[cv_counter][2]:
+                        cv_slice.subslices[subslice_counter] = (train_test_pairs[cv_counter][2][subslice_counter])
+            else:
                 cv_slice.subslices = {}
-                for subslice_counter in train_test_pairs[cv_counter][2]:
-                    cv_slice.subslices[subslice_counter] = (train_test_pairs[cv_counter][2][subslice_counter])
+                for subslice_counter in range(config.crossValidation_fold-1):
+                    cv_slice.subslices[subslice_counter] = None
+
 
             detectBiasedFeaturesByMeanCorrelation(
                 config, cv_slice, samples_store_id, samples=sampleSpace, dummy_call=True
@@ -1591,7 +1603,7 @@ def put_data_to_tmp_storage(cv_slice: CrossValidationSlice, samples: SampleSpace
 
     gmem = get_gpu_memory()[0]*config.vram_limit
     sub_share = 1 / (config.threads_per_gpu * config.crossValidation_fold * (config.crossValidation_fold-1))
-    num_of_batches = max([1, int(1 * (len(feat_matrix)/ (30 * gmem*sub_share)))])
+    num_of_batches = max([1, int(1 * (len(feat_matrix)/ (600 * gmem*sub_share)))])
 
     batch_size = len(feat_matrix) // num_of_batches
     if len(feat_matrix) % num_of_batches != 0:

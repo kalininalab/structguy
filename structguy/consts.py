@@ -37,6 +37,10 @@ feat_name_category_dict = {
     'chain_dist' : (5, 1),
     'phi' : (7, 0),
     'psi' : (7, 0),
+    'tco' : (7, 0),
+    'kappa' : (7, 0),
+    'alpha' : (7, 0),
+    'modres' : (11, None),
     'dna_dist' : (8, 1),
     'ion_dist' : (8, 1),
     'b_factor' : (9, 0),
@@ -52,7 +56,11 @@ feat_name_category_dict = {
     'Mutant AA' : (4, None),
     'Wildtype AA' : (4, None),
     'simple_class' : (12, 3),
+    'rin_class' : (12, 3),
+    'rin_simple_class' : (12, 3),
     'structural_classification' : (12, 3),
     'ssa' : (7, 0),
+    'intra_link' : (7, 0),
+    'inter_link' : (7, 0),
     'link_length': (7, 0)
 }

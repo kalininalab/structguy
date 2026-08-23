@@ -1,4 +1,6 @@
+﻿import json
 import pickle
+import re
 import sys
 import os
 import time
@@ -84,12 +86,7 @@ def calcFeatureImportances(booster_list, samples, cv_slice, config, print_them=F
         try:
             feature_importance_map[feature_name] = feature_scores[pos]
         except KeyError:
-            config.logger.info(
-                "Some Error:",
-                len(feature_scores),
-                len(cv_slice.feature_names),
-                len(cv_slice.features),
-            )
+            config.logger.info(f"Some Error:\n{len(feature_scores)=}, {len(cv_slice.feature_names)=}, {len(cv_slice.features)=}")
             return feature_importance_map
         except IndexError:
             feature_importance_map[feature_name] = 0.0
@@ -114,7 +111,7 @@ def calcFeatureImportances(booster_list, samples, cv_slice, config, print_them=F
                 continue
             config.logger.info(f"{feature_name}: {score}")
 
-        config.logger.info("Total feature importance by feature type:", feature_type_importance)
+        config.logger.info(f"Total feature importance by feature type: {feature_type_importance=}")
 
     return feature_importance_map
 
@@ -465,6 +462,10 @@ def learn(config: Config):
         else:
             name_add = '_ot'
 
+        if config.ablation:
+            name_add = f'{name_add}_ablated'
+        if config.no_evo:
+            name_add = f'{name_add}_no_evo'
 
         modelfile = f"{config.outfolder}/StructGuy_trained_on_{config.dataset_name}{name_add}.dump"
 
@@ -525,10 +526,13 @@ def val_to_str(val):
         val_str = f"{val:.{prec}f}"
     return val_str
 
-def evaluate_dataset(config: Config):
+def evaluate_dataset(config: Config, preloaded_model=None):
     t0 = time.time()
     extern_feature_names_list: list[str]
-    booster_list, extern_feature_names_list, impute_map, model_config, feat_stats, extern_features = loadModel(config.path_to_model)
+    if preloaded_model is not None:
+        booster_list, extern_feature_names_list, impute_map, model_config, feat_stats, extern_features = preloaded_model
+    else:
+        booster_list, extern_feature_names_list, impute_map, model_config, feat_stats, extern_features = loadModel(config.path_to_model)
     t1 = time.time()
 
     config.logger.info(f"Time for loading model: {t1 - t0} {config.path_to_model=}")
@@ -570,7 +574,7 @@ def evaluate_dataset(config: Config):
             print(f'{samples.raw_feature_matrix[pos][samples.feat_pos_dict['oh_Wildtype AA_I']]=}')
 
     if len(test_feature_matrix) == 0:
-        return None, None, None
+        return None, None, None, None
 
     if config.verbosity >= 1:
         config.logger.info(f"Shape of the feature matrix: {len(test_feature_matrix)} {len(test_feature_matrix[0])}")
@@ -1036,8 +1040,253 @@ def evaluate_dataset(config: Config):
             os.makedirs(scatter_folder)
         protein_wise_scatter_plot(test_targets, y_pred, combined_sample_id_list, scatter_folder, config.target_values)
 
-    return mean_spearman, combined_test_targets, combined_y_pred
+    return mean_spearman, combined_test_targets, combined_y_pred, combined_sample_id_list
 
+
+
+def refit_model(config: Config, preloaded_model=None):
+    t0 = time.time()
+
+    # Load existing model (like evaluate_dataset)
+    if preloaded_model is not None:
+        booster_list, extern_feature_names_list, impute_map, model_config, feat_stats, extern_features = preloaded_model
+    else:
+        booster_list, extern_feature_names_list, impute_map, model_config, feat_stats, extern_features = loadModel(config.path_to_model)
+    t1 = time.time()
+    config.logger.info(f"Time for loading model: {t1 - t0} {config.path_to_model=} {len(booster_list)=}")
+
+    model_filename = os.path.basename(config.path_to_model).split(".")[0]
+    if model_filename.count("trained_on_") > 0:
+        model_name = model_filename.split("trained_on_")[1]
+    else:
+        model_name = model_filename
+
+    # Load new dataset (like learn).  We always stop before the internal matrix
+    # transformation so we can fuse support features first and then do a single
+    # transform without excluding any features -- all of the loaded model's
+    # features must remain available in the resulting raw_feature_matrix.
+    samples: sampleSpace.SampleSpace = featureGenerator.createTrainingSet(config, stop_matrix_transformation=True)
+    if config.path_to_support_features is not None:
+        support_samples = featureGenerator.createTrainingSet(
+            config,
+            stop_matrix_transformation=True,
+            other_features_path=config.path_to_support_features,
+            filter_none_tv=True,
+        )
+        samples.fuse_samples(support_samples)
+
+    t2 = time.time()
+    config.logger.info(f"Time for loading dataset: {t2 - t1} {config.n_of_features=}")
+
+    # No feature exclusions: we need every feature the loaded model was trained on.
+    samples.transform_matrix_dict()
+
+    # Warm-start each booster on the new dataset using xgb_model=booster.
+    # Feature alignment is handled by get_test_data_for_feature_list, which maps
+    # the new samples onto the exact feature list the booster expects and
+    # re-encodes categorical variables to match the original model's encoding.
+    refit_booster_list = []
+    print(f'{len(booster_list)=}')
+    for booster, feat_names in booster_list:
+        train_feature_matrix, train_targets, sample_id_list, feat_id_vec, cat_vec = \
+            samples.get_test_data_for_feature_list(feat_names, config, extern_features)
+
+        # Extract residue position from each mutation identifier (e.g. "A123G" -> 123)
+        # and build the eval set for early stopping out of two parts: the first 15%
+        # of unique positions (position-ordered) plus another 15% drawn at random
+        # from the remaining positions; the rest is used for training.
+        positions = []
+        for _, aac in sample_id_list:
+            m = re.search(r'\d+', str(aac))
+            positions.append(int(m.group()) if m else 0)
+
+        sorted_unique_pos = sorted(set(positions))
+        n_first_eval_pos = max(1, int(len(sorted_unique_pos) * 0.15))
+        first_eval_positions = sorted_unique_pos[:n_first_eval_pos]
+        remaining_positions = sorted_unique_pos[n_first_eval_pos:]
+
+        n_random_eval_pos = min(len(remaining_positions), max(1, int(len(sorted_unique_pos) * 0.15)))
+        if n_random_eval_pos > 0:
+            random_eval_positions = numpy.random.choice(remaining_positions, size=n_random_eval_pos, replace=False)
+        else:
+            random_eval_positions = []
+
+        eval_position_set = set(first_eval_positions) | set(random_eval_positions)
+
+        # Build integer encoding of DMS IDs in the same way as
+        # CrossValidationSlice.get_encoded_test_prot_vec so that
+        # rho_eval_for_xgboost_cb can group samples by protein.
+        dms_code_map = {}
+        train_X, train_Y, train_codes = [], [], []
+        eval_X, eval_Y, eval_codes = [], [], []
+        for i, target in enumerate(train_targets):
+            if target is None:
+                continue
+            dms_id, _ = sample_id_list[i]
+            if dms_id not in dms_code_map:
+                dms_code_map[dms_id] = len(dms_code_map)
+            code = dms_code_map[dms_id]
+            if positions[i] in eval_position_set:
+                eval_X.append(train_feature_matrix[i])
+                eval_Y.append(target)
+                eval_codes.append(code)
+            else:
+                train_X.append(train_feature_matrix[i])
+                train_Y.append(target)
+                train_codes.append(code)
+
+        if len(train_Y) == 0:
+            config.logger.warning("refit_model: no training samples with target values; keeping original booster unchanged.")
+            refit_booster_list.append((booster, feat_names))
+            continue
+
+        config.logger.info(
+            f"refit_model: warm-starting booster on {len(train_Y)} train / {len(eval_Y)} eval samples, "
+            f"{len(feat_names)} features, {len(first_eval_positions)} leading + {len(random_eval_positions)} "
+            f"random eval positions out of {len(sorted_unique_pos)}"
+        )
+
+        dtrain = DMatrix(
+            numpy.array(train_X),
+            label=numpy.array(train_Y, dtype=float),
+            feature_names=feat_names,
+            feature_types=cat_vec,
+            enable_categorical=True,
+        )
+        dtrain.encoded_prot_vec = numpy.array(train_codes)
+
+        _bc = json.loads(booster.save_config())
+        _tp = _bc["learner"]["gradient_booster"]["tree_train_param"]
+        _lp = _bc["learner"]["learner_train_param"]
+        xgb_params = {
+            "tree_method": _tp.get("tree_method", "hist"),
+            "device": "cuda",
+            "objective": _lp.get("objective", "reg:squarederror"),
+            "max_depth": int(_tp["max_depth"]),
+            "reg_alpha": float(_tp["reg_alpha"]),
+            "reg_lambda": float(_tp["reg_lambda"]),
+            "colsample_bytree": float(_tp["colsample_bytree"]),
+            "colsample_bylevel": float(_tp["colsample_bylevel"]),
+            "colsample_bynode": float(_tp["colsample_bynode"]),
+            "max_delta_step": float(_tp["max_delta_step"]),
+            "gamma": float(_tp["gamma"]),
+            "learning_rate": float(_tp["learning_rate"]),
+            "min_child_weight": float(_tp["min_child_weight"]),
+            "subsample": float(_tp["subsample"]),
+            "disable_default_eval_metric": True,
+            "max_cat_to_onehot": int(_tp["max_cat_to_onehot"]),
+            "max_cat_threshold": int(_tp["max_cat_threshold"]),
+        }
+
+        num_of_rounds = 200
+
+        callbacks = []
+        evals = []
+        if len(eval_Y) > 0:
+            deval = DMatrix(
+                numpy.array(eval_X),
+                label=numpy.array(eval_Y, dtype=float),
+                feature_names=feat_names,
+                feature_types=cat_vec,
+                enable_categorical=True,
+            )
+            deval.encoded_prot_vec = numpy.array(eval_codes)
+            evals = [(deval, "eval")]
+            early_stopping_rounds = int(num_of_rounds*0.2)
+            callbacks.append(xgb.callback.EarlyStopping(
+                rounds=early_stopping_rounds,
+                min_delta=1e-4,
+                save_best=True,
+                maximize=False,
+                data_name="eval",
+                metric_name="irho",
+            ))
+
+        # With warm-start XGBoost continues the epoch counter from the original
+        # booster's round count, so best_iteration ends up as an absolute index.
+        # Record the offset here so we can correct it after training.
+        original_n_rounds = booster.num_boosted_rounds()
+
+        refit_booster = xgb.train(
+            xgb_params,
+            dtrain,
+            num_boost_round=num_of_rounds,
+            xgb_model=booster,
+            evals=evals,
+            custom_metric=trainForest.rho_eval_for_xgboost_cb if evals else None,
+            callbacks=callbacks,
+            maximize=False,
+            verbose_eval=False,
+        )
+
+        # Correct best_iteration from absolute to relative so it is comparable
+        # to num_boost_round and meaningful to callers of the returned booster.
+        raw_best = refit_booster.attr("best_iteration")
+        if raw_best is not None:
+            corrected_best = int(raw_best) - original_n_rounds
+            refit_booster.set_attr(best_iteration=str(corrected_best))
+            config.logger.info(
+                f"refit_model: best_iteration corrected {raw_best} -> {corrected_best} "
+                f"(original_n_rounds={original_n_rounds}, num_boost_round={num_of_rounds})"
+            )
+
+        # Compare original and refit booster on the eval set; keep whichever
+        # achieves higher Spearman correlation so refitting never degrades the model.
+        if len(eval_Y) > 0:
+            eval_true = numpy.array(eval_Y, dtype=float)
+            orig_rho, _ = stats.spearmanr(eval_true, booster.predict(deval))
+            refit_rho, _ = stats.spearmanr(eval_true, refit_booster.predict(deval))
+            config.logger.info(
+                f"refit_model: original rho={orig_rho:.4f}, refit rho={refit_rho:.4f} on eval set"
+            )
+            print(
+                f"refit_model: original rho={orig_rho:.4f}, refit rho={refit_rho:.4f} on eval set {refit_booster.best_iteration + 1=} {num_of_rounds=}"
+            )
+            if orig_rho > refit_rho:
+                config.logger.info("refit_model: original booster performed better; reverting.")
+                refit_booster_list.append((booster, feat_names))
+            else:
+                # The refit booster beat the original. Early stopping only told us how
+                # many rounds to train for; the model it left us with was fit on the
+                # 80% train split only. Do a final round of training on the full
+                # dataset (train + eval) for exactly that many rounds so the kept
+                # model benefits from all available data.
+                best_num_rounds = refit_booster.best_iteration + 1
+                dfull = DMatrix(
+                    numpy.array(train_X + eval_X),
+                    label=numpy.array(train_Y + eval_Y, dtype=float),
+                    feature_names=feat_names,
+                    feature_types=cat_vec,
+                    enable_categorical=True,
+                )
+                config.logger.info(
+                    f"refit_model: retraining on full dataset ({len(train_Y) + len(eval_Y)} samples) "
+                    f"for {best_num_rounds} rounds (best_iteration from early stopping)"
+                )
+                print(
+                    f"refit_model: retraining on full dataset ({len(train_Y) + len(eval_Y)} samples) "
+                    f"for {best_num_rounds} rounds (best_iteration from early stopping)"
+                )
+                refit_booster = xgb.train(
+                    xgb_params,
+                    dfull,
+                    num_boost_round=best_num_rounds,
+                    xgb_model=booster,
+                    verbose_eval=False,
+                )
+                refit_booster_list.append((refit_booster, feat_names))
+        else:
+            refit_booster_list.append((refit_booster, feat_names))
+
+    t3 = time.time()
+    config.logger.info(f"Time for refitting: {t3 - t2}")
+
+    # Preserve the original feat_stats and extern_features since the feature set is unchanged.
+    modelfile = f"{config.outfolder}/StructGuy_refit_on_{config.dataset_name}_from_{model_name}.dump"
+    storeModel(refit_booster_list, extern_feature_names_list, config, modelfile, feat_stats, extern_features)
+    config.add_entry_to_project_file("path_trained_model", modelfile)
+
+    return refit_booster_list
 
 
 def writeOutput(config, y_pred, cv_slice, sampleSpace, append=False):
@@ -1137,6 +1386,7 @@ def buildFinalModel(samples, config, raw_feature_matrix_store_id, internal_cv=No
     )
 
     if config.verbosity >= 1:
+        config.logger.info(f'{len(booster_list)=}')
         config.logger.info("Full Slice Info after training:")
         full_slice.printBalance(config)
 

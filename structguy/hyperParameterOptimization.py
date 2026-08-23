@@ -2,11 +2,13 @@ import random
 import time
 import sys
 import traceback
+import warnings
 import ray
 import numpy as np
 import sklearn.gaussian_process as gp
 from scipy.stats import norm
 from scipy.optimize import minimize
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.preprocessing import MinMaxScaler
 
 from structguy import util, trainForest
@@ -46,6 +48,21 @@ class Parameter:
         return val
 
 
+def fit_gp(model, scaled_xp, yp):
+    """Fit the gaussian process, silencing the hyperparameter bound warnings.
+
+    With an ARD kernel a length scale that runs into its upper bound is the expected
+    result for a hyperparameter the objective does not depend on, and a noise level at
+    its lower bound is the expected result while there are still too few observations to
+    identify the noise. Both raise a ConvergenceWarning per dimension per fit, which
+    would bury the actual optimization log.
+    """
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=ConvergenceWarning)
+        model.fit(scaled_xp, yp)
+    return model
+
+
 # Taken from https://github.com/thuijskens/bayesian-optimization
 def expected_improvement(x, gaussian_process, evaluated_loss, greater_is_better=False, n_params=1):
     """expected_improvement
@@ -80,7 +97,7 @@ def expected_improvement(x, gaussian_process, evaluated_loss, greater_is_better=
     with np.errstate(divide="ignore"):
         Z = scaling_factor * (mu - loss_optimum) / sigma
         expected_improvement = scaling_factor * (mu - loss_optimum) * norm.cdf(Z) + sigma * norm.pdf(Z)
-        expected_improvement[sigma == 0.0] == 0.0
+        expected_improvement[sigma == 0.0] = 0.0
 
     return -1 * expected_improvement
 
@@ -106,7 +123,7 @@ def sample_next_hyperparameter(acquisition_func, gaussian_process, evaluated_los
             Number of times to run the minimiser with different starting points.
     """
     best_x: np.ndarray | None = None
-    best_acquisition_value = 1
+    best_acquisition_value = np.inf
     n_params = bounds.shape[0]
 
     for starting_point in np.random.uniform(bounds[:, 0], bounds[:, 1], size=(n_restarts, n_params)):
@@ -114,9 +131,15 @@ def sample_next_hyperparameter(acquisition_func, gaussian_process, evaluated_los
         # config.logger.info(f'In sample_next_hyperparameter, x0: {x0}, bounds: {bounds}')
         res = minimize(fun=acquisition_func, x0=x0, bounds=bounds, method="L-BFGS-B", args=(gaussian_process, evaluated_loss, greater_is_better, n_params))
 
-        if res.fun < best_acquisition_value:
-            best_acquisition_value = res.fun
+        fun_value = float(np.ravel(res.fun)[0])
+        if fun_value < best_acquisition_value:
+            best_acquisition_value = fun_value
             best_x = res.x
+
+    if best_x is None:
+        # No restart produced a usable acquisition value. Fall back to a uniform draw
+        # inside the search space so the caller never has to handle a None sample.
+        best_x = np.random.uniform(bounds[:, 0], bounds[:, 1], n_params)
 
     return best_x
 
@@ -438,7 +461,9 @@ def bayesian_optimisation(
             Flag that indicates whether to perform random search or L-BFGS-B optimisation
             over the acquisition function.
         alpha: double.
-            Variance of the error term of the GP.
+            Numerical jitter added to the diagonal of the kernel matrix. The actual
+            observation noise is learned from the data by the WhiteKernel component,
+            so this only needs to keep the Cholesky decomposition well conditioned.
         epsilon: double.
             Precision tolerance for floats.
     """
@@ -489,7 +514,20 @@ def bayesian_optimisation(
     if gp_params is not None:
         model = gp.GaussianProcessRegressor(**gp_params)
     else:
-        kernel = gp.kernels.Matern()
+        # The objective is a noisy estimate (each evaluation retrains the forests with a
+        # fresh random_state), so the GP has to be allowed to model that noise. A plain
+        # Matern() with alpha=1e-6 forces the GP to interpolate every observation, which
+        # collapses sigma to ~0 around known points, degenerates the expected improvement
+        # and pushes the sampler into the duplicate/random fallback.
+        #
+        # - ConstantKernel gives the covariance a learnable amplitude.
+        # - Matern gets one length scale per dimension (ARD) so that irrelevant
+        #   hyperparameters can be shrunk out instead of sharing a single length scale.
+        # - WhiteKernel learns the evaluation noise from the data itself, so there is no
+        #   need to measure and hard-code the variance.
+        kernel = gp.kernels.ConstantKernel(1.0, (1e-3, 1e3)) * gp.kernels.Matern(
+            length_scale=np.ones(n_params), length_scale_bounds=(1e-2, 1e2), nu=2.5
+        ) + gp.kernels.WhiteKernel(noise_level=1e-2, noise_level_bounds=(1e-8, 1e0))
         model = gp.GaussianProcessRegressor(kernel=kernel, alpha=alpha, n_restarts_optimizer=10, normalize_y=True)
 
     scaled_xp: np.ndarray = scaler.transform(xp)
@@ -515,7 +553,7 @@ def bayesian_optimisation(
             if config.verbosity >= 2:
                 tl0 = time.time()
             try:
-                model.fit(scaled_xp, yp)
+                fit_gp(model, scaled_xp, yp)
             except:
                 config.logger.info(f"{xp=}, {yp=}")
                 config.logger.info(f"{x_list=}, {y_list=}")
@@ -580,7 +618,17 @@ def bayesian_optimisation(
                 tl5 = time.time()
                 config.logger.info(f"Bayesian optimisation loop part 5: {tl5 - tl4}")
 
-            cv_score = util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)
+            # When the cross validation was interrupted after the first fold, first_scores
+            # is the estimated objective value (a float) and scores only holds the first
+            # fold's result. Such a partial evaluation may be used to inform the GP, but it
+            # must never become the new optimum, otherwise best_first_scores turns into a
+            # float and the next cv_interuption comparison raises an AttributeError.
+            interrupted = isinstance(first_scores, float)
+
+            if interrupted:
+                cv_score = first_scores
+            else:
+                cv_score = util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)
 
             if config.verbosity >= 2:
                 tl6 = time.time()
@@ -588,9 +636,9 @@ def bayesian_optimisation(
 
             if config.verbosity >= 1:
                 config.logger.info(f"Bayesian optimization, iteration: {n}")
-                config.logger.info(f"Objective score: {cv_score}, unpenalized: {scores.objective_value(config)}")
+                config.logger.info(f"Objective score: {cv_score}, unpenalized: {scores.objective_value(config)} {interrupted=}")
 
-            if util.objective_function_criterium(config, scores, best_scores, feature_penalty=config.feature_penalty):
+            if (not interrupted) and util.objective_function_criterium(config, scores, best_scores, feature_penalty=config.feature_penalty):
                 best_scores = scores
                 best_first_scores = first_scores
                 best_params = next_sample
@@ -763,7 +811,7 @@ def bayesian_optimisation(
                 else:
                     if append_counter >= 2:
                         try:
-                            model.fit(scaled_xp, yp)
+                            fit_gp(model, scaled_xp, yp)
                         except:
                             config.logger.info(f"{xp=}, {yp=}")
                             config.logger.info(f"{x_list=}, {y_list=}")
@@ -829,10 +877,12 @@ def bayesian_optimisation(
 
                 time.sleep(0.5)
 
-        for proc in remote_processes:
+        for com_queue, out_queue, proc_id in remote_processes:
             try:
-                ray.cancel(proc)
-            except TypeError:
+                ray.cancel(proc_id)
+            except (TypeError, ray.exceptions.RayError) as e:
+                if config.verbosity >= 2:
+                    config.logger.info(f"Could not cancel para_eval process: {e}")
                 continue
 
         """
@@ -1322,8 +1372,8 @@ def initParameters(
             parameters["colsample_bylevel_1"] = Parameter("colsample_bylevel_1", "real", half_step_limits=[0.,1.])
             parameters["colsample_bynode_1"] = Parameter("colsample_bynode_1", "real", half_step_limits=[0.,1.])
             parameters["max_delta_step_1"] = Parameter("max_delta_step_1", "real", half_step_limits=[0.,200.])
-            parameters["tree_depth_1"] = Parameter("tree_depth_1", "integer_1", half_step_limits=[1,31])
-            parameters["num_of_trees_1"] = Parameter("num_of_trees_1", "integer_1", half_step_limits=[10,10_000])
+            parameters["tree_depth_1"] = Parameter("tree_depth_1", "integer", half_step_limits=[1,31])
+            parameters["num_of_trees_1"] = Parameter("num_of_trees_1", "integer", half_step_limits=[10,10_000])
             parameters["max_cat_to_onehot_1"] = Parameter("max_cat_to_onehot_1", "integer", half_step_limits=[1,500])
             parameters["max_cat_threshold_1"] = Parameter("max_cat_threshold_1", "integer", half_step_limits=[1,500])
 
@@ -1346,6 +1396,69 @@ def initParameters(
     if split_fs_parameters:
         return fss_parameters, fs_parameters, parameters
     return parameters
+
+
+def remeasure_incumbent(
+    config: util.Config,
+    cv_obj: DataSAIL_cv,
+    best_scores: util.Scores,
+    first_scores: util.Scores,
+    samples: SampleSpace | None = None,
+    raw_feature_matrix_store_id: ray.ObjectRef | None = None,
+    debug=False,
+):
+    """Re-evaluate the hyperparameter set currently held in `config` and replace
+    `best_scores` with that fresh measurement.
+
+    `best_scores` is otherwise a running maximum over noisy evaluations: every model
+    training draws a fresh random_state, so the incumbent ends up sitting well above the
+    true mean of its own configuration (winner's curse). A challenger then has to be
+    better *and* get equally lucky to be accepted, which is why the optimization keeps
+    producing scores that are close to, but never above, the recorded best.
+
+    Overwriting the incumbent with an independent measurement makes the comparison
+    unbiased again. The measurement uses the same protocol as the HPO candidates so that
+    incumbent and challenger scores stay comparable.
+    """
+    if samples is None:
+        config.logger.info("Skipping incumbent re-measurement: no sample space available")
+        return best_scores, first_scores
+
+    if config.multi_gpu > 0:
+        gpu_share = config.multi_gpu
+    else:
+        gpu_share = None
+
+    try:
+        scores, new_first_scores = get_scores(
+            config,
+            cv_obj,
+            samples.feat_corr_matrix,
+            samples.feature_names,
+            raw_feature_matrix_store_id=raw_feature_matrix_store_id,
+            remote=(config.multi_gpu > 0),
+            debug=debug,
+            get_first_scores=True,
+            gpu_share=gpu_share,
+        )
+    except Exception:
+        [e, f, g] = sys.exc_info()
+        g = traceback.format_exc()
+        config.logger.error(f"ERROR while re-measuring the incumbent, keeping the old scores:\n{e}\n{f}\n{g}")
+        return best_scores, first_scores
+
+    obj_sc = util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)
+    if obj_sc is None or obj_sc != obj_sc:
+        config.logger.info("Incumbent re-measurement returned None or NaN, keeping the old scores")
+        return best_scores, first_scores
+
+    old_obj_sc = util.get_objective_score(config, best_scores, feature_penalty=config.feature_penalty)
+    config.logger.info(
+        f"=========== Re-measured the incumbent: {old_obj_sc} -> {obj_sc} ==========="
+    )
+    scores.printOut(config=config)
+
+    return scores, new_first_scores
 
 
 def threeDimHyperOptimization(
@@ -1371,6 +1484,20 @@ def threeDimHyperOptimization(
         converged = True
         #if n > 1:
         #    cv_obj.reset_confusion_maps()
+
+        if n > 1:
+            # The scores from round n-1 are a maximum over many noisy evaluations. Take a
+            # fresh, independent measurement of the incumbent before challenging it again.
+            best_scores, first_scores = remeasure_incumbent(
+                config,
+                cv_obj,
+                best_scores,
+                first_scores,
+                samples=samples,
+                raw_feature_matrix_store_id=raw_feature_matrix_store_id,
+                debug=debug,
+            )
+            util.set_estimation_delta(config, first_scores, best_scores)
 
         if not debug:
             for param in [fss_parameters]:
@@ -1419,127 +1546,23 @@ def threeDimHyperOptimization(
             param_names = list(param.keys())
             random.shuffle(param_names)
 
-            if "confusion_rank_threshold" in fs_parameters:
-                while len(param_names) > 2:
-                    param_set: list[Parameter] = [
-                        parameters[param_names.pop()],
-                        parameters[param_names.pop()],
-                        parameters[param_names.pop()],
-                        fs_parameters["confusion_rank_threshold"]
-                    ]
-                    new_opti, best_scores, first_scores, cv_obj = bayesian_optimisation(
-                        None,
-                        config,
-                        param_set,
-                        score_matrix,
-                        cv_obj,
-                        best_scores,
-                        first_scores,
-                        distance_map,
-                        samples=samples,
-                        samples_store_id=samples_store_id,
-                        raw_feature_matrix_store_id=raw_feature_matrix_store_id,
-                        n_pre_samples=None,
-                        debug=debug,
-                    )
-                    if new_opti:
-                        converged = False
+            SDTree = SubdimensionTree(
+                param_names,
+                parameters,
+                config,
+                cv_obj,
+                best_scores,
+                first_scores,
+                samples,
+                samples_store_id,
+                raw_feature_matrix_store_id,
+                distance_map = distance_map)
 
-                while len(param_names) > 1:
-                    param_trio = param_names.pop(), param_names.pop()  # , 'confusion_rank_threshold'#param_names.pop()
-                    new_opti, best_scores, first_scores, cv_obj = threeDim(
-                        param[param_trio[0]],
-                        param[param_trio[1]],
-                        fs_parameters["confusion_rank_threshold"],
-                        best_scores,
-                        first_scores,
-                        config,
-                        score_matrix,
-                        cv_obj,
-                        distance_map,
-                        samples=samples,
-                        samples_store_id=samples_store_id,
-                        raw_feature_matrix_store_id=raw_feature_matrix_store_id,
-                        debug=debug,
-                    )
-                    if new_opti:
-                        converged = False
-
-                while len(param_names) == 1:
-                    new_opti, best_scores, first_scores, cv_obj = twoDim(
-                        param[param_names.pop()],
-                        fs_parameters["confusion_rank_threshold"],
-                        best_scores,
-                        first_scores,
-                        config,
-                        score_matrix,
-                        cv_obj,
-                        distance_map,
-                        samples=samples,
-                        samples_store_id=samples_store_id,
-                        raw_feature_matrix_store_id=raw_feature_matrix_store_id,
-                        debug=debug,
-                    )
-                    if new_opti:
-                        converged = False
-            else:
-                """
-                while len(param_names) > 4:
-                    param_set = [
-                        parameters[param_names.pop()],
-                        parameters[param_names.pop()],
-                        parameters[param_names.pop()],
-                        parameters[param_names.pop()],
-                        parameters[param_names.pop()]
-                    ]
-                    new_opti, best_scores, first_scores, cv_obj = bayesian_optimisation(
-                        None,
-                        config,
-                        param_set,
-                        cv_obj,
-                        best_scores,
-                        first_scores,
-                        distance_map,
-                        samples=samples,
-                        samples_store_id=samples_store_id,
-                        raw_feature_matrix_store_id=raw_feature_matrix_store_id,
-                        n_pre_samples=None,
-                        debug=debug,
-                    )
-                    if new_opti:
-                        converged = False
-
-                param_set = [parameters[param] for param in param_names]
-                new_opti, best_scores, first_scores, cv_obj = bayesian_optimisation(
-                    None,
-                    config,
-                    param_set,
-                    cv_obj,
-                    best_scores,
-                    first_scores,
-                    distance_map,
-                    samples=samples,
-                    samples_store_id=samples_store_id,
-                    raw_feature_matrix_store_id=raw_feature_matrix_store_id,
-                    n_pre_samples=None,
-                    debug=debug,
-                )
-                if new_opti:
-                    converged = False
-                """
-                SDTree = SubdimensionTree(
-                    param_names,
-                    parameters,
-                    config,
-                    cv_obj,
-                    best_scores,
-                    first_scores,
-                    samples,
-                    samples_store_id,
-                    raw_feature_matrix_store_id,
-                    distance_map = distance_map)
-
-                converged, best_scores, first_scores, cv_obj = SDTree.ascend()
+            tree_converged, best_scores, first_scores, cv_obj = SDTree.ascend()
+            # Must not overwrite: the feature selection stages above may already have
+            # found a new optimum, in which case the outer loop has to run again even if
+            # the subdimension tree itself converged.
+            converged = converged and tree_converged
 
         config.logger.info(f"Iteration: {n}")
         config.logParameter()

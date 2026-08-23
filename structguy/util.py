@@ -849,22 +849,28 @@ class Config:
                     continue
                 if opt == 'xgb_gamma':
                     self.xgb_gamma = float(arg)
-
+                    continue
                 if opt == 'xgb_alpha':
                     self.xgb_alpha = float(arg)
-
+                    continue
                 if opt == 'xgb_lambda':
                     self.xgb_lambda = float(arg)
-
+                    continue
                 if opt == 'colsample_bytree':
                     self.colsample_bytree = float(arg)
-
+                    continue
+                if opt == 'colsample_bylevel':
+                    self.colsample_bylevel = float(arg)
+                    continue
+                if opt == 'colsample_bynode':
+                    self.colsample_bynode = float(arg)
+                    continue
                 if opt == 'max_delta_step':
                     self.max_delta_step = float(arg)
-
+                    continue
                 if opt == 'feat_impact_thresh':
                     self.feat_impact_thresh = float(arg)
-
+                    continue
                 if opt == 'fs_tree_depth':
                     self.fs_tree_depth = int(arg)
                     continue
@@ -2107,7 +2113,7 @@ def loadModel(fn: str) -> tuple[list[tuple[xgb.Booster, list[str]]], list[str], 
         impute_map = None
 
     if config.verbosity >= 1:
-        print("\n============\nLoaded model from %s\n============\n" % fn)
+        print("\n============\nLoaded model from {}\n============\n".format(fn))
     return model, feature_names, impute_map, config, feat_stats, features
 
 def categorize_feat_by_name(featname):
@@ -2125,6 +2131,10 @@ def categorize_feat_by_name(featname):
             return 1, 0
         if featname[3:10] == 'Protein':
             return 5, 1
+        
+        if featname[3:10] == 'Homomer':
+            return 5, 1
+
         if featname[3:10] == 'Peptide':
             return 8, 1
         if featname[3:9] == 'ligand':
@@ -2146,9 +2156,8 @@ def categorize_feat_by_name(featname):
             return 2, 3
         if featname[3:7] == 'ssa_':
             return 7, 0
-        if featname[3:15] == 'simple_class':
-            if featname.count('Peptide') > 0 or featname.count('ligand') > 0 or featname.count('DNA') or featname.count('ion'):
-                return 8, 3
+        if featname[3:15] == 'simple_class' and (featname.count('Peptide') > 0 or featname.count('ligand') > 0 or featname.count('DNA') or featname.count('ion')):
+            return 8, 3
 
     if featname[-4:] == '_rsa' or featname[:4] == 'rsa_' or featname[-13:] == 'surface_value' or featname[1:7] == 'c_rsa_' or featname.count('location') > 0:
         if featname[1:7] == 'c_rsa_':
@@ -2157,6 +2166,12 @@ def categorize_feat_by_name(featname):
             return 2, 0
 
     if featname.count('Centrality') > 0:
+        return 3, 3
+    
+    if featname.count('Inflow') > 0:
+        return 3, 3
+    
+    if featname.count('Outflow') > 0:
         return 3, 3
     
     if featname [-7:] == ' change':

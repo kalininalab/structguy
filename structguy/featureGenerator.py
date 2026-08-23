@@ -7,7 +7,9 @@ import numpy as np
 from structguy import consts
 from structguy.sampleSpace import SampleSpace
 from structguy import sequence_feature_generation as seqfg
-from structguy.util import Config
+from structguy.util import Config, categorize_feat_by_name
+from structguy.base_classes import Feature
+from structguy.consts import feature_categories
 import zstd
 import pickle
 from structman.base_utils.base_utils import unpack
@@ -41,18 +43,32 @@ def msa_bench(config):
 @ray.remote(max_calls=1)
 def parseLines_remote_wrapper(store, left, right):
     config, features, package = store
-    lines, primary_protein_id_col, amount_of_struct_col, effect_col, aac_col_s, tags_col, non_feature_cols, feature_names = unpack(package)
+    lines, primary_protein_id_col, amount_of_struct_col, effect_col, aac_col_s, tags_col, non_feature_cols, feature_names, ablation_structural_feature_filter, no_evo_structural_feature_filter = unpack(package)
 
-    output = parseLines(config, left, right, features, lines, primary_protein_id_col, amount_of_struct_col, effect_col, aac_col_s, tags_col, non_feature_cols, feature_names)
+    output = parseLines(config, left, right, features, lines, primary_protein_id_col, amount_of_struct_col, effect_col, aac_col_s, tags_col, non_feature_cols, feature_names, ablation_structural_feature_filter = ablation_structural_feature_filter, no_evo_structural_feature_filter = no_evo_structural_feature_filter)
 
     return output
 
 
-def parseLines(config, left, right, features, lines, primary_protein_id_col, amount_of_struct_col, effect_col, aac_col_s, tags_col, non_feature_cols, feature_names):
+def parseLines(
+        config,
+        left,
+        right,
+        features: dict[str, Feature],
+        lines, 
+        primary_protein_id_col, 
+        amount_of_struct_col, 
+        effect_col, 
+        aac_col_s, 
+        tags_col, 
+        non_feature_cols, 
+        feature_names,
+        ablation_structural_feature_filter = False,
+        no_evo_structural_feature_filter = False):
     output = []
     if config.verbosity >= 1:
         config.logger.info(
-            f"parseLines: non_feature_cols: {non_feature_cols}, primary_protein_id_col: {primary_protein_id_col}, aac_col_s: {aac_col_s}, effect_col: {effect_col}, tags_col: {tags_col}, config.target_values: {config.target_values}, lines: {left}-{right} of {len(lines)}"
+            f"parseLines: non_feature_cols: {non_feature_cols}, primary_protein_id_col: {primary_protein_id_col}, aac_col_s: {aac_col_s}, effect_col: {effect_col}, tags_col: {tags_col}, config.target_values: {config.target_values}, lines: {left}-{right} of {len(lines)} {ablation_structural_feature_filter=} {no_evo_structural_feature_filter=}"
         )
 
     max_print = 10
@@ -173,6 +189,17 @@ def parseLines(config, left, right, features, lines, primary_protein_id_col, amo
                 continue
             feat = features[feat_name]
 
+            if ablation_structural_feature_filter:
+                feat_cat = feat.group
+                #config.logger.info(f"{sample_id=} {pos=} {feat_name=} {feat_cat=}")
+                if feat_cat != 'evolutionary' and feat_cat != 'amino acid properties':
+                    continue
+
+            if no_evo_structural_feature_filter:
+                feat_cat = feat.group
+                if feat_cat == 'evolutionary':
+                    continue
+
             try:
                 value = feat.value_from_string(x)
             except:
@@ -196,7 +223,15 @@ def parseLines(config, left, right, features, lines, primary_protein_id_col, amo
 
 
 def parse_structural_features(
-    samples, config, non_feature_cols=[0, 1, 2, 4, 7, 19], primary_protein_id_col=1, aac_col_s=[3, 4, 5], tags_col=7, amount_of_struct_col=19, effect_col=None, filter_none_tv=False
+    samples: SampleSpace,
+    config: Config, 
+    non_feature_cols=[0, 1, 2, 4, 7, 19], 
+    primary_protein_id_col=1, 
+    aac_col_s=[3, 4, 5], 
+    tags_col=7, 
+    amount_of_struct_col=19, 
+    effect_col=None, 
+    filter_none_tv=False
 ):
     file_path = config.path_structural_feature_table
     if file_path is None:
@@ -213,11 +248,24 @@ def parse_structural_features(
         aac_col_s=aac_col_s,
         tags_col=tags_col,
         amount_of_struct_col=amount_of_struct_col,
-        effect_col=effect_col,
+        effect_col=effect_col
     )
 
 
-def parse_feature_table(file_path, samples, config, filter_none_tv, non_feature_cols=[0, 1, 2, 3, 4], primary_protein_id_col=0, aac_col_s=[1], tags_col=3, amount_of_struct_col=4, effect_col=2):
+def parse_feature_table(
+        file_path,
+        samples: SampleSpace, 
+        config, 
+        filter_none_tv, 
+        non_feature_cols=[0, 1, 2, 3, 4], 
+        primary_protein_id_col=0, 
+        aac_col_s=[1], 
+        tags_col=3, 
+        amount_of_struct_col=4, 
+        effect_col=2,
+        ablation_structural_feature_filter=False,
+        no_evo_structural_feature_filter=False
+        ):
     if config.verbosity >= 1:
         config.logger.info(
             f"Reading feature file: {file_path}, non_feature_cols: {non_feature_cols}, primary_protein_id_col: {primary_protein_id_col}, aac_col_s: {aac_col_s}, effect_col: {effect_col}, tags_col: {tags_col}, filter none TV: {filter_none_tv}"
@@ -239,7 +287,9 @@ def parse_feature_table(file_path, samples, config, filter_none_tv, non_feature_
         if feat_name in consts.FEAT_NAME_SYNONYMS:
             feat_name = consts.FEAT_NAME_SYNONYMS[feat_name]
         if feat_name not in samples.features:
-            samples.addFeature(feat_name, "unknown", group="structural")
+            feat_cat_pos, _ = categorize_feat_by_name(feat_name)
+            feat_cat = feature_categories[feat_cat_pos]
+            samples.addFeature(feat_name, "unknown", group=feat_cat)
 
     if config.verbosity >= 1:
         t1 = time.time()
@@ -256,7 +306,12 @@ def parse_feature_table(file_path, samples, config, filter_none_tv, non_feature_
         samples.print_feat_types(config)
 
     output = parseLines(
-        config, 0, len(headless_lines), samples.features, headless_lines, primary_protein_id_col, amount_of_struct_col, effect_col, aac_col_s, tags_col, non_feature_cols, feature_names
+        config, 0, len(headless_lines), samples.features, 
+        headless_lines, primary_protein_id_col, 
+        amount_of_struct_col, effect_col, aac_col_s, tags_col, 
+        non_feature_cols, feature_names,
+        ablation_structural_feature_filter = ablation_structural_feature_filter,
+        no_evo_structural_feature_filter = no_evo_structural_feature_filter
     )
 
     if config.verbosity >= 1:
@@ -305,7 +360,7 @@ def createTrainingSet(
         stop_matrix_transformation=False,
         other_features_path=None,
         filter_none_tv=False,
-        filter_synon=False
+        filter_synon=False        
         ):
     if config.verbosity >= 2:
         config.logger.info(f"Call of createTrainingSet: {external_impute is None=} {for_prediction=} {config.path_to_processed_features_file=}")
@@ -331,11 +386,14 @@ def createTrainingSet(
     # strfg.initFeatures(samples)
     seqfg.initFeatures(config, samples)
 
+    ablation_structural_feature_filter = config.ablation
+    no_evo_structural_feature_filter = config.no_evo
+
     if (config.path_to_processed_features_file is None and config.path_to_imputed_features_file is None and other_features_path is None) or config.overwrite:
-        parse_feature_table(config.path_to_features_file, samples, config, filter_none_tv)
+        parse_feature_table(config.path_to_features_file, samples, config, filter_none_tv, ablation_structural_feature_filter=ablation_structural_feature_filter, no_evo_structural_feature_filter=no_evo_structural_feature_filter)
 
         for additonal_infile in config.add_more_sample_files:
-            parse_feature_table(additonal_infile, samples, config, filter_none_tv)
+            parse_feature_table(additonal_infile, samples, config, filter_none_tv, ablation_structural_feature_filter=ablation_structural_feature_filter, no_evo_structural_feature_filter=no_evo_structural_feature_filter)
 
         if config.fusePositions:
             config.regression = False
@@ -409,12 +467,12 @@ def createTrainingSet(
                 config.add_entry_to_project_file("path_to_processed_features_file", config.path_to_processed_features_file)
 
     elif other_features_path is not None:
-        parse_feature_table(other_features_path, samples, config, filter_none_tv)
+        parse_feature_table(other_features_path, samples, config, filter_none_tv, ablation_structural_feature_filter=ablation_structural_feature_filter, no_evo_structural_feature_filter=no_evo_structural_feature_filter)
 
     elif external_impute is not None:
-        parse_feature_table(config.path_to_imputed_features_file, samples, config, filter_none_tv)
+        parse_feature_table(config.path_to_imputed_features_file, samples, config, filter_none_tv, ablation_structural_feature_filter=ablation_structural_feature_filter, no_evo_structural_feature_filter=no_evo_structural_feature_filter)
     else:
-        parse_feature_table(config.path_to_processed_features_file, samples, config, filter_none_tv)
+        parse_feature_table(config.path_to_processed_features_file, samples, config, filter_none_tv, ablation_structural_feature_filter=ablation_structural_feature_filter, no_evo_structural_feature_filter=no_evo_structural_feature_filter)
         if config.verbosity >= 4:
             samples.print_feat_types(config)
         # Propably call some stuff here, TODO

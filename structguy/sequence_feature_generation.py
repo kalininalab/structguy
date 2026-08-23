@@ -42,31 +42,31 @@ def initFeatures(config, samples):
         dbs.append((db_id, "GPW"))
 
     for db_name, feature_name_tag in dbs:
-        samples.addFeature(f"Wildtype AA rate {feature_name_tag} {db_name}", "real", group="sequence")
-        samples.addFeature(f"Mutant AA rate {feature_name_tag} {db_name}", "real", group="sequence", mutation_specific=True)
-        samples.addFeature(f"Wildtype AA rate gapless {feature_name_tag} {db_name}", "real", group="sequence")
-        samples.addFeature(f"Mutant AA rate gapless {feature_name_tag} {db_name}", "real", group="sequence", mutation_specific=True)
-        samples.addFeature(f"MSA allel freq {feature_name_tag} {db_name}", "real", group="sequence")
+        samples.addFeature(f"Wildtype AA rate {feature_name_tag} {db_name}", "real", group="evolutionary")
+        samples.addFeature(f"Mutant AA rate {feature_name_tag} {db_name}", "real", group="evolutionary", mutation_specific=True)
+        samples.addFeature(f"Wildtype AA rate gapless {feature_name_tag} {db_name}", "real", group="evolutionary")
+        samples.addFeature(f"Mutant AA rate gapless {feature_name_tag} {db_name}", "real", group="evolutionary", mutation_specific=True)
+        samples.addFeature(f"MSA allel freq {feature_name_tag} {db_name}", "real", group="evolutionary")
 
-        samples.addFeature(f"Other mutant AA rate {feature_name_tag} {db_name}", "real", group="sequence", mutation_specific=True)
-        samples.addFeature(f"Other mutant AA rate gapless {feature_name_tag} {db_name}", "real", group="sequence", mutation_specific=True)
-        samples.addFeature(f"PSIC wildtype AA {feature_name_tag} {db_name}", "real", group="sequence")
-        samples.addFeature(f"PSIC mutant AA {feature_name_tag} {db_name}", "real", group="sequence", mutation_specific=True)
-        samples.addFeature(f"dPSIC {feature_name_tag} {db_name}", "real", group="sequence", mutation_specific=True)
+        samples.addFeature(f"Other mutant AA rate {feature_name_tag} {db_name}", "real", group="evolutionary", mutation_specific=True)
+        samples.addFeature(f"Other mutant AA rate gapless {feature_name_tag} {db_name}", "real", group="evolutionary", mutation_specific=True)
+        samples.addFeature(f"PSIC wildtype AA {feature_name_tag} {db_name}", "real", group="evolutionary")
+        samples.addFeature(f"PSIC mutant AA {feature_name_tag} {db_name}", "real", group="evolutionary", mutation_specific=True)
+        samples.addFeature(f"dPSIC {feature_name_tag} {db_name}", "real", group="evolutionary", mutation_specific=True)
 
-        samples.addFeature(f"Positional median dPSIC {feature_name_tag} {db_name}", "real", group="sequence")
-        samples.addFeature(f"Window median dPSIC {feature_name_tag} {db_name}", "real", group="sequence")
-        samples.addFeature(f"Protein median dPSIC {feature_name_tag} {db_name}", "real", group="sequence")
+        samples.addFeature(f"Positional median dPSIC {feature_name_tag} {db_name}", "real", group="evolutionary")
+        samples.addFeature(f"Window median dPSIC {feature_name_tag} {db_name}", "real", group="evolutionary")
+        samples.addFeature(f"Protein median dPSIC {feature_name_tag} {db_name}", "real", group="evolutionary")
 
-        samples.addFeature(f"gemme_evolInd {feature_name_tag} {db_name}", "real", group="sequence")
-        samples.addFeature(f"gemme_evolEpi {feature_name_tag} {db_name}", "real", group="sequence")
-        samples.addFeature(f"gemme_evolCombi {feature_name_tag} {db_name}", "real", group="sequence")
+        samples.addFeature(f"gemme_evolInd {feature_name_tag} {db_name}", "real", group="evolutionary")
+        samples.addFeature(f"gemme_evolEpi {feature_name_tag} {db_name}", "real", group="evolutionary")
+        samples.addFeature(f"gemme_evolCombi {feature_name_tag} {db_name}", "real", group="evolutionary")
 
-        samples.addFeature(f"MSA depth {feature_name_tag} {db_name}", "integer", group="sequence")
+        samples.addFeature(f"MSA depth {feature_name_tag} {db_name}", "integer", group="evolutionary")
 
-    samples.addFeature("Sequence Position Number", "integer", group="amino acid property")
-    samples.addFeature("Relative Sequence Position", "real", group="amino acid property")
-    samples.addFeature("Protein Size", "integer", group="amino acid property")
+    samples.addFeature("Sequence Position Number", "integer", group="amino acid properties")
+    samples.addFeature("Relative Sequence Position", "real", group="amino acid properties")
+    samples.addFeature("Protein Size", "integer", group="amino acid properties")
 
     
 

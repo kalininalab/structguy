@@ -109,6 +109,20 @@ fi
 echo "Installing StructGuy source code using pip ..."
 pip install "$SCRIPTPATH" >&$verbose_stdout
 
+#build and install xgboost from source with RMM support, replacing the
+#plain PyPI wheel pulled in above
+if [ "$verbose" = true ]; then
+    "$SCRIPTPATH"/install_xgboost_rmm.sh -e "$env_name" -v
+else
+    "$SCRIPTPATH"/install_xgboost_rmm.sh -e "$env_name"
+fi
+
+if [ $? -ne 0 ]
+then
+    echo "Building xgboost with RMM support failed, aborting installation."
+    exit 1
+fi
+
 if [ -z $storage_folder ]
 then
     storage_folder="$new_env_path"/share/structguy
