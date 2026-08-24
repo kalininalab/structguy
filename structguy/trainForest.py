@@ -541,6 +541,34 @@ def xgb_train_wrapper(
 
     return booster
 
+def usable_vram_share(config: util.Config, total_mib: float, sub_share: float) -> float:
+    """MiB this process may claim on its GPU, after reserving room for CUDA contexts.
+
+    `sub_share` is the fraction of a GPU this process was scheduled for, so roughly
+    1/sub_share processes are co-resident on the card. Each of them needs its own CUDA
+    context (a few hundred MiB that no pool allocator accounts for) plus slack for
+    fragmentation. Sizing the pools against the raw card total makes the shares add up to
+    100% of the device and the last process to start fails to allocate; that is what
+    limits how far the workers can be fanned out. Subtracting the contexts up front makes
+    the shares add up to something that actually fits.
+    """
+    share = min(max(float(sub_share), 1e-6), 1.0)
+    n_co_resident = 1.0 / share
+    reserve = float(getattr(config, "vram_context_reserve", 1024.0)) * n_co_resident
+    # Never hand back less than 10% of the card, otherwise a badly configured reserve
+    # would starve the process completely.
+    usable = max(total_mib * 0.1, total_mib - reserve)
+
+    if config.verbosity >= 3:
+        config.logger.info(
+            f"VRAM budget: {total_mib=:.0f} MiB {sub_share=:.4f} {n_co_resident=:.1f} "
+            f"reserved={reserve:.0f} MiB usable={usable:.0f} MiB "
+            f"-> this process may use {usable * share:.0f} MiB"
+        )
+
+    return usable
+
+
 def setup_memory_resources(config: util.Config, sub_share: float, cuda_setup=True):
     if cuda_setup:
         setup_cuda_memory(config, sub_share)
@@ -550,10 +578,12 @@ def setup_memory_resources(config: util.Config, sub_share: float, cuda_setup=Tru
 def setup_cuda_memory(config: util.Config, sub_share: float):
     # Get the default memory pool and configure the release threshold
     status, dft_pool = cudart.cudaDeviceGetDefaultMemPool(0)
-    # Set the release threshold to 90% of total device memory
+    # Set the release threshold to 90% of this process' share of the device, after
+    # reserving room for the CUDA contexts of the other processes on the same GPU.
     status, free, total = cudart.cudaMemGetInfo()
 
-    pool_size = int(total * 0.9 * sub_share*config.vram_limit)
+    usable = usable_vram_share(config, total / (1024.0 * 1024.0), sub_share) * 1024.0 * 1024.0
+    pool_size = int(usable * 0.9 * sub_share * config.vram_limit)
 
     if config.verbosity >= 4:
         config.logger.info(f'Setup cuda memory resources: {pool_size=}')
@@ -571,8 +601,12 @@ def setup_cuda_memory(config: util.Config, sub_share: float):
 #@profile
 def setup_rmm_memory(config: util.Config, sub_share: float):
     gmem = util.get_gpu_memory()[0]
-    init_pool = 1024*1024*int(gmem*sub_share*0.7*config.vram_limit)
-    max_pool = 1024*1024*int(gmem*sub_share*0.99*config.vram_limit)
+    usable = usable_vram_share(config, gmem, sub_share)
+    # 0.99 of the share left no slack at all: with the pools of all co-resident processes
+    # summing to the whole card there was nothing left for their CUDA contexts or for
+    # allocator fragmentation. 0.95 of the reserved-adjusted share leaves both.
+    init_pool = 1024*1024*int(usable*sub_share*0.7*config.vram_limit)
+    max_pool = 1024*1024*int(usable*sub_share*0.95*config.vram_limit)
 
     if config.verbosity >= 4:
         config.logger.info(f'Setup memory resources: {sub_share=} {init_pool=:_} {max_pool=:_} {config.multi_gpu=}')

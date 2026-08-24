@@ -48,9 +48,11 @@ def build_lasso_pipeline(cat_mask, regression, cv):
     if regression:
         # Default eps=1e-3 only spans 3 decades below alpha_max; the selected alpha was
         # observed sitting exactly on that lower boundary (MSE still improving at the edge
-        # of the grid), so widen the search further down to find the true optimum. sklearn
-        # >=1.7 deprecated n_alphas in favor of passing the count directly as `alphas`.
-        model = LassoCV(cv=cv, eps=1e-5, alphas=200, n_jobs=-1, max_iter=10_000)
+        # of the grid), so widen the search one more decade down. eps=1e-5/alphas=200 made
+        # this run far slower (small alphas converge much more slowly under coordinate
+        # descent), so keep the widening modest, cap iterations so a non-converging alpha
+        # fails fast instead of silently burning max_iter, and log progress via verbose.
+        model = LassoCV(cv=cv, eps=1e-4, n_jobs=-1, max_iter=2_000, verbose=1)
     else:
         model = LogisticRegressionCV(cv=cv, penalty="l1", solver="liblinear", max_iter=5_000)
 

@@ -1,3 +1,4 @@
+import math
 import random
 import time
 import sys
@@ -18,13 +19,31 @@ from structman.base_utils.base_utils import deep_get_size_of, sizeof_fmt
 from ray.util.queue import Queue
 
 class Parameter:
-    def __init__(self, name, param_type, half_step_limits=None, possible_values=None, regression_specific=False, classification_specific=False, transform_limits=None):
+    """A single hyperparameter and the space the optimizer searches it in.
+
+    `log_scale` makes the optimizer work on log10(value + log_offset) instead of the raw
+    value. Multiplicative parameters such as the learning rate, the number of trees or
+    the regularization terms are only meaningful on a ratio scale: sampling uniformly in
+    [10, 10000] puts 99% of the draws above 100 trees, and uniformly in [0, 2] puts 95%
+    of the learning rate draws above 0.1. Searching in log space spreads the draws over
+    the orders of magnitude that actually differ, and gives the gaussian process a
+    smoother function to model. `log_offset` shifts parameters whose lower bound is 0 so
+    that the logarithm stays finite.
+
+    The conversion is confined to setValue/getValue, so everything downstream (bounds,
+    the MinMaxScaler, the GP, the acquisition function) keeps working on search space
+    values while `config` always holds the real value.
+    """
+
+    def __init__(self, name, param_type, half_step_limits=None, possible_values=None, regression_specific=False, classification_specific=False, transform_limits=None, log_scale=False, log_offset=0.0):
         self.name = name
         self.half_step_limits = half_step_limits
         self.possible_values = possible_values
         self.param_type = param_type
         self.regression_specific = regression_specific
         self.classification_specific = classification_specific
+        self.log_scale = log_scale
+        self.log_offset = log_offset
 
         if self.half_step_limits is None:
             self.half_step_limits = [0, (len(self.possible_values) - 1)]
@@ -32,20 +51,311 @@ class Parameter:
             transform_function, additional_args = transform_limits
             self.half_step_limits = transform_function(half_step_limits, additional_args)
 
+        if self.log_scale:
+            self.half_step_limits = [self.to_search_space(limit) for limit in self.half_step_limits]
+
+    def to_search_space(self, value):
+        if not self.log_scale:
+            return value
+        return math.log10(max(float(value) + self.log_offset, 1e-12))
+
+    def from_search_space(self, value):
+        if not self.log_scale:
+            return value
+        return (10.0 ** float(value)) - self.log_offset
+
     def setValue(self, config, val):
         if self.param_type == "categorical" and not isinstance(val, str):
             val = self.possible_values[round(val)]
+        elif self.log_scale:
+            val = self.from_search_space(val)
         config.setByString(self.name, val)
 
     def getValue(self, config):
         if self.param_type == "categorical":
             category = config.getByString(self.name)
+            val = None
             for pos, cat in enumerate(self.possible_values):
                 if cat == category:
                     val = pos
+            if val is None:
+                # The configured category is not in possible_values; fall back to the
+                # first one instead of raising an UnboundLocalError further down.
+                val = 0
         else:
             val = config.getByString(self.name)
+            if self.log_scale:
+                val = self.to_search_space(val)
         return val
+
+
+class HpoTrace:
+    """Per-subspace diagnostics for one bayesian_optimisation call.
+
+    The log used to record only the resulting objective score, which makes it impossible
+    to tell afterwards whether a candidate came from the gaussian process or from the
+    uniform fallback, which hyperparameter vector produced it, whether the surrogate had
+    any predictive power, and whether an accepted improvement was larger than the
+    evaluation noise. This collects exactly that and prints a summary at the end.
+    """
+
+    def __init__(self, config, param_names, n_iters):
+        self.config = config
+        self.param_names = param_names
+        self.n_iters = n_iters
+        self.t0 = time.time()
+        self.provenance = {}          # sample key -> (source, predicted mu, predicted sigma)
+        self.scores = []              # every finite candidate score
+        self.by_source = {}           # source -> list of scores
+        self.gp_pred_err = []         # |predicted - observed| for gp proposals
+        self.accepts = []             # (score, margin over the previous incumbent)
+        self.blocked = []             # (score, margin, required margin) rejected by the noise gate
+        self.n_dispatched = 0
+        self.repeat = int(getattr(config, "repeat_training", 1) or 1)
+        self.repeat_stds = []         # direct noise measurements from repeated trainings
+        self.gp_noise = None          # noise std the gaussian process learned
+
+    @staticmethod
+    def key(sample):
+        return tuple(round(float(v), 12) for v in np.ravel(sample))
+
+    def describe(self, sample):
+        return ", ".join(f"{n}={float(v):.6g}" for n, v in zip(self.param_names, np.ravel(sample)))
+
+    def record_dispatch(self, sample, source, mu=None, sigma=None):
+        self.provenance[self.key(sample)] = (source, mu, sigma)
+        self.n_dispatched += 1
+        if self.config.verbosity >= 2:
+            pred = "" if mu is None else f" | GP predicted {mu:.6f} +- {sigma:.6f}"
+            self.config.logger.info(f"HPO dispatch #{self.n_dispatched} [{source}]{pred}: {self.describe(sample)}")
+
+    def record_result(self, sample, cv_score, interrupted=False, scores=None):
+        source, mu, sigma = self.provenance.pop(self.key(sample), ("unknown", None, None))
+        usable = cv_score is not None and cv_score == cv_score
+
+        # With repeat_training > 1 every evaluation is already a mean over that many
+        # independent trainings, and mean_scores() records the spread across them in
+        # mean_spear_repeat_std. That is a direct measurement of the evaluation noise, so
+        # prefer it over anything inferred from the candidate scores. The standard error
+        # of the reported mean is that spread divided by sqrt(repeat). Only valid for the
+        # Mean Spearman objective and only when there really were several repeats: with
+        # repeat == 1 the field holds the spread across CV folds, which is not noise.
+        if usable and self.repeat > 1 and self.config.objective_function == "Mean Spearman":
+            rep_std = getattr(scores, "mean_spear_repeat_std", None)
+            if rep_std is not None and rep_std == rep_std and rep_std > 0:
+                self.repeat_stds.append(rep_std / math.sqrt(self.repeat))
+        if usable:
+            self.scores.append(cv_score)
+            self.by_source.setdefault(source, []).append(cv_score)
+            if mu is not None:
+                self.gp_pred_err.append(abs(mu - cv_score))
+        if self.config.verbosity >= 1:
+            if mu is None:
+                pred = ""
+            elif usable:
+                pred = f" | GP predicted {mu:.6f} +- {sigma:.6f} (error {abs(mu - cv_score):.6f})"
+            else:
+                pred = f" | GP predicted {mu:.6f} +- {sigma:.6f}"
+            self.config.logger.info(f"HPO result [{source}] score={cv_score} {interrupted=}{pred}")
+        return source
+
+    def record_accept(self, cv_score, previous_best):
+        margin = None
+        if previous_best is not None and cv_score is not None and cv_score == cv_score:
+            margin = cv_score - previous_best
+        self.accepts.append((cv_score, margin))
+        spread = self.noise_hint()
+        if margin is not None and spread is not None and margin < spread:
+            self.config.logger.info(
+                f"NOTE: accepted a new optimum on a margin of {margin:+.6f}, which is below the "
+                f"observed candidate spread of {spread:.6f} in this subspace. This improvement is "
+                f"not distinguishable from evaluation noise."
+            )
+
+    def accept_gate(self, cv_score, previous_best):
+        """Decide whether an improvement is large enough to be believed.
+
+        The objective is a noisy estimate, so `score > best` alone accepts pure luck.
+        Adopting such a candidate moves the whole configuration onto a value that was
+        never actually shown to be better, and because the incumbent then holds an
+        inflated score nothing can beat it afterwards. Require the margin to exceed a
+        multiple of the estimated evaluation noise instead.
+
+        Returns (allowed, message). Falls through to the old behaviour when the gate is
+        disabled or there is not enough data yet to estimate the noise.
+        """
+        factor = getattr(self.config, "hpo_noise_gate", 1.0)
+        if not factor or factor <= 0:
+            return True, None
+        if previous_best is None or cv_score is None or cv_score != cv_score:
+            return True, None
+        noise = self.noise_hint()
+        if noise is None:
+            return True, None
+
+        margin = cv_score - previous_best
+        required = factor * noise
+        if margin >= required:
+            return True, f"margin {margin:+.6f} >= {factor:g} x noise {noise:.6f}"
+
+        self.blocked.append((cv_score, margin, required))
+        return False, (
+            f"margin {margin:+.6f} is below the noise gate ({factor:g} x {noise:.6f} = {required:.6f}); "
+            f"not adopting this candidate"
+        )
+
+    def noise_hint(self):
+        """Estimated standard deviation of a single evaluation of the objective.
+
+        Three sources, in decreasing order of trustworthiness:
+
+        1. Repeated trainings of the *same* hyperparameters (repeat_training > 1). This
+           is the only one that measures noise directly, because everything except the
+           random seeds is held fixed.
+        2. The noise level the gaussian process learned. The WhiteKernel term absorbs
+           exactly the part of the observed scatter that the smooth Matern component
+           cannot explain, which is the definition we want. It is fitted on normalized
+           targets, so it has to be scaled back by the spread of the observations.
+        3. The scatter of all candidates. A crude fallback: it mixes real hyperparameter
+           effects into the estimate and therefore overestimates. That is the safe
+           direction for a gate, because overestimating only makes acceptance stricter,
+           whereas underestimating reproduces the noise chasing this gate exists to stop.
+
+        Deliberately *not* the scatter of the top few scores: selecting the maximum of a
+        noisy sample pulls the top order statistics together, so their spread understates
+        the noise badly (on the goldstandard_strict run the top three scores had a spread
+        of 0.00015 while the true evaluation noise was around 0.0011).
+
+        Run with repeat_training > 1 to get source 1. It is the only one that measures
+        the noise instead of inferring it, and it is what makes this gate trustworthy.
+        """
+        if self.repeat_stds:
+            return sum(self.repeat_stds) / len(self.repeat_stds)
+
+        if self.gp_noise is not None and self.gp_noise > 0:
+            return self.gp_noise
+
+        if len(self.scores) < 6:
+            return None
+        mean = sum(self.scores) / len(self.scores)
+        return (sum((s - mean) ** 2 for s in self.scores) / (len(self.scores) - 1)) ** 0.5
+
+    def noise_source(self):
+        if self.repeat_stds:
+            return f"repeated trainings (n={len(self.repeat_stds)}, repeat={self.repeat})"
+        if self.gp_noise is not None and self.gp_noise > 0:
+            return "gaussian process WhiteKernel"
+        if len(self.scores) >= 6:
+            return "scatter of all candidates (crude fallback, overestimates)"
+        return "unavailable"
+
+    def log_kernel(self, model, yp=None):
+        try:
+            kernel = model.kernel_
+        except AttributeError:
+            return
+        if self.config.verbosity >= 2:
+            self.config.logger.info(f"HPO fitted GP kernel: {kernel}")
+
+        # Recover the learned noise level and undo the normalize_y scaling, so that it is
+        # expressed in the same units as the objective.
+        try:
+            noise_level = kernel.k2.noise_level
+            lower_bound = kernel.k2.noise_level_bounds[0]
+        except (AttributeError, IndexError, TypeError):
+            return
+        if yp is None or len(yp) < 2:
+            return
+
+        # A noise level sitting on the optimizer's lower bound means the marginal
+        # likelihood preferred to explain every observation as signal, which happens
+        # whenever the points are still sparse relative to the dimensionality. That is
+        # not a measurement of zero noise, it is a failure to identify the noise, and
+        # using it would silently disable the acceptance gate.
+        if noise_level <= lower_bound * 10.0:
+            self.gp_noise = None
+            if self.config.verbosity >= 2:
+                self.config.logger.info(
+                    f"HPO GP noise level {noise_level:.3g} is at its lower bound "
+                    f"({lower_bound:.3g}); the noise is not identifiable from this data yet"
+                )
+            return
+
+        y_std = float(np.std(np.asarray(yp, dtype=float)))
+        if y_std > 0 and noise_level > 0:
+            self.gp_noise = math.sqrt(noise_level) * y_std
+
+    def summary(self, best_scores, new_optimimum):
+        c = self.config
+        c.logger.info("================ HPO subspace summary ================")
+        c.logger.info(f"Parameters ({len(self.param_names)}): {self.param_names}")
+        c.logger.info(f"Wall time: {(time.time() - self.t0) / 3600.0:.2f} h, evaluations: {len(self.scores)}, n_iters budget: {self.n_iters}")
+        for source in sorted(self.by_source):
+            vals = self.by_source[source]
+            c.logger.info(
+                f"  from {source:<20} n={len(vals):4d}  min/mean/max = "
+                f"{min(vals):.6f} / {sum(vals)/len(vals):.6f} / {max(vals):.6f}"
+            )
+        if self.scores:
+            best_cand = max(self.scores)
+            incumbent = util.get_objective_score(c, best_scores, feature_penalty=c.feature_penalty)
+            c.logger.info(f"Best candidate: {best_cand:.6f}   incumbent now: {incumbent}")
+            if isinstance(incumbent, float) and incumbent == incumbent:
+                c.logger.info(f"Best candidate - incumbent: {best_cand - incumbent:+.6f}")
+        else:
+            c.logger.info("No usable candidate scores were produced in this subspace")
+        hint = self.noise_hint()
+        if hint is not None:
+            c.logger.info(f"Estimated evaluation noise: {hint:.6f}  [source: {self.noise_source()}]")
+            gate = getattr(c, "hpo_noise_gate", 1.0)
+            if gate and gate > 0:
+                c.logger.info(f"Acceptance threshold was {gate:g} x noise = {gate * hint:.6f}")
+        else:
+            c.logger.info("Estimated evaluation noise: unavailable, the acceptance gate was inactive")
+        if self.gp_pred_err:
+            mean_err = sum(self.gp_pred_err) / len(self.gp_pred_err)
+            c.logger.info(f"GP surrogate mean absolute prediction error: {mean_err:.6f} over {len(self.gp_pred_err)} gp proposals")
+            if hint is not None:
+                c.logger.info(
+                    f"  -> surrogate error / noise = {mean_err / hint:.2f} "
+                    f"(near 1 means the GP is as good as the data allows, much larger means it is not learning)"
+                )
+        if self.blocked:
+            c.logger.info(f"Improvements rejected by the noise gate: {len(self.blocked)}")
+            for score, margin, required in self.blocked:
+                c.logger.info(f"  rejected {score:.6f} (margin {margin:+.6f}, needed {required:+.6f})")
+        c.logger.info(f"Accepted improvements: {len(self.accepts)}")
+        for score, margin in self.accepts:
+            if margin is not None:
+                c.logger.info(f"  accepted {score:.6f} (margin {margin:+.6f})")
+            else:
+                c.logger.info(f"  accepted {score}")
+        c.logger.info(f"new_optimimum={new_optimimum}")
+        c.logger.info("======================================================")
+
+
+def draw_random_sample(config, bounds, scaler, center_values=None):
+    """Draw a random hyperparameter vector for the non-GP part of the search.
+
+    Drawing uniformly from the whole box is close to useless once the incumbent is
+    already a good configuration: every coordinate is randomized at once, so essentially
+    every draw is far worse than the incumbent and the gaussian process only ever learns
+    what the bad regions look like. Instead most draws are taken from a gaussian ball
+    around the incumbent (in the [0, 1] scaled space, so the width is relative to each
+    parameter's own range), with a configurable fraction still taken from the whole box
+    so that distant regions stay reachable.
+
+    Returns the sample in search space, i.e. the same space as `bounds`.
+    """
+    explore_prob = getattr(config, "hpo_explore_prob", 0.25)
+    local_sigma = getattr(config, "hpo_local_sigma", 0.15)
+
+    if center_values is None or local_sigma <= 0 or np.random.random() < explore_prob:
+        return np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0]), "uniform-explore"
+
+    center = scaler.transform([np.asarray(center_values, dtype=float)])[0]
+    local = np.clip(center + np.random.normal(0.0, local_sigma, bounds.shape[0]), 0.0, 1.0)
+    return scaler.inverse_transform([local])[0], "local-around-incumbent"
 
 
 def fit_gp(model, scaled_xp, yp):
@@ -311,7 +621,12 @@ def bayes_random_init(
         results = []
         try:
             cv_obj = initial_cv_obj
-            for params in np.random.uniform(bounds[:, 0], bounds[:, 1], (n_pre_samples, bounds.shape[0])):
+            init_scaler = MinMaxScaler().fit(np.array([bounds[:, 0], bounds[:, 1]]))
+            pre_samples = [
+                draw_random_sample(config, bounds, init_scaler, initial_values)[0]
+                for _ in range(n_pre_samples)
+            ]
+            for params in pre_samples:
                 for pos, para_value in enumerate(params):
                     parameters[pos].setValue(config, para_value)
                 if config.multi_gpu > 0:
@@ -544,6 +859,8 @@ def bayesian_optimisation(
 
     count_dups = 0
 
+    trace = HpoTrace(config, param_names, n_iters)
+
     if config.verbosity >= 1:
         config.logger.info(f"Number of bayesian optimization iterations: {n_iters=}")
 
@@ -558,6 +875,8 @@ def bayesian_optimisation(
                 config.logger.info(f"{xp=}, {yp=}")
                 config.logger.info(f"{x_list=}, {y_list=}")
                 raise "None in Input"
+
+            trace.log_kernel(model, yp)
 
             if config.verbosity >= 2:
                 tl1 = time.time()
@@ -579,10 +898,13 @@ def bayesian_optimisation(
             if np.any(np.sum(np.abs(next_sample - scaled_xp), axis = 1) <= epsilon):
                 if config.verbosity >= 2:
                     config.logger.info(f"Sampled a duplicate: {next_sample} {bounds}")
-                next_sample = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
+                next_sample, draw_kind = draw_random_sample(config, bounds, scaler, best_params)
                 count_dups += 1
+                trace.record_dispatch(next_sample, f"duplicate-fallback/{draw_kind}")
             else:
+                gp_mu, gp_sigma = model.predict([next_sample], return_std=True)
                 next_sample = scaler.inverse_transform([next_sample])[0]
+                trace.record_dispatch(next_sample, "gaussian-process", mu=float(gp_mu[0]), sigma=float(gp_sigma[0]))
 
             if config.verbosity >= 1:
                 config.logger.info(f"Try out next sampled HP: {next_sample}")
@@ -638,12 +960,29 @@ def bayesian_optimisation(
                 config.logger.info(f"Bayesian optimization, iteration: {n}")
                 config.logger.info(f"Objective score: {cv_score}, unpenalized: {scores.objective_value(config)} {interrupted=}")
 
-            if (not interrupted) and util.objective_function_criterium(config, scores, best_scores, feature_penalty=config.feature_penalty):
+            trace.record_result(next_sample, cv_score, interrupted=interrupted, scores=scores)
+
+            previous_best = util.get_objective_score(config, best_scores, feature_penalty=config.feature_penalty)
+            if isinstance(previous_best, bool):
+                previous_best = None
+
+            accept = (not interrupted) and util.objective_function_criterium(config, scores, best_scores, feature_penalty=config.feature_penalty)
+            if accept:
+                allowed, gate_message = trace.accept_gate(cv_score, previous_best)
+                if not allowed:
+                    accept = False
+                    config.logger.info(f"Rejected candidate: {gate_message}")
+                elif gate_message is not None and config.verbosity >= 2:
+                    config.logger.info(f"Accepting candidate: {gate_message}")
+
+            if accept:
                 best_scores = scores
                 best_first_scores = first_scores
                 best_params = next_sample
                 new_optimimum = True
                 config.logger.info("===========================\nFound new optimum\n===\n")
+                trace.record_accept(cv_score, previous_best)
+                config.logger.info(f"Accepted hyperparameters: {trace.describe(best_params)}")
                 config.logParameter()
                 scores.printOut(config=config)
                 config.logger.info("===========================")
@@ -703,7 +1042,8 @@ def bayesian_optimisation(
         #    ray.get(pg.ready())
 
         for p in range(number_of_procs):
-            next_sample = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
+            next_sample, draw_kind = draw_random_sample(config, bounds, scaler, best_params)
+            trace.record_dispatch(next_sample, f"init/{draw_kind}")
 
             com_queue = Queue()
             out_queue = Queue()
@@ -758,7 +1098,9 @@ def bayesian_optimisation(
                     continue
                 """
 
-                if isinstance(first_scores, float):
+                interrupted = isinstance(first_scores, float)
+
+                if interrupted:
                     cv_score = first_scores
                 else:
                     cv_score = util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)
@@ -766,15 +1108,31 @@ def bayesian_optimisation(
                 if config.verbosity >= 1:
                     config.logger.info(f"Bayesian optimization, iteration: gpu_id: {i} {counts[i]} {current_params_id=} {n_of_sent_hpo_sets=}")
                     counts[i] += 1
-                    config.logger.info(f"Objective score: {cv_score}, unpenalized: {scores.objective_value(config)} {isinstance(first_scores, float)=}")
+                    config.logger.info(f"Objective score: {cv_score}, unpenalized: {scores.objective_value(config)} {interrupted=}")
 
-                
-                if (not isinstance(first_scores, float)) and util.objective_function_criterium(config, scores, best_scores, feature_penalty=config.feature_penalty):
+                trace.record_result(next_sample, cv_score, interrupted=interrupted, scores=scores)
+
+                previous_best = util.get_objective_score(config, best_scores, feature_penalty=config.feature_penalty)
+                if isinstance(previous_best, bool):
+                    previous_best = None
+
+                accept = (not interrupted) and util.objective_function_criterium(config, scores, best_scores, feature_penalty=config.feature_penalty)
+                if accept:
+                    allowed, gate_message = trace.accept_gate(cv_score, previous_best)
+                    if not allowed:
+                        accept = False
+                        config.logger.info(f"Rejected candidate: {gate_message}")
+                    elif gate_message is not None and config.verbosity >= 2:
+                        config.logger.info(f"Accepting candidate: {gate_message}")
+
+                if accept:
                     best_scores = scores
                     best_first_scores = first_scores
                     best_params = next_sample
                     new_optimimum = True
                     config.logger.info("===========================\nFound new optimum\n===\n")
+                    trace.record_accept(cv_score, previous_best)
+                    config.logger.info(f"Accepted hyperparameters: {trace.describe(best_params)}")
                     for pos, para_value in enumerate(best_params):
                         parameters[pos].setValue(config, para_value)
                     config.logParameter()
@@ -817,6 +1175,8 @@ def bayesian_optimisation(
                             config.logger.info(f"{x_list=}, {y_list=}")
                             raise "None in Input"
 
+                        trace.log_kernel(model, yp)
+
                         # Sample next hyperparameter
                         if random_search:
                             x_random = np.random.uniform(bounds[:, 0], bounds[:, 1], size=(random_search, n_params))
@@ -829,15 +1189,19 @@ def bayesian_optimisation(
                         if np.any(np.sum(np.abs(next_sample - scaled_xp), axis = 1) <= epsilon):
                             if config.verbosity >= 2:
                                 config.logger.info(f"Sampled a duplicate: {next_sample} {bounds}")
-                            next_sample = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
+                            next_sample, draw_kind = draw_random_sample(config, bounds, scaler, best_params)
                             count_dups += 1
+                            trace.record_dispatch(next_sample, f"duplicate-fallback/{draw_kind}")
                         else:
+                            gp_mu, gp_sigma = model.predict([next_sample], return_std=True)
                             next_sample = scaler.inverse_transform([next_sample])[0]
+                            trace.record_dispatch(next_sample, "gaussian-process", mu=float(gp_mu[0]), sigma=float(gp_sigma[0]))
                         overall_timeout_start = time.time()
                         current_params_id += 1
                         append_counter = 0
                     else:
-                        next_sample = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
+                        next_sample, draw_kind = draw_random_sample(config, bounds, scaler, best_params)
+                        trace.record_dispatch(next_sample, f"fill/{draw_kind}")
                     com_queue.put(next_sample)
                     n_of_sent_hpo_sets += 1
                     
@@ -899,6 +1263,10 @@ def bayesian_optimisation(
     else:
         for pos, para_value in enumerate(initial_values):
             parameters[pos].setValue(config, para_value)
+        config.logger.info("No new optimum in this subspace, reverted to the incumbent values")
+
+    trace.summary(best_scores, new_optimimum)
+
     if get_bayes_tuple:
         return new_optimimum, best_scores, best_first_scores, return_cv_obj, x_list, y_list
 
@@ -1341,41 +1709,49 @@ def initParameters(
             parameters["tree_depth"] = Parameter("tree_depth", "integer", half_step_limits=config.tree_depth_half_step)
 
         if config.forest_type == "gradient_boost" or config.forest_type == "xgboost":
+            # Learning rates are searched on a log scale. The old range went up to 2.0,
+            # which is far outside anything useful for gradient boosting (values above
+            # ~0.5 make the first trees overshoot and early stopping fires immediately),
+            # and uniform sampling put 95% of the draws above 0.1.
             if config.hpo_do_feat_selection and do_feat_selection:
-                parameters["learning_rate"] = Parameter("learning_rate", "real", half_step_limits=[0.0, 2.0])
-            parameters["learning_rate_1"] = Parameter("learning_rate_1", "real", half_step_limits=[0.0, 2.0])
+                parameters["learning_rate"] = Parameter("learning_rate", "real", half_step_limits=[0.001, 0.5], log_scale=True)
+            parameters["learning_rate_1"] = Parameter("learning_rate_1", "real", half_step_limits=[0.001, 0.5], log_scale=True)
 
         if config.forest_type == "xgboost":
             if config.hpo_do_feat_selection and do_feat_selection:
-                parameters["early_stopping"] = Parameter("early_stopping", "integer", half_step_limits=[1, 1000])
-                parameters["min_child_weight"] = Parameter("min_child_weight", "real", half_step_limits=[0., 100.])
-                parameters["xgb_gamma"] = Parameter("xgb_gamma", "real", half_step_limits=[0.,10.])
-                parameters["xgb_alpha"] = Parameter("xgb_alpha", "real", half_step_limits=[0.,5.])
-                parameters["xgb_lambda"] = Parameter("xgb_lambda", "real", half_step_limits=[0.,5.])
-                parameters["colsample_bytree"] = Parameter("colsample_bytree", "real", half_step_limits=[0.,1.])
-                parameters["colsample_bylevel"] = Parameter("colsample_bylevel", "real", half_step_limits=[0.,1.])
-                parameters["colsample_bynode"] = Parameter("colsample_bynode", "real", half_step_limits=[0.,1.])
-                parameters["max_delta_step"] = Parameter("max_delta_step", "real", half_step_limits=[0.,50.])
+                # Counts, weights and regularization terms are ratio scaled, so they are
+                # searched in log space. log_offset=1 keeps the logarithm finite for the
+                # terms whose lower bound is 0 and keeps 0 itself reachable.
+                parameters["early_stopping"] = Parameter("early_stopping", "integer", half_step_limits=[1, 1000], log_scale=True)
+                parameters["min_child_weight"] = Parameter("min_child_weight", "real", half_step_limits=[0., 100.], log_scale=True, log_offset=1.0)
+                parameters["xgb_gamma"] = Parameter("xgb_gamma", "real", half_step_limits=[0.,10.], log_scale=True, log_offset=1.0)
+                parameters["xgb_alpha"] = Parameter("xgb_alpha", "real", half_step_limits=[0.,5.], log_scale=True, log_offset=1.0)
+                parameters["xgb_lambda"] = Parameter("xgb_lambda", "real", half_step_limits=[0.,5.], log_scale=True, log_offset=1.0)
+                # colsample_* must stay in (0, 1]; xgboost rejects 0.
+                parameters["colsample_bytree"] = Parameter("colsample_bytree", "real", half_step_limits=[0.01,1.])
+                parameters["colsample_bylevel"] = Parameter("colsample_bylevel", "real", half_step_limits=[0.01,1.])
+                parameters["colsample_bynode"] = Parameter("colsample_bynode", "real", half_step_limits=[0.01,1.])
+                parameters["max_delta_step"] = Parameter("max_delta_step", "real", half_step_limits=[0.,50.], log_scale=True, log_offset=1.0)
                 parameters["feat_impact_thresh"] = Parameter("feat_impact_thresh", "real", half_step_limits=[-0.01,0.01])
                 parameters["tree_depth"] = Parameter("tree_depth", "integer", half_step_limits=[1,31])
-                parameters["num_of_trees"] = Parameter("num_of_trees", "integer", half_step_limits=[10,10_000])
-                parameters["max_cat_to_onehot"] = Parameter("max_cat_to_onehot", "integer", half_step_limits=[1,500])
-                parameters["max_cat_threshold"] = Parameter("max_cat_threshold", "integer", half_step_limits=[1,500])
+                parameters["num_of_trees"] = Parameter("num_of_trees", "integer", half_step_limits=[10,10_000], log_scale=True)
+                parameters["max_cat_to_onehot"] = Parameter("max_cat_to_onehot", "integer", half_step_limits=[1,500], log_scale=True)
+                parameters["max_cat_threshold"] = Parameter("max_cat_threshold", "integer", half_step_limits=[1,500], log_scale=True)
 
             parameters["max_sample_parameter_1"] = Parameter("max_sample_parameter_1", "real", half_step_limits=config.max_sample_half_step)
-            parameters["early_stopping_1"] = Parameter("early_stopping_1", "integer", half_step_limits=[1, 1000])
-            parameters["min_child_weight_1"] = Parameter("min_child_weight_1", "real", half_step_limits=[0., 500.])
-            parameters["xgb_gamma_1"] = Parameter("xgb_gamma_1", "real", half_step_limits=[0.,10.])
-            parameters["xgb_alpha_1"] = Parameter("xgb_alpha_1", "real", half_step_limits=[0.,5.])
-            parameters["xgb_lambda_1"] = Parameter("xgb_lambda_1", "real", half_step_limits=[0.,5.])
-            parameters["colsample_bytree_1"] = Parameter("colsample_bytree_1", "real", half_step_limits=[0.,1.])
-            parameters["colsample_bylevel_1"] = Parameter("colsample_bylevel_1", "real", half_step_limits=[0.,1.])
-            parameters["colsample_bynode_1"] = Parameter("colsample_bynode_1", "real", half_step_limits=[0.,1.])
-            parameters["max_delta_step_1"] = Parameter("max_delta_step_1", "real", half_step_limits=[0.,200.])
+            parameters["early_stopping_1"] = Parameter("early_stopping_1", "integer", half_step_limits=[1, 1000], log_scale=True)
+            parameters["min_child_weight_1"] = Parameter("min_child_weight_1", "real", half_step_limits=[0., 500.], log_scale=True, log_offset=1.0)
+            parameters["xgb_gamma_1"] = Parameter("xgb_gamma_1", "real", half_step_limits=[0.,10.], log_scale=True, log_offset=1.0)
+            parameters["xgb_alpha_1"] = Parameter("xgb_alpha_1", "real", half_step_limits=[0.,5.], log_scale=True, log_offset=1.0)
+            parameters["xgb_lambda_1"] = Parameter("xgb_lambda_1", "real", half_step_limits=[0.,5.], log_scale=True, log_offset=1.0)
+            parameters["colsample_bytree_1"] = Parameter("colsample_bytree_1", "real", half_step_limits=[0.01,1.])
+            parameters["colsample_bylevel_1"] = Parameter("colsample_bylevel_1", "real", half_step_limits=[0.01,1.])
+            parameters["colsample_bynode_1"] = Parameter("colsample_bynode_1", "real", half_step_limits=[0.01,1.])
+            parameters["max_delta_step_1"] = Parameter("max_delta_step_1", "real", half_step_limits=[0.,200.], log_scale=True, log_offset=1.0)
             parameters["tree_depth_1"] = Parameter("tree_depth_1", "integer", half_step_limits=[1,31])
-            parameters["num_of_trees_1"] = Parameter("num_of_trees_1", "integer", half_step_limits=[10,10_000])
-            parameters["max_cat_to_onehot_1"] = Parameter("max_cat_to_onehot_1", "integer", half_step_limits=[1,500])
-            parameters["max_cat_threshold_1"] = Parameter("max_cat_threshold_1", "integer", half_step_limits=[1,500])
+            parameters["num_of_trees_1"] = Parameter("num_of_trees_1", "integer", half_step_limits=[10,10_000], log_scale=True)
+            parameters["max_cat_to_onehot_1"] = Parameter("max_cat_to_onehot_1", "integer", half_step_limits=[1,500], log_scale=True)
+            parameters["max_cat_threshold_1"] = Parameter("max_cat_threshold_1", "integer", half_step_limits=[1,500], log_scale=True)
 
         if not config.regression:
             parameters["criterion"] = Parameter("criterion", "categorical", possible_values=config.criteria, classification_specific=True)

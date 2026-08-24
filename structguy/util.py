@@ -81,6 +81,22 @@ class Config:
 
         self.vram_limit = 1.0
         self.setup_cuda_mem = False
+        # MiB of VRAM kept free per co-resident worker process on a GPU. Every process
+        # that touches a GPU needs its own CUDA context on top of whatever RMM pool it
+        # allocates, and the pool allocator needs slack to avoid fragmentation stalls.
+        # Without this reserve the pool shares add up to the full card and the last
+        # process to start fails to allocate.
+        self.vram_context_reserve = 1024.0
+        # Acceptance gate for the HPO: a candidate must beat the incumbent by at least
+        # this multiple of the estimated evaluation noise before it is adopted. 0 or None
+        # restores the old behaviour of accepting any improvement, however small.
+        self.hpo_noise_gate = 1.0
+        # Fraction of the non-GP samples that are drawn uniformly from the whole box.
+        # The rest are drawn around the incumbent, which is far more productive when the
+        # optimization starts from an already good hyperparameter set.
+        self.hpo_explore_prob = 0.25
+        # Width of the local draws, as a fraction of each parameter's range.
+        self.hpo_local_sigma = 0.15
         self.use_external_memory_qdm = False
         self.extMem_max_bin = 128
 
@@ -464,6 +480,18 @@ class Config:
                     self.optimize_mean = True
                 elif arg == 'False':
                     self.optimize_mean = False
+
+            elif opt == 'vram_context_reserve':
+                self.vram_context_reserve = float(arg)
+
+            elif opt == 'hpo_noise_gate':
+                self.hpo_noise_gate = float(arg)
+
+            elif opt == 'hpo_explore_prob':
+                self.hpo_explore_prob = float(arg)
+
+            elif opt == 'hpo_local_sigma':
+                self.hpo_local_sigma = float(arg)
 
             elif opt == 'transform':
                 if arg == 'True':
