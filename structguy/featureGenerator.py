@@ -98,9 +98,8 @@ def parseLines(
         else:
             aac = f"{words[aac_col_s[0]]}{words[aac_col_s[1]]}{words[aac_col_s[2]]}"
 
-        if config.filter_synonymous:
-            if aac[0] == aac[-1]:
-                continue
+        if config.filter_synonymous and aac[0] == aac[-1]:
+            continue
 
         tags = words[tags_col]
         try:

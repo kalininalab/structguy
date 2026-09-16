@@ -99,10 +99,12 @@ class HpoTrace:
     evaluation noise. This collects exactly that and prints a summary at the end.
     """
 
-    def __init__(self, config, param_names, n_iters):
+    def __init__(self, config, param_names, n_iters, parameters=None):
         self.config = config
         self.param_names = param_names
+        self.parameters = parameters
         self.n_iters = n_iters
+        self.confirmation = None      # (entry score, confirmed score, held) once confirmed
         self.t0 = time.time()
         self.provenance = {}          # sample key -> (source, predicted mu, predicted sigma)
         self.scores = []              # every finite candidate score
@@ -120,7 +122,25 @@ class HpoTrace:
         return tuple(round(float(v), 12) for v in np.ravel(sample))
 
     def describe(self, sample):
-        return ", ".join(f"{n}={float(v):.6g}" for n, v in zip(self.param_names, np.ravel(sample)))
+        """Render a sample as `name=value` pairs.
+
+        Samples live in search space, which for a log scaled parameter is log10 of the
+        real value. Printing that raw is actively misleading (a logged
+        `learning_rate_1=-1.50516` is really 0.03125), so show the real value and keep
+        the search space number in brackets.
+        """
+        values = np.ravel(sample)
+        if self.parameters is None:
+            return ", ".join(f"{n}={float(v):.6g}" for n, v in zip(self.param_names, values))
+
+        parts = []
+        for parameter, raw in zip(self.parameters, values):
+            raw = float(raw)
+            if getattr(parameter, "log_scale", False):
+                parts.append(f"{parameter.name}={parameter.from_search_space(raw):.6g} [log10 {raw:+.4f}]")
+            else:
+                parts.append(f"{parameter.name}={raw:.6g}")
+        return ", ".join(parts)
 
     def record_dispatch(self, sample, source, mu=None, sigma=None):
         self.provenance[self.key(sample)] = (source, mu, sigma)
@@ -330,6 +350,16 @@ class HpoTrace:
                 c.logger.info(f"  accepted {score:.6f} (margin {margin:+.6f})")
             else:
                 c.logger.info(f"  accepted {score}")
+        if self.confirmation is not None:
+            entry, confirmed, held = self.confirmation
+            selected = max(self.scores) if self.scores else float("nan")
+            c.logger.info(
+                f"Confirmation of the winner: selected {selected:.6f} -> re-measured {confirmed:.6f} "
+                f"(selection bias {selected - confirmed:+.6f}), subspace entry was {entry}"
+            )
+            c.logger.info(f"  -> the improvement {'held up' if held else 'did NOT hold up, parameters rolled back'}")
+        elif new_optimimum:
+            c.logger.info("Winner was NOT confirmed by a fresh measurement (hpo_confirm_optimum is off)")
         c.logger.info(f"new_optimimum={new_optimimum}")
         c.logger.info("======================================================")
 
@@ -787,8 +817,13 @@ def bayesian_optimisation(
 
     x_list: list[np.ndarray]
 
+    # The scores this subspace starts from, kept so that a winner can be rolled back if
+    # its confirmation measurement does not beat them.
+    entry_best_scores = best_scores
+    entry_best_first_scores = best_first_scores
+
     # while n_fixed_params > 0:
-    
+
     x_list, y_list, bounds, n_params, best_scores, best_first_scores, best_params, initial_values, new_optimimum, n_fixed_params, param_names, integer_type_params, cv_obj, stores = bayes_random_init(
         config,
         parameters,
@@ -859,7 +894,7 @@ def bayesian_optimisation(
 
     count_dups = 0
 
-    trace = HpoTrace(config, param_names, n_iters)
+    trace = HpoTrace(config, param_names, n_iters, parameters=parameters)
 
     if config.verbosity >= 1:
         config.logger.info(f"Number of bayesian optimization iterations: {n_iters=}")
@@ -1264,6 +1299,40 @@ def bayesian_optimisation(
         for pos, para_value in enumerate(initial_values):
             parameters[pos].setValue(config, para_value)
         config.logger.info("No new optimum in this subspace, reverted to the incumbent values")
+
+    # Under common random numbers an evaluation is deterministic given the seed base, so
+    # re-running the winner's hyperparameters would reproduce its score and confirm
+    # nothing. What has to be checked there is whether the improvement survives *new*
+    # seeds, and that is what the re-measurement at the start of the next round does.
+    confirm = (
+        new_optimimum
+        and getattr(config, "hpo_confirm_optimum", True)
+        and not getattr(config, "common_random_numbers", True)
+    )
+    if new_optimimum and not confirm and getattr(config, "common_random_numbers", True):
+        config.logger.info(
+            "Skipping the confirmation measurement: with common random numbers it would "
+            "repeat the same seeds and reproduce the same score. The improvement is "
+            "tested against fresh seeds at the start of the next round instead."
+        )
+
+    # All para_eval workers have been stopped above, so the driver can train on the GPUs
+    # itself without competing with them.
+    if confirm:
+        new_optimimum, best_scores, best_first_scores = confirm_new_optimum(
+            config,
+            cv_obj,
+            parameters,
+            initial_values,
+            entry_best_scores,
+            entry_best_first_scores,
+            best_scores,
+            best_first_scores,
+            trace,
+            samples=samples,
+            raw_feature_matrix_store_id=raw_feature_matrix_store_id,
+            debug=debug,
+        )
 
     trace.summary(best_scores, new_optimimum)
 
@@ -1774,6 +1843,121 @@ def initParameters(
     return parameters
 
 
+def measure_current_config(
+    config: util.Config,
+    cv_obj: DataSAIL_cv,
+    samples: SampleSpace | None = None,
+    raw_feature_matrix_store_id: ray.ObjectRef | None = None,
+    debug=False,
+    label="configuration",
+):
+    """Evaluate the hyperparameters currently held in `config`, once, fresh.
+
+    Uses the same protocol as the HPO candidates so the resulting score is directly
+    comparable to theirs. Returns (scores, first_scores), or (None, None) if the
+    measurement could not be made.
+
+    Callers must only invoke this when no para_eval workers are in flight, otherwise the
+    driver's own training competes with them for the GPUs.
+    """
+    if samples is None:
+        config.logger.info(f"Skipping measurement of the {label}: no sample space available")
+        return None, None
+
+    if config.multi_gpu > 0:
+        gpu_share = config.multi_gpu
+    else:
+        gpu_share = None
+
+    try:
+        scores, first_scores = get_scores(
+            config,
+            cv_obj,
+            samples.feat_corr_matrix,
+            samples.feature_names,
+            raw_feature_matrix_store_id=raw_feature_matrix_store_id,
+            remote=(config.multi_gpu > 0),
+            debug=debug,
+            get_first_scores=True,
+            gpu_share=gpu_share,
+        )
+    except Exception:
+        [e, f, g] = sys.exc_info()
+        g = traceback.format_exc()
+        config.logger.error(f"ERROR while measuring the {label}:\n{e}\n{f}\n{g}")
+        return None, None
+
+    obj_sc = util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)
+    if obj_sc is None or obj_sc != obj_sc:
+        config.logger.info(f"Measurement of the {label} returned None or NaN")
+        return None, None
+
+    return scores, first_scores
+
+
+def confirm_new_optimum(
+    config: util.Config,
+    cv_obj: DataSAIL_cv,
+    parameters: list[Parameter],
+    initial_values,
+    entry_best_scores: util.Scores,
+    entry_best_first_scores: util.Scores,
+    best_scores: util.Scores,
+    best_first_scores: util.Scores,
+    trace,
+    samples: SampleSpace | None = None,
+    raw_feature_matrix_store_id: ray.ObjectRef | None = None,
+    debug=False,
+):
+    """Re-measure the winner of a subspace before letting it stand.
+
+    The score that won was chosen *because* it was the highest of many noisy draws, so it
+    is biased upwards; that bias is what makes the incumbent unbeatable afterwards. An
+    independent measurement of the same configuration carries no such selection, so it
+    replaces the winning score outright rather than being averaged into it.
+
+    If the fresh measurement no longer beats the score this subspace started from, the
+    improvement was luck and the parameters are rolled back.
+
+    Expects `config` to already hold the winning values. Returns
+    (new_optimimum, best_scores, best_first_scores).
+    """
+    confirm_scores, confirm_first_scores = measure_current_config(
+        config, cv_obj, samples=samples,
+        raw_feature_matrix_store_id=raw_feature_matrix_store_id,
+        debug=debug, label="candidate optimum",
+    )
+
+    if confirm_scores is None:
+        config.logger.info("Could not confirm the new optimum, keeping it unverified")
+        return True, best_scores, best_first_scores
+
+    confirmed = util.get_objective_score(config, confirm_scores, feature_penalty=config.feature_penalty)
+    selected = util.get_objective_score(config, best_scores, feature_penalty=config.feature_penalty)
+    entry = util.get_objective_score(config, entry_best_scores, feature_penalty=config.feature_penalty)
+    if isinstance(entry, bool):
+        entry = None
+
+    config.logger.info(
+        f"=========== Confirmation of the subspace winner: selected {selected} -> re-measured {confirmed} "
+        f"(subspace started from {entry}) ==========="
+    )
+
+    if entry is not None and confirmed <= entry:
+        config.logger.info(
+            f"The improvement did not hold up ({confirmed:.6f} <= {entry:.6f}); rolling the "
+            f"parameters of this subspace back to the incumbent values"
+        )
+        for pos, para_value in enumerate(initial_values):
+            parameters[pos].setValue(config, para_value)
+        trace.confirmation = (entry, confirmed, False)
+        return False, entry_best_scores, entry_best_first_scores
+
+    trace.confirmation = (entry, confirmed, True)
+    confirm_scores.printOut(config=config)
+    return True, confirm_scores, confirm_first_scores
+
+
 def remeasure_incumbent(
     config: util.Config,
     cv_obj: DataSAIL_cv,
@@ -1796,38 +1980,17 @@ def remeasure_incumbent(
     unbiased again. The measurement uses the same protocol as the HPO candidates so that
     incumbent and challenger scores stay comparable.
     """
-    if samples is None:
-        config.logger.info("Skipping incumbent re-measurement: no sample space available")
-        return best_scores, first_scores
+    scores, new_first_scores = measure_current_config(
+        config, cv_obj, samples=samples,
+        raw_feature_matrix_store_id=raw_feature_matrix_store_id,
+        debug=debug, label="incumbent",
+    )
 
-    if config.multi_gpu > 0:
-        gpu_share = config.multi_gpu
-    else:
-        gpu_share = None
-
-    try:
-        scores, new_first_scores = get_scores(
-            config,
-            cv_obj,
-            samples.feat_corr_matrix,
-            samples.feature_names,
-            raw_feature_matrix_store_id=raw_feature_matrix_store_id,
-            remote=(config.multi_gpu > 0),
-            debug=debug,
-            get_first_scores=True,
-            gpu_share=gpu_share,
-        )
-    except Exception:
-        [e, f, g] = sys.exc_info()
-        g = traceback.format_exc()
-        config.logger.error(f"ERROR while re-measuring the incumbent, keeping the old scores:\n{e}\n{f}\n{g}")
+    if scores is None:
+        config.logger.info("Keeping the old incumbent scores")
         return best_scores, first_scores
 
     obj_sc = util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)
-    if obj_sc is None or obj_sc != obj_sc:
-        config.logger.info("Incumbent re-measurement returned None or NaN, keeping the old scores")
-        return best_scores, first_scores
-
     old_obj_sc = util.get_objective_score(config, best_scores, feature_penalty=config.feature_penalty)
     config.logger.info(
         f"=========== Re-measured the incumbent: {old_obj_sc} -> {obj_sc} ==========="
@@ -1835,6 +1998,44 @@ def remeasure_incumbent(
     scores.printOut(config=config)
 
     return scores, new_first_scores
+
+
+def reconcile_with_archive(config: util.Config, archive, best_scores, first_scores):
+    """Keep the best configuration whose score was measured rather than selected.
+
+    A round can end on a configuration that is worse than the one it started from: every
+    subspace only ever compares against the current incumbent, so a sequence of accepts
+    that individually looked fine can still drift downhill, and nothing used to notice.
+    The archive holds the best configuration seen so far together with an honest
+    measurement of it, and this restores that configuration whenever the freshly measured
+    incumbent has fallen behind it.
+
+    `archive` is (hyperparameter snapshot, scores, first_scores). Returns the updated
+    (archive, best_scores, first_scores).
+    """
+    current = util.get_objective_score(config, best_scores, feature_penalty=config.feature_penalty)
+    archived = util.get_objective_score(config, archive[1], feature_penalty=config.feature_penalty)
+
+    if not isinstance(current, float) or current != current:
+        config.logger.info("Archive check skipped: the current incumbent has no usable score")
+        return archive, best_scores, first_scores
+
+    if not isinstance(archived, float) or archived != archived:
+        return (config.snapshotHyperParameter(), best_scores, first_scores), best_scores, first_scores
+
+    if current >= archived:
+        config.logger.info(
+            f"Archive check: current incumbent {current:.6f} >= best archived {archived:.6f}, archiving it"
+        )
+        return (config.snapshotHyperParameter(), best_scores, first_scores), best_scores, first_scores
+
+    config.logger.info(
+        f"=========== Archive check: current incumbent {current:.6f} has fallen behind the best "
+        f"measured configuration {archived:.6f}; restoring that configuration ==========="
+    )
+    config.restoreHyperParameter(archive[0])
+    config.logParameter()
+    return archive, archive[1], archive[2]
 
 
 def threeDimHyperOptimization(
@@ -1856,14 +2057,31 @@ def threeDimHyperOptimization(
     n = 1
     score_matrix = {}
 
+    # The starting configuration and its measured score. Nothing may leave the
+    # optimization in a state worse than this without it being noticed.
+    archive = (config.snapshotHyperParameter(), best_scores, first_scores)
+
+    crn = getattr(config, "common_random_numbers", True)
+
     while not converged:
         converged = True
         #if n > 1:
         #    cv_obj.reset_confusion_maps()
 
-        if n > 1:
-            # The scores from round n-1 are a maximum over many noisy evaluations. Take a
-            # fresh, independent measurement of the incumbent before challenging it again.
+        if crn:
+            # Every evaluation in this round trains on the same seeds, so differences
+            # between candidates are differences between hyperparameters rather than
+            # between random draws. The set changes each round, which is what turns the
+            # re-measurement below into a real test: a configuration that only won
+            # because of the seeds it was found on will not survive new ones.
+            config.crn_seed_base = n
+            config.logger.info(f"Round {n}: common random number seed base set to {n}")
+
+        if n > 1 or crn:
+            # The scores from the previous round are a maximum over many evaluations, and
+            # under common random numbers they were taken on the previous round's seeds.
+            # Re-measure the incumbent so it is both unbiased and directly comparable to
+            # the candidates this round will produce.
             best_scores, first_scores = remeasure_incumbent(
                 config,
                 cv_obj,
@@ -1872,6 +2090,9 @@ def threeDimHyperOptimization(
                 samples=samples,
                 raw_feature_matrix_store_id=raw_feature_matrix_store_id,
                 debug=debug,
+            )
+            archive, best_scores, first_scores = reconcile_with_archive(
+                config, archive, best_scores, first_scores
             )
             util.set_estimation_delta(config, first_scores, best_scores)
 
@@ -1947,6 +2168,27 @@ def threeDimHyperOptimization(
             best_scores.printOut(config=config)
         n += 1
 
+    # The loop exits on the configuration the last round happened to end on, whose score
+    # is once more a selected maximum. Measure it, and hand back whichever of it and the
+    # archive is actually better, so the optimization never returns something worse than
+    # the configuration it was started from.
+    best_scores, first_scores = remeasure_incumbent(
+        config,
+        cv_obj,
+        best_scores,
+        first_scores,
+        samples=samples,
+        raw_feature_matrix_store_id=raw_feature_matrix_store_id,
+        debug=debug,
+    )
+    archive, best_scores, first_scores = reconcile_with_archive(config, archive, best_scores, first_scores)
+
+    config.logger.info("=============== Hyperparameter optimization finished ===============")
+    config.logParameter()
+    if best_scores is not None:
+        best_scores.printOut(config=config)
+    config.saveHyperParameter()
+
     cv_obj.reset_confusion_maps()
     return
 
@@ -1985,7 +2227,15 @@ def bayesianComplete(
 
     return
 
-LEAF_SIZE = 4
+# Smallest subspace the tree will optimize. Was 4, which produced leaves that the
+# gaussian process could not learn anything in: a leaf gets n_iters=8, so about 17
+# evaluations, and an ARD kernel over 4 parameters already has 6 hyperparameters of its
+# own to fit. Measured on the goldstandard_strict run, the surrogate's prediction error
+# was 3.2x the evaluation noise in the 4 dimensional leaves against 1.1x in the 8 and 16
+# dimensional nodes, where the error sits at the noise floor and cannot get better. The
+# leaves cost about 9 h per round and produced one accepted improvement out of twelve, so
+# they are not worth running.
+LEAF_SIZE = 8
 MAX_PARAMS = 24
 
 class SubdimensionNode:

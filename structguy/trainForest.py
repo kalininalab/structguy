@@ -14,6 +14,7 @@ from sklearn.metrics import matthews_corrcoef
 import time
 import sys
 import os
+import hashlib
 import traceback
 import ray
 #import contextlib
@@ -88,7 +89,8 @@ def trainRegressionForestWrapper(
     skip_feature_selection=False,
     score_train=True,
     gpu_share=None,
-    proc_id=0
+    proc_id=0,
+    repeat_index=0
 ):
     feats_to_filter, raw_feature_matrix_store_id = store
     config: util.Config = ray.get(config_ref_container[0])
@@ -113,7 +115,8 @@ def trainRegressionForestWrapper(
         sub_gpu_share=gpu_share,
         proc_id=proc_id,
         config_ref_container=config_ref_container,
-        subslice_refs = subslice_refs
+        subslice_refs = subslice_refs,
+        repeat_index=repeat_index
     )
 
 
@@ -439,14 +442,69 @@ def booster_list_predict(
     else:
         return y_pred
 
+def seed_component(value) -> int:
+    """Turn one position identifier into an integer usable in the seed arithmetic.
+
+    Slice ids are only set when a cross validation actually builds the slices. The final
+    model is trained on a slice whose test_slice_id was never assigned and is therefore
+    None; the same holds for any slice constructed outside of a cross validation. Those
+    positions are unique anyway (there is exactly one of them), so mapping them to a
+    constant keeps the seed deterministic instead of crashing.
+    """
+    if value is None:
+        return 0
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        # Named slices (strings) still have to map to a stable number.
+        return int(hashlib.blake2b(str(value).encode(), digest_size=4).hexdigest(), 16)
+
+
 #@profile
+def derive_crn_seed(config: util.Config, repeat_index, cv_slice_id, subslice_id, second_round):
+    """Deterministic training seed for one booster, identical across candidates.
+
+    Seeding from the wall clock means two hyperparameter sets are never trained on the
+    same random draws, so the difference between their scores carries both the effect of
+    the hyperparameters and the effect of the seeds. When the real effect is small (on
+    goldstandard_strict the largest measured effect of any hyperparameter was about 1.4x
+    the evaluation noise) the seed term dominates and the comparison is mostly noise.
+
+    Deriving the seed from the position in the cross validation instead makes every
+    candidate see the same draws, so the seed term cancels in the comparison. The
+    variance of a *difference* falls from 2*sigma^2 to 2*sigma^2*(1-rho), where rho is
+    how strongly the two runs' noise is now correlated.
+
+    The seed deliberately does not depend on the hyperparameters, on the worker that
+    happens to run the evaluation, or on the time; it depends only on which repeat, which
+    fold, which sub-booster and which of the two training rounds this is. `crn_seed_base`
+    shifts the whole set, which is how an independent re-measurement gets fresh draws.
+    """
+    if not getattr(config, "common_random_numbers", True):
+        return int(time.time())
+
+    base = int(getattr(config, "crn_seed_base", 0) or 0)
+    seed = (
+        base * 7_919
+        + seed_component(repeat_index) * 1_000_003
+        + seed_component(cv_slice_id) * 10_007
+        + seed_component(subslice_id) * 101
+        + (1 if second_round else 0)
+    )
+    return seed % (2 ** 31 - 1)
+
+
 def xgb_train_wrapper(
         config: util.Config,
         dtrain: xgb.DMatrix,
         dtest_feature_matrix: xgb.DMatrix,
         second_round = False,
+        seed = None,
         ) -> xgb.Booster:
-        
+
+    if seed is None:
+        seed = int(time.time())
+
     es_list = []
     evals: list[tuple[xgb.DMatrix, str]] = []
     eval_label = 'eval'
@@ -499,7 +557,7 @@ def xgb_train_wrapper(
                 "disable_default_eval_metric": True,
                 "max_cat_to_onehot": int(config.max_cat_to_onehot),
                 "max_cat_threshold": int(config.max_cat_threshold),
-                'random_state' : int(time.time())
+                'random_state' : seed
                 }
             booster: xgb.Booster = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees), early_stopping_rounds= config.early_stopping, evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
         else:
@@ -535,7 +593,7 @@ def xgb_train_wrapper(
                 "disable_default_eval_metric": True,
                 "max_cat_to_onehot": int(config.max_cat_to_onehot_1),
                 "max_cat_threshold": int(config.max_cat_threshold_1),
-                'random_state' : int(time.time())
+                'random_state' : seed
                 }
             booster: xgb.Booster = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees_1), early_stopping_rounds=int(config.early_stopping_1), evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
 
@@ -684,19 +742,19 @@ def retrieve_dmatrix(
 
 @ray.remote(max_retries=0, max_calls=1)
 #@profile
-def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: float, config_ref_container: list[ray.ObjectRef]):
+def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: float, config_ref_container: list[ray.ObjectRef], subslice_index: int = 0):
     config: util.Config
-    filtered_features, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, retain_model = store
+    filtered_features, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, retain_model, repeat_index = store
     config = ray.get(config_ref_container[0])
     cv_slice = unpack(cv_slice)
     util.reset_logger_for_remotes(config)
     if config.verbosity >= 4:
         config.logger.info(f'Call of double_booster_remote: {type(packed_slice_slice)=}')
 
-    return double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_features, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, retain_model)
+    return double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_features, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, retain_model, repeat_index, subslice_index)
 
 #@profile
-def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_features, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, retain_model):
+def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_features, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, retain_model, repeat_index=0, subslice_index=0):
     times = []
     ta = time.time()
 
@@ -712,8 +770,27 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
     slice_slice.filterFeatures(filtered_features)
     ta = add_to_times(times, ta) #1
 
+    # Seed from the position in the cross validation, not from the clock, so that every
+    # candidate trains on the same draws and the comparison between two hyperparameter
+    # sets is not swamped by the difference between their seeds. Uses the slice ids
+    # rather than proc_id, because which worker picks up an evaluation varies between
+    # candidates and would reintroduce exactly the variation this removes.
+    # Only a cross validation assigns test_slice_id; the full slice of the final model and
+    # its sub-slices leave it at None. Falling back to the position in slice_slices keeps
+    # the sub-boosters of one forest on different seeds, and is just as reproducible,
+    # because that order is fixed when the slices are built, not by the scheduling.
+    cv_slice_id = getattr(cv_slice, 'test_slice_id', None)
+    subslice_id = getattr(slice_slice, 'test_slice_id', None)
+    if subslice_id is None:
+        subslice_id = subslice_index
+    seed_first = derive_crn_seed(config, repeat_index, cv_slice_id, subslice_id, False)
+    seed_second = derive_crn_seed(config, repeat_index, cv_slice_id, subslice_id, True)
+
     if config.verbosity >= 4:
-        config.logger.info(f'Call of double_booster: {retain_model=}')
+        config.logger.info(
+            f'Call of double_booster: {retain_model=} {repeat_index=} {cv_slice_id=} '
+            f'{subslice_id=} {seed_first=} {seed_second=}'
+        )
     if config.verbosity >= 5:
         slice_slice.log_attr_sizes(config.logger, label = f'slice_slice {proc_id} ')
         cv_slice.log_attr_sizes(config.logger, label = f'cv slice {proc_id} ')
@@ -738,7 +815,7 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
         config.logger.info(f'Reached after first data retrieval in double_booster_remote {proc_id} {type(dtrain)=}')
 
 
-    booster = xgb_train_wrapper(config, dtrain, dtest_feature_matrix)
+    booster = xgb_train_wrapper(config, dtrain, dtest_feature_matrix, seed=seed_first)
     del dtrain
     del dtest_feature_matrix
     ta = add_to_times(times, ta) #4
@@ -816,7 +893,7 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
         if proc_id == '0_0_0':
             util.dump_ray_logs_snapshot(f'{config.outfolder}/ray_dump_snapshot_1.log')
 
-    booster_2: xgb.Booster = xgb_train_wrapper(config, dtrain, dtest_feature_matrix, second_round=True)
+    booster_2: xgb.Booster = xgb_train_wrapper(config, dtrain, dtest_feature_matrix, second_round=True, seed=seed_second)
     ta = add_to_times(times, ta) #11
 
     if config.verbosity >= 3:
@@ -914,7 +991,8 @@ def trainRegressionForest(
     sub_gpu_share=None,
     proc_id=0,
     config_ref_container=None,
-    subslice_refs=None
+    subslice_refs=None,
+    repeat_index=0
 ):
     times = []
     t_start = ta = time.time()
@@ -1140,11 +1218,11 @@ def trainRegressionForest(
             remote_proc_ids = []
             if config_ref_container is None:
                 config_ref_container = [ray.put(config)]
-            store = ray.put((feats_to_filter, pack(cv_slice), skip_scoring, score_train, raw_feature_matrix_store_id, remote))
+            store = ray.put((feats_to_filter, pack(cv_slice), skip_scoring, score_train, raw_feature_matrix_store_id, remote, repeat_index))
             
             for nested_proc_id, packed_slice_slice in enumerate(cv_slice.slice_slices):
 
-                remote_proc_ids.append(remote_function.remote(packed_slice_slice, store, f'{proc_id}_{nested_proc_id}', sub_share, config_ref_container))
+                remote_proc_ids.append(remote_function.remote(packed_slice_slice, store, f'{proc_id}_{nested_proc_id}', sub_share, config_ref_container, nested_proc_id))
                 if config.slice_by_slice:
                     current_slice = 1
                     break
@@ -1207,7 +1285,7 @@ def trainRegressionForest(
                     if config.slice_by_slice and current_slice < len(cv_slice.slice_slices):
                         nested_proc_id = current_slice
                         packed_slice_slice = cv_slice.slice_slices[current_slice]
-                        remote_proc_ids.append(remote_function.remote(packed_slice_slice, store, f'{proc_id}_{nested_proc_id}', sub_share, config_ref_container))
+                        remote_proc_ids.append(remote_function.remote(packed_slice_slice, store, f'{proc_id}_{nested_proc_id}', sub_share, config_ref_container, nested_proc_id))
                         not_ready = remote_proc_ids
                         current_slice += 1
 
@@ -1230,7 +1308,7 @@ def trainRegressionForest(
             packed_cv_slice = pack(cv_slice)
             for nested_proc_id, packed_slice_slice in enumerate(cv_slice.slice_slices):
                 cv_slice_copy = unpack(packed_cv_slice)
-                res = double_booster(packed_slice_slice, f'{proc_id}_{nested_proc_id}', 1.0, config, feats_to_filter, cv_slice_copy, skip_scoring, score_train, raw_feature_matrix_store_id, remote)
+                res = double_booster(packed_slice_slice, f'{proc_id}_{nested_proc_id}', 1.0, config, feats_to_filter, cv_slice_copy, skip_scoring, score_train, raw_feature_matrix_store_id, remote, repeat_index, nested_proc_id)
 
                 if isinstance(res, int):
                     if config.verbosity >= 1:
@@ -1447,7 +1525,8 @@ def trainForest(
                 overwrite_proc_n=para_number,
                 score_train=score_train,
                 sub_gpu_share=gpu_share,
-                proc_id=proc_id
+                proc_id=proc_id,
+                repeat_index=i
             )
             total_times = aggregate_times(total_times, reg_forest_times)
 
@@ -1563,7 +1642,8 @@ def trainForest(
                             skip_scoring=skip_scoring,
                             score_train=score_train,
                             gpu_share=quota,
-                            proc_id = f'{proc_id}_{cv_id}'
+                            proc_id = f'{proc_id}_{cv_id}',
+                            repeat_index = i
                         )
                     )
                     
@@ -1584,7 +1664,8 @@ def trainForest(
                             skip_scoring=skip_scoring,
                             score_train=score_train,
                             sub_gpu_share=gpu_share,
-                            proc_id = proc_id
+                            proc_id = proc_id,
+                            repeat_index = i
                         )
                     )
                     if cv_interuption is not None and len(slice_result_ids) == 1:

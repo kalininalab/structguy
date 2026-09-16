@@ -97,6 +97,21 @@ class Config:
         self.hpo_explore_prob = 0.25
         # Width of the local draws, as a fraction of each parameter's range.
         self.hpo_local_sigma = 0.15
+        # Re-evaluate a subspace's winner once before adopting it. The score that won is
+        # selected-for-being-high and therefore biased upwards; an independent
+        # measurement of the same configuration is not. Costs one extra evaluation per
+        # subspace that found an improvement.
+        self.hpo_confirm_optimum = True
+        # Train every candidate on the same set of random seeds instead of seeding from
+        # the wall clock. The comparison between two hyperparameter sets then no longer
+        # carries the difference between their random draws, which is the dominant term
+        # when the real effect is small. Costs nothing.
+        self.common_random_numbers = True
+        # Offset applied to every derived seed. Bumped temporarily when a configuration
+        # is measured independently (confirmation, re-measurement), so that those checks
+        # see genuinely fresh seeds and can catch a candidate that only looks good on the
+        # seeds it was selected on.
+        self.crn_seed_base = 0
         self.use_external_memory_qdm = False
         self.extMem_max_bin = 128
 
@@ -492,6 +507,21 @@ class Config:
 
             elif opt == 'hpo_local_sigma':
                 self.hpo_local_sigma = float(arg)
+
+            elif opt == 'hpo_confirm_optimum':
+                if arg == 'True':
+                    self.hpo_confirm_optimum = True
+                elif arg == 'False':
+                    self.hpo_confirm_optimum = False
+
+            elif opt == 'common_random_numbers':
+                if arg == 'True':
+                    self.common_random_numbers = True
+                elif arg == 'False':
+                    self.common_random_numbers = False
+
+            elif opt == 'crn_seed_base':
+                self.crn_seed_base = int(arg)
 
             elif opt == 'transform':
                 if arg == 'True':
@@ -964,6 +994,25 @@ class Config:
 
     def getByString(self, parameter_name):
         return getattr(self, parameter_name, None)
+
+    def snapshotHyperParameter(self):
+        """Capture every hyperparameter value, so a configuration can be restored later.
+
+        Used by the HPO to keep the best configuration whose score was actually measured
+        rather than selected, so that a round which drifts onto something worse can be
+        rolled back instead of becoming the new starting point.
+        """
+        return {hp: getattr(self, hp, None) for hp in self.hyperparameters}
+
+    def restoreHyperParameter(self, snapshot):
+        """Put back a snapshot taken by snapshotHyperParameter().
+
+        Assigns directly rather than going through setByString, because the values in the
+        snapshot were read straight off the config and already have their final types;
+        re-running the coercion would be a no-op at best and a rounding at worst.
+        """
+        for hp, value in snapshot.items():
+            setattr(self, hp, value)
 
 
     def logParameter(self):
