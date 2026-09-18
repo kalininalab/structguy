@@ -116,6 +116,7 @@ class HpoTrace:
         self.repeat = int(getattr(config, "repeat_training", 1) or 1)
         self.repeat_stds = []         # direct noise measurements from repeated trainings
         self.gp_noise = None          # noise std the gaussian process learned
+        self._degenerate_warned = False
 
     @staticmethod
     def key(sample):
@@ -177,7 +178,44 @@ class HpoTrace:
             else:
                 pred = f" | GP predicted {mu:.6f} +- {sigma:.6f}"
             self.config.logger.info(f"HPO result [{source}] score={cv_score} {interrupted=}{pred}")
+
+        self.check_degenerate_spread()
         return source
+
+    # Below this, candidates that differ in their hyperparameters are producing scores
+    # that agree to floating point noise. Chosen well under any real effect (the smallest
+    # ever measured here was 7e-4) and well above GPU non-determinism (~1e-8).
+    DEGENERATE_SPREAD = 1e-6
+
+    def check_degenerate_spread(self):
+        """Warn when the candidates stop depending on their hyperparameters at all.
+
+        If a whole subspace returns the same score, the sampled values are not reaching
+        the model. That happened for months because para_eval forwarded the *subspace
+        entry* config reference to the training tasks instead of one holding the
+        candidate's values, so every candidate trained an identical model and the search
+        was measuring noise. It is silent in every other diagnostic, so check for it
+        directly and say so early rather than after a subspace has burned hours.
+        """
+        if self._degenerate_warned or len(self.scores) < 8:
+            return
+        spread = max(self.scores) - min(self.scores)
+        if spread > self.DEGENERATE_SPREAD:
+            self._degenerate_warned = True      # real variation seen, stop checking
+            return
+
+        self._degenerate_warned = True
+        self.config.logger.warning(
+            f"=============== WARNING: hyperparameters appear to have no effect ===============\n"
+            f"The first {len(self.scores)} candidates of this subspace span only {spread:.3g} "
+            f"({min(self.scores):.10f} .. {max(self.scores):.10f}), which is floating point noise "
+            f"rather than a response to the {len(self.param_names)} parameters being varied "
+            f"({self.param_names}).\n"
+            f"The sampled values are most likely not reaching the training tasks, so the search "
+            f"is ranking identical models. Check that the configuration handed to the remote "
+            f"trainers carries the candidate's values.\n"
+            f"================================================================================="
+        )
 
     def record_accept(self, cv_score, previous_best):
         margin = None
@@ -324,6 +362,14 @@ class HpoTrace:
                 c.logger.info(f"Best candidate - incumbent: {best_cand - incumbent:+.6f}")
         else:
             c.logger.info("No usable candidate scores were produced in this subspace")
+        if len(self.scores) >= 2:
+            spread = max(self.scores) - min(self.scores)
+            c.logger.info(f"Candidate score spread: {spread:.3g}")
+            if spread <= self.DEGENERATE_SPREAD:
+                c.logger.warning(
+                    "  -> that is floating point noise: the hyperparameters did not reach the "
+                    "model and this subspace ranked identical configurations"
+                )
         hint = self.noise_hint()
         if hint is not None:
             c.logger.info(f"Estimated evaluation noise: {hint:.6f}  [source: {self.noise_source()}]")
@@ -1651,6 +1697,25 @@ def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_share,
 
         for pos, para_value in enumerate(params):
             parameters[pos].setValue(config, para_value)
+
+        # The candidate's hyperparameters have just been written into this worker's own
+        # `config`, but the training does not happen here: trainForest hands the work to
+        # further remote tasks, and both trainRegressionForestWrapper and
+        # double_booster_remote rebuild their configuration with
+        # ray.get(config_ref_container[0]).
+        #
+        # Forwarding the container we were handed therefore gives them the configuration
+        # as it was at the *start of the subspace* and silently discards every sampled
+        # value, so every candidate trains an identical model and the whole subspace
+        # returns the same score. The only hyperparameter that used to survive was
+        # corr_thresh, because filterCorrelatedFeats() is evaluated by trainForest itself
+        # and its result is shipped separately.
+        #
+        # Publish the mutated configuration and hand the workers that instead. The
+        # reference is rebound on every iteration, so the previous one is released and
+        # the object store does not grow.
+        candidate_config_ref = [ray.put(config)]
+
         scores, first_scores = get_scores(
             config,
             cv_obj,
@@ -1662,7 +1727,7 @@ def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_share,
             get_first_scores=True,
             cv_interuption=(0.95, best_first_scores),
             gpu_share=gpu_share, proc_id=proc_id,
-            config_ref_container=config_ref_container
+            config_ref_container=candidate_config_ref
             )
         
         
