@@ -240,7 +240,7 @@ def para_mmseqs(store, db, indeces, temp_fasta, n_threads):
             [
                 config.mmseqs_path,
                 "easy-search",
-                temp_fasta,
+                cp_temp_fasta,
                 mmseqs2_search_db,
                 temp_outfile,
                 temp_subfolder,
@@ -256,6 +256,9 @@ def para_mmseqs(store, db, indeces, temp_fasta, n_threads):
         )
         p.wait()
 
+        if p.returncode != 0 or not os.path.isfile(temp_outfile):
+            raise RuntimeError(f'mmseqs easy-search failed for {mmseqs2_search_db} (return code {p.returncode})')
+
         config.logger.info(f'finished Para mmseqs2: {mmseqs2_search_db=}')
 
         f = open(temp_outfile, "r")
@@ -263,7 +266,7 @@ def para_mmseqs(store, db, indeces, temp_fasta, n_threads):
         f.close()
 
         if len(lines) == 0:
-            return
+            continue
 
         for line in lines:
             if line == "":
@@ -307,6 +310,12 @@ def do_mmseqs_search(
     n_mapped_sequences = 0
     M = 0
     max_seqs = '5000'
+
+    for db in dbs:
+        missing = [index for index in range(n_splits) if not os.path.exists(mmseqs2_search_dbs[db].replace('_search_db', f'_{index}_search_db') + '.dbtype')]
+        if len(missing) > 0:
+            pattern = mmseqs2_search_dbs[db].replace('_search_db', '_{index}_search_db')
+            raise FileNotFoundError(f'Missing {len(missing)} of {n_splits} mmseqs2 split search DBs for {db} ({pattern}): indices {missing}')
 
     store = ray.put((config, mmseqs2_search_dbs, max_seqs))
 
@@ -1019,6 +1028,164 @@ def gpw_pipeline(config, samples: SampleSpace):
     ray.get(proc_ids)
 
     return gpw_map, prot_id_back_map
+
+STRUCTURAL_ALIGNMENT_ID = 'structural'
+
+
+def parse_structman_alignment(path: str) -> tuple[list[str], str, list[tuple[str, str]]]:
+    """Parse one alignment file of StructMAn's --fetch_alignments output.
+
+    The file is a query anchored matrix (see structman/lib/output/alignments.py): one
+    column per sequence position, a <query> row with AA:SimpleClass cells and one row per
+    structure with AA:ResNr:SimpleClass:Recommended cells or '-'.
+
+    Returns (candidate input ids, query sequence, rows), where rows are (label, aligned sequence)
+    with one character per query position. Rows without any aligned residue are dropped
+    and rows with identical aligned sequences (chains of a homomer, duplicate models) are
+    kept once, at their first occurrence; StructMAn orders the rows by recommended
+    residues and coverage, so that is the best of them.
+    """
+    input_ids: list[str] = []
+    query_seq = None
+    rows: list[tuple[str, str]] = []
+    seen_seqs = set()
+    seen_labels: dict[str, int] = {}
+
+    with open(path, 'r') as f:
+        for line in f:
+            line = line.rstrip('\n')
+            if len(line) == 0:
+                continue
+            if line[0] == '#':
+                for field in line[1:].strip().split('\t'):
+                    if field.startswith('Protein:'):
+                        input_ids.append(field[len('Protein:'):].strip())
+                    elif field.startswith('Input ID:'):
+                        # StructMAn joins the input ids with ',', which can also be part
+                        # of an id, so every contiguous join of the pieces is a candidate.
+                        # The caller keeps the ones that are protein ids of the samples.
+                        pieces = field[len('Input ID:'):].strip().split(',')
+                        for a in range(len(pieces)):
+                            for b in range(a + 1, len(pieces) + 1):
+                                input_ids.append(','.join(pieces[a:b]))
+                input_ids = list(dict.fromkeys(i for i in input_ids if i != ''))
+                continue
+
+            fields = line.split('\t')
+            label = fields[0]
+            if label == 'Structure':
+                continue
+
+            aligned = ''.join('-' if cell == '-' else cell.split(':')[0] for cell in fields[3:])
+
+            if label == '<query>':
+                query_seq = aligned
+                continue
+
+            if aligned.count('-') == len(aligned) or aligned in seen_seqs:
+                continue
+            seen_seqs.add(aligned)
+
+            if label in seen_labels:
+                seen_labels[label] += 1
+                label = f'{label}_{seen_labels[label]}'
+            else:
+                seen_labels[label] = 1
+            rows.append((label, aligned))
+
+    return input_ids, query_seq, rows
+
+
+def structural_alignment_pipeline(config, samples: SampleSpace) -> dict[str, dict[str, str]]:
+    """Turn StructMAn's structure alignments into the 'structural' stacked alignment.
+
+    Writes one query anchored fasta per protein into the msa folder, with the same
+    layout as the gpw alignments (<msa_folder>/<prot>/structural/<prot>_structural.fasta),
+    and computes its PSIC profile and GEMME predictions, so calcSeqFeat can featurize it
+    like the other stacked alignments.
+    """
+    struct_map: dict[str, dict[str, str]] = {}
+    alignment_folder = config.path_to_structman_alignments
+    if alignment_folder is None or not os.path.isdir(alignment_folder):
+        config.logger.info(f'No StructMAn alignments folder found: {alignment_folder}')
+        return struct_map
+
+    seq_list_id = STRUCTURAL_ALIGNMENT_ID
+    psic_jobs = []
+    current_job = 0
+    gemme_chunks = []
+    current_chunk = 0
+    n_skipped = 0
+
+    for fn in sorted(os.listdir(alignment_folder)):
+        if not fn.endswith('.tsv'):
+            continue
+        input_ids, query_seq, rows = parse_structman_alignment(f'{alignment_folder}/{fn}')
+
+        if query_seq is None or len(rows) == 0:
+            if config.verbosity >= 2:
+                config.logger.info(f'Skipped structure alignment {fn}: {query_seq is None=} {len(rows)=}')
+            n_skipped += 1
+            continue
+
+        for prot_id in input_ids:
+            if prot_id not in samples.sequence_map:
+                continue
+            if samples.sequence_map[prot_id][0] != query_seq:
+                config.logger.info(f'Skipped structure alignment {fn} for {prot_id}: query sequence differs from the sample sequence')
+                n_skipped += 1
+                continue
+
+            cl_prot_id = clean_prot_id(prot_id)
+            sub_folder = f'{config.msa_folder_path}/{cl_prot_id}/{seq_list_id}'
+            if not os.path.isdir(sub_folder):
+                os.makedirs(sub_folder)
+
+            target_file = f'{sub_folder}/{cl_prot_id}_{seq_list_id}.fasta'
+            psic_file = f'{sub_folder}/{cl_prot_id}_{seq_list_id}.psic'
+
+            if not os.path.exists(target_file) or config.overwrite:
+                # The query goes first, parseMsaFasta takes the first entry as the seed
+                lines = [f'>{cl_prot_id}\n{query_seq}\n']
+                for label, aligned in rows:
+                    lines.append(f'>{label}\n{aligned}\n')
+                with open(target_file, 'w') as f:
+                    f.write(''.join(lines))
+
+            check_psic_file(psic_file)
+            if not os.path.isfile(psic_file) or config.overwrite:
+                if len(psic_jobs) == current_job:
+                    psic_jobs.append([])
+                psic_jobs[current_job].append((target_file, psic_file))
+                current_job += 1
+                if current_job >= config.proc_n:
+                    current_job = 0
+
+            has_gemme = any(fi.endswith('.txt') and fi.count('normPred') > 0 for fi in os.listdir(sub_folder))
+            if not has_gemme or config.overwrite:
+                if len(gemme_chunks) == current_chunk:
+                    gemme_chunks.append([])
+                gemme_chunks[current_chunk].append(f'{cl_prot_id}/{seq_list_id}/{cl_prot_id}_{seq_list_id}.fasta')
+                current_chunk += 1
+                if current_chunk >= config.proc_n:
+                    current_chunk = 0
+
+            struct_map[cl_prot_id] = {seq_list_id: target_file}
+
+    config.logger.info(
+        f'Structural alignments: {len(struct_map)} proteins, {n_skipped} skipped, '
+        f'{sum(len(j) for j in psic_jobs)} PSIC and {sum(len(c) for c in gemme_chunks)} GEMME jobs'
+    )
+
+    config_store = ray.put(config)
+    proc_ids = [para_psic.remote(package, config_store) for package in psic_jobs]
+    # Waited for, unlike in gpw_pipeline: the GEMME output is parsed right after the
+    # sequence features are calculated.
+    proc_ids += [para_gemme.remote(chunk, config.msa_folder_path, proc_id, config.overwrite, False, 2) for proc_id, chunk in enumerate(gemme_chunks)]
+    ray.get(proc_ids)
+
+    return struct_map
+
 
 def afdb_msa_pipeline(config, samples: SampleSpace):
     msa_map = {}
@@ -1793,12 +1960,20 @@ def getSequenceFeatures(config, samples, n_of_processes=6, update_mode=False):
     
     #config.msa_dbs = ['smsa']
     config.msa_dbs = ['gpw_distant', 'gpw_close']
+    if config.path_to_structman_alignments is not None:
+        config.msa_dbs.append(STRUCTURAL_ALIGNMENT_ID)
     config.gpw_dbs = []
     initFeatures(config, samples)
     #msa_map, gpw_map = local_ali_pipeline(config, samples, n_of_processes=n_of_processes, update_mode=update_mode)
 
     #msa_map, prot_id_back_map = afdb_msa_pipeline(config, samples)
     msa_map, prot_id_back_map = gpw_pipeline(config, samples)
+
+    if STRUCTURAL_ALIGNMENT_ID in config.msa_dbs:
+        for prot_key, db_paths in structural_alignment_pipeline(config, samples).items():
+            if prot_key not in msa_map:
+                msa_map[prot_key] = {}
+            msa_map[prot_key].update(db_paths)
     
     gpw_map = {}
 

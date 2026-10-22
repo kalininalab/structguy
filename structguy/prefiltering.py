@@ -4,7 +4,7 @@ import sys
 import traceback
 from scipy import stats
 
-from structguy.util import Config, unpack
+from structguy.util import Config, unpack, get_samples
 from structguy.support_classes import CrossValidationSlice
 
 def dummy_featureTargetCorr(train_targets, feat_name, feature_value_vector):
@@ -17,10 +17,12 @@ def dummy_featureTargetCorr(train_targets, feat_name, feature_value_vector):
             continue
         val_list_1.append(value)
         val_list_2.append(tv)
+    if len(val_list_1) == 0:
+        return "all_missing", 0
     if min(val_list_1) == max(val_list_1):
         return (
             "const",
-            f"Min Val: {min(val_list_1)}, Max Val: {max(val_list_1)}, Val-type: {type(val_list_1[0])} , len vals : {len(val_list_1)}, in deac features: {feat_name in self.deactivated_features}",
+            f"Min Val: {min(val_list_1)}, Max Val: {max(val_list_1)}, Val-type: {type(val_list_1[0])} , len vals : {len(val_list_1)}",
         )
     try:
         corr, p_val = stats.spearmanr(val_list_1, val_list_2)
@@ -30,10 +32,12 @@ def dummy_featureTargetCorr(train_targets, feat_name, feature_value_vector):
 
 
 def dummy_addToTvmbMap(train_sample_ids, train_targets, feat_name, samples, config, name):
-    try:
-        feature_value_vector = samples.get_feature_value_vector(train_sample_ids, feat_name)
-    except KeyError:
-        return True
+    """Returns why the feature has to be removed from the slice, or None if it can stay."""
+    feature_value_vector = samples.get_feature_value_vector(train_sample_ids, feat_name)
+    if feature_value_vector is None:
+        if config.verbosity >= 5:
+            print(f"{name} - Removed feature: {feat_name} because it is not in the feature matrix")
+        return "not in feature matrix"
 
     try:
         target_corr, target_p_val = dummy_featureTargetCorr(train_targets, feat_name, feature_value_vector)
@@ -42,26 +46,30 @@ def dummy_addToTvmbMap(train_sample_ids, train_targets, feat_name, samples, conf
             [e, f, g] = sys.exc_info()
             g = traceback.format_exc()
             print(f"Error: cant get feature target corr for: {feat_name=} due to:\n{e}\n{f}\n{g}")
-        return True
+        return "error in target correlation"
+    if target_corr == "all_missing":
+        if config.verbosity >= 5:
+            print(f"{name} - Removed feature: {feat_name} due to only missing values in the train set")
+        return "only missing values"
     if target_corr == "const":
         if config.verbosity >= 5:
             print(f"{name} - Removed feature: {feat_name} due to constant feature values, info: {target_p_val}")
-        return True
+        return "constant"
     if target_corr is None:
         # self.removeFeature(feat_name)
         if config.verbosity >= 5:
             print(f"{name} - Removed feature: {feat_name} due to None target_corr, len of values: {target_p_val}")
-        return True
-    return False
+        return "no target correlation"
+    return None
 
 @ray.remote
 def remote_tvmb_calculation(packed_slice, feat_names, packed_samples, config):
     train_sample_ids, train_targets, name = ray.get(packed_slice[0])
-    unpacked_samples = unpack(ray.get(packed_samples[0]))
+    unpacked_samples = get_samples(packed_samples[0])
     results = []
     for feat_name in feat_names:
-        to_remove = dummy_addToTvmbMap(train_sample_ids, train_targets, feat_name, unpacked_samples, config, name)
-        results.append((to_remove, feat_name))
+        reason = dummy_addToTvmbMap(train_sample_ids, train_targets, feat_name, unpacked_samples, config, name)
+        results.append((reason, feat_name))
     return results
 
 def detectBiasedFeaturesByMeanCorrelation(
@@ -105,14 +113,16 @@ def detectBiasedFeaturesByMeanCorrelation(
         if config.verbosity >= 4:
             print(f"Init tvmb_map for slice {cv_slice.name}")
         feats_to_remove = []
+        removal_reasons = {}
         cv_slice.tvmb_map = {}
         if not dummy_call or remote:
             if samples is None:
-                samples = unpack(ray.get(samples_store_id))
+                samples = get_samples(samples_store_id)
             for feat_name in cv_slice.feature_names:
                 to_remove = cv_slice.addToTvmbMap(feat_name, samples, config, dummy_call=dummy_call)
                 if to_remove:
                     feats_to_remove.append(feat_name)
+                    removal_reasons.setdefault("unusable for target correlation", []).append(feat_name)
         else:
             remote_process_ids = []
             packed_slice = ray.put((cv_slice.train_sample_ids, cv_slice.train_targets, cv_slice.name))
@@ -134,14 +144,23 @@ def detectBiasedFeaturesByMeanCorrelation(
 
             remote_results = ray.get(remote_process_ids)
             for results in remote_results:
-                for to_remove, feat_name in results:
-                    if to_remove:
+                for reason, feat_name in results:
+                    if reason is not None:
                         feats_to_remove.append(feat_name)
+                        removal_reasons.setdefault(reason, []).append(feat_name)
 
-        if config.verbosity >= 4:
-            print(f"Init tvmb_map for {cv_slice.name=} {len(feats_to_remove)=}")
+        n_feats_before = len(cv_slice.feature_names)
         for feat_name in feats_to_remove:
             cv_slice.removeFeature(feat_name)
+        if config.verbosity >= 2:
+            reason_counts = ", ".join(f"{reason}: {len(names)}" for reason, names in sorted(removal_reasons.items()))
+            config.logger.info(
+                f"Unusable feature filter in slice {cv_slice.name}: permanently removed {len(feats_to_remove)} of {n_feats_before} features, "
+                f"{len(cv_slice.feature_names)} left ({reason_counts if reason_counts else 'nothing removed'})"
+            )
+        if config.verbosity >= 4:
+            for reason, names in sorted(removal_reasons.items()):
+                config.logger.info(f"Unusable feature filter in slice {cv_slice.name}, {reason}: {sorted(names)}")
 
     t1 = time.time()
     if dummy_call:
@@ -175,6 +194,12 @@ def detectBiasedFeaturesByMeanCorrelation(
     if return_list:
         return to_filter
 
+    n_feats_before = len(cv_slice.feature_names)
     cv_slice.filterFeatures(to_filter, print_out=print_out)
+    if config.verbosity >= 3:
+        config.logger.info(
+            f"TVMB filter in slice {cv_slice.name}: {n_feats_before} -> {len(cv_slice.feature_names)} active features "
+            f"({len(to_filter)} names on the filter list, {len(pre_filter) if pre_filter is not None else 0} of them from the pre-filter)"
+        )
 
     return True

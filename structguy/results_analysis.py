@@ -72,7 +72,7 @@ def parse_feature_table(filepath):
     return protein_info
 
 
-def write_protein_wise_performances(outfile, protein_wise_results: list[tuple[str, float]], protein_info: dict[str, tuple[int, int]], err_corrs: list[float]):
+def write_protein_wise_performances(outfile, protein_wise_results: list[tuple[str, float]], protein_info: dict[str, tuple[int, int]], err_corrs: list[float] | None):
 
     lines = ["Protein Identifier\tPerformance\tProtein Length\t# of SAVs\tError-STD-Correlation\n"]
 
@@ -81,7 +81,9 @@ def write_protein_wise_performances(outfile, protein_wise_results: list[tuple[st
 
         prot_len, num_of_savs = protein_info[prot_id]
 
-        lines.append(f'{prot_id}\t{performance_value}\t{prot_len}\t{num_of_savs}\t{err_corrs[prot_nr]}\n')
+        err_corr = err_corrs[prot_nr] if err_corrs is not None else 'NA'
+
+        lines.append(f'{prot_id}\t{performance_value}\t{prot_len}\t{num_of_savs}\t{err_corr}\n')
 
     f = open(outfile, 'w')
     f.write(''.join(lines))

@@ -117,6 +117,13 @@ class HpoTrace:
         self.repeat_stds = []         # direct noise measurements from repeated trainings
         self.gp_noise = None          # noise std the gaussian process learned
         self._degenerate_warned = False
+        self.gp_history = []          # (predicted mu, predicted sigma, observed) of gp proposals
+        self.last_gp_mu = None        # prediction for the most recent gp proposal
+        self.gp_since_accept = 0      # gp results since the last accepted improvement
+        self.gp_history_at_accept = 0 # len(gp_history) at the last accepted improvement
+        self.stop_reason = None       # set once should_stop() decided to stop
+        self.n_failed = 0             # evaluations with folds that produced no model
+        self.length_scales = None     # last fitted Matern length scale per parameter
 
     @staticmethod
     def key(sample):
@@ -146,12 +153,31 @@ class HpoTrace:
     def record_dispatch(self, sample, source, mu=None, sigma=None):
         self.provenance[self.key(sample)] = (source, mu, sigma)
         self.n_dispatched += 1
+        if mu is not None:
+            self.last_gp_mu = mu
         if self.config.verbosity >= 2:
             pred = "" if mu is None else f" | GP predicted {mu:.6f} +- {sigma:.6f}"
             self.config.logger.info(f"HPO dispatch #{self.n_dispatched} [{source}]{pred}: {self.describe(sample)}")
 
-    def record_result(self, sample, cv_score, interrupted=False, scores=None):
+    def record_result(self, sample, cv_score, interrupted=False, scores=None, failed=False):
         source, mu, sigma = self.provenance.pop(self.key(sample), ("unknown", None, None))
+
+        # Folds that produced no model enter the score as zeros, so the score of such an
+        # evaluation is an artifact of how many folds dropped out, not a value of the
+        # objective. Keep it out of every statistic (noise, gp errors, early stop bias),
+        # but let a failed gp proposal count toward the early stop patience, so a gp that
+        # only proposes failing configurations still stops.
+        if failed:
+            self.n_failed += 1
+            if mu is not None:
+                self.gp_since_accept += 1
+            if self.config.verbosity >= 1:
+                n_folds = getattr(scores, "failed_folds", 0)
+                self.config.logger.info(
+                    f"HPO result [{source}] FAILED: {n_folds} fold(s) without a model, score={cv_score} "
+                    f"is not used as a value of the objective"
+                )
+            return source
         usable = cv_score is not None and cv_score == cv_score
 
         # With repeat_training > 1 every evaluation is already a mean over that many
@@ -170,6 +196,8 @@ class HpoTrace:
             self.by_source.setdefault(source, []).append(cv_score)
             if mu is not None:
                 self.gp_pred_err.append(abs(mu - cv_score))
+                self.gp_history.append((mu, sigma, cv_score))
+                self.gp_since_accept += 1
         if self.config.verbosity >= 1:
             if mu is None:
                 pred = ""
@@ -218,6 +246,8 @@ class HpoTrace:
         )
 
     def record_accept(self, cv_score, previous_best):
+        self.gp_since_accept = 0
+        self.gp_history_at_accept = len(self.gp_history)
         margin = None
         if previous_best is not None and cv_score is not None and cv_score == cv_score:
             margin = cv_score - previous_best
@@ -293,18 +323,115 @@ class HpoTrace:
         if self.gp_noise is not None and self.gp_noise > 0:
             return self.gp_noise
 
+        residual_scale = self.gp_residual_scale()
+        if residual_scale is not None:
+            return residual_scale
+
+        return self.robust_scatter()
+
+    @staticmethod
+    def robust_scale(values):
+        """Scaled median absolute deviation, None if it is 0 (more than half identical)."""
+        center = float(np.median(values))
+        mad = float(np.median([abs(v - center) for v in values]))
+        return 1.4826 * mad if mad > 0 else None
+
+    def gp_residual_scale(self):
+        """Robust spread of the gp's misses (predicted - observed) around their median.
+
+        Used when the gp's own noise level is not identifiable. Unlike the scatter of the
+        candidate scores it does not contain the real effect of the hyperparameters (an
+        improving subspace inflated that scatter until the gate blocked every further
+        improvement), and centering on the median removes the gp's systematic optimism.
+        It still contains the surrogate's own error, so it errs on the high side.
+        """
+        if len(self.gp_history) < 6:
+            return None
+        return self.robust_scale([mu - y for mu, _, y in self.gp_history])
+
+    def robust_scatter(self):
+        """Robust scale (scaled median absolute deviation) of all candidate scores.
+
+        Not the standard deviation: a single failed or partial evaluation (a score of 0.49
+        among 0.63s) inflated it to 0.05 and with it the gate, so that no real improvement
+        could be accepted any more. None with too few scores, or when more than half of
+        them are identical (a plateau), where the scatter says nothing about the noise.
+        """
         if len(self.scores) < 6:
             return None
-        mean = sum(self.scores) / len(self.scores)
-        return (sum((s - mean) ** 2 for s in self.scores) / (len(self.scores) - 1)) ** 0.5
+        return self.robust_scale(self.scores)
+
+    def stop_threshold(self):
+        """The smallest improvement worth continuing for: the acceptance gate, with
+        hpo_min_improvement as a floor. Returns (threshold, description)."""
+        floor = float(getattr(self.config, "hpo_min_improvement", 0.001) or 0.0)
+        factor = getattr(self.config, "hpo_noise_gate", 1.0)
+        noise = self.noise_hint()
+        if factor and factor > 0 and noise is not None and factor * noise > floor:
+            return factor * noise, f"acceptance gate {factor:g} x noise {noise:.6f} [{self.noise_source()}]"
+        return floor, "hpo_min_improvement floor"
+
+    def should_stop(self, incumbent):
+        """Early stopping of this subspace.
+
+        Stops once, over the last hpo_stop_window gp proposals,
+          (a) none was accepted or beats the incumbent by the threshold (stop_threshold),
+              so the window only starts after the last accepted improvement, and
+          (b) the gp's most recent prediction, minus the optimism it showed on those
+              proposals (median of predicted - observed), does not either.
+        Neither the raw prediction error nor the scatter of the scores is used: the gp
+        is systematically optimistic about the points it selects, so a small error can
+        hide a promise that never materializes, and a small scatter comes as much from
+        sampling around the incumbent or on a plateau as from a flat objective.
+
+        Once true it stays true, so the remaining in-flight evaluations wind down.
+        """
+        if self.stop_reason is not None:
+            return True
+        c = self.config
+        if not getattr(c, "hpo_early_stop", True):
+            return False
+        window = int(getattr(c, "hpo_stop_window", 8) or 0)
+        if window < 1 or self.gp_since_accept < window:
+            return False
+        if incumbent is None or isinstance(incumbent, bool) or incumbent != incumbent:
+            return False
+
+        threshold, threshold_source = self.stop_threshold()
+        recent = self.gp_history[max(self.gp_history_at_accept, len(self.gp_history) - window):]
+        if not recent:
+            self.stop_reason = f"all of the last {window} gp proposals failed (folds without a model)"
+            c.logger.info(f"=========== HPO early stop of this subspace: {self.stop_reason} ===========")
+            return True
+        residuals = [mu - y for mu, _, y in recent]
+        # Median: a single failed evaluation is a huge miss and would dominate a mean
+        bias = float(np.median(residuals))
+        best_gain = max(y for _, _, y in recent) - incumbent
+        next_mu = self.last_gp_mu if self.last_gp_mu is not None else max(mu for mu, _, _ in recent)
+        outlook = next_mu - bias - incumbent
+
+        if best_gain >= threshold or outlook >= threshold:
+            return False
+
+        residual_scale = self.robust_scale(residuals) or 0.0
+        repeated = sum(1 for _, _, y in recent if sum(1 for s in self.scores if abs(s - y) <= 1e-12) > 1)
+        self.stop_reason = (
+            f"last {window} gp proposals ({len(recent)} valid): best gain {best_gain:+.6f}, gp optimism {bias:+.6f}, "
+            f"bias corrected outlook {outlook:+.6f}, both below {threshold:.6f} ({threshold_source}); "
+            f"robust residual spread {residual_scale:.6f}, {repeated}/{window} scores repeat an earlier one"
+        )
+        c.logger.info(f"=========== HPO early stop of this subspace: {self.stop_reason} ===========")
+        return True
 
     def noise_source(self):
         if self.repeat_stds:
             return f"repeated trainings (n={len(self.repeat_stds)}, repeat={self.repeat})"
         if self.gp_noise is not None and self.gp_noise > 0:
             return "gaussian process WhiteKernel"
-        if len(self.scores) >= 6:
-            return "scatter of all candidates (crude fallback, overestimates)"
+        if self.gp_residual_scale() is not None:
+            return f"robust spread of the gp prediction errors (n={len(self.gp_history)})"
+        if self.robust_scatter() is not None:
+            return "robust scatter of all candidates (crude fallback, overestimates)"
         return "unavailable"
 
     def log_kernel(self, model, yp=None):
@@ -314,6 +441,15 @@ class HpoTrace:
             return
         if self.config.verbosity >= 2:
             self.config.logger.info(f"HPO fitted GP kernel: {kernel}")
+
+        # Matern length scale per parameter (ConstantKernel * Matern + WhiteKernel), in
+        # the [0, 1] scaled search space: short means the score reacts to the parameter
+        try:
+            length_scales = np.atleast_1d(kernel.k1.k2.length_scale)
+            if len(length_scales) == len(self.param_names):
+                self.length_scales = dict(zip(self.param_names, (float(v) for v in length_scales)))
+        except AttributeError:
+            pass
 
         # Recover the learned noise level and undo the normalize_y scaling, so that it is
         # expressed in the same units as the objective.
@@ -406,6 +542,13 @@ class HpoTrace:
             c.logger.info(f"  -> the improvement {'held up' if held else 'did NOT hold up, parameters rolled back'}")
         elif new_optimimum:
             c.logger.info("Winner was NOT confirmed by a fresh measurement (hpo_confirm_optimum is off)")
+        if self.n_failed:
+            c.logger.info(f"Failed evaluations (folds without a model): {self.n_failed}")
+        if self.stop_reason is not None:
+            c.logger.info(
+                f"Stopped early after {self.n_dispatched} of {self.n_iters} dispatches "
+                f"({max(0, self.n_iters - self.n_dispatched)} saved): {self.stop_reason}"
+            )
         c.logger.info(f"new_optimimum={new_optimimum}")
         c.logger.info("======================================================")
 
@@ -734,6 +877,14 @@ def bayes_random_init(
 
     cat_param_map = {}
 
+    # Failed evaluations (folds without a model) get the worst valid score as gp target,
+    # as in bayesian_optimisation, and are never adopted.
+    valid_scores = [y for y in y_list if y is not None and y == y]
+    for scores, first_scores, params in results:
+        obj_sc = util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)
+        if getattr(scores, 'failed_folds', 0) == 0 and obj_sc is not None and obj_sc == obj_sc:
+            valid_scores.append(obj_sc)
+
     for scores, first_scores, params in results:
         obj_sc = util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)
         if obj_sc is None or obj_sc != obj_sc:
@@ -741,13 +892,19 @@ def bayes_random_init(
             scores = util.Scores(zero=True)
             obj_sc = scores.objective_value(config)
 
+        failed = getattr(scores, 'failed_folds', 0) > 0
+        if failed:
+            config.logger.info(f"Random init evaluation FAILED ({scores.failed_folds} fold(s) without a model), score={obj_sc}: {params}")
+            if valid_scores:
+                obj_sc = min(valid_scores)
+
         x_list.append(params)
         y_list.append(obj_sc)
 
         if config.verbosity >= 3:
             config.logger.info(f"Objective score: {obj_sc}")
 
-        if util.objective_function_criterium(config, scores, best_scores, feature_penalty=config.feature_penalty):
+        if not failed and util.objective_function_criterium(config, scores, best_scores, feature_penalty=config.feature_penalty):
             best_scores = scores
             best_first_scores = first_scores
             best_params = params
@@ -829,7 +986,8 @@ def bayesian_optimisation(
     debug=False,
     store_params = False,
     get_bayes_tuple = False,
-    bayes_tuple = None
+    bayes_tuple = None,
+    relevance_log: dict | None = None
 ):
     """bayesian_optimisation
     Uses Gaussian Processes to optimise the loss function `sample_loss`.
@@ -942,6 +1100,13 @@ def bayesian_optimisation(
 
     trace = HpoTrace(config, param_names, n_iters, parameters=parameters)
 
+    def gp_target(raw_score):
+        # A failed evaluation (folds without a model, entering as zeros) is not a value
+        # of the objective. Modeling it as one put cliffs into the gp's landscape and
+        # inflated its noise estimate, so the gp sees the worst valid score instead.
+        valid = trace.scores if trace.scores else [y for y in y_list if y is not None and y == y]
+        return min(valid) if valid else raw_score
+
     if config.verbosity >= 1:
         config.logger.info(f"Number of bayesian optimization iterations: {n_iters=}")
 
@@ -1041,13 +1206,14 @@ def bayesian_optimisation(
                 config.logger.info(f"Bayesian optimization, iteration: {n}")
                 config.logger.info(f"Objective score: {cv_score}, unpenalized: {scores.objective_value(config)} {interrupted=}")
 
-            trace.record_result(next_sample, cv_score, interrupted=interrupted, scores=scores)
+            failed = getattr(scores, 'failed_folds', 0) > 0
+            trace.record_result(next_sample, cv_score, interrupted=interrupted, scores=scores, failed=failed)
 
             previous_best = util.get_objective_score(config, best_scores, feature_penalty=config.feature_penalty)
             if isinstance(previous_best, bool):
                 previous_best = None
 
-            accept = (not interrupted) and util.objective_function_criterium(config, scores, best_scores, feature_penalty=config.feature_penalty)
+            accept = (not interrupted) and (not failed) and util.objective_function_criterium(config, scores, best_scores, feature_penalty=config.feature_penalty)
             if accept:
                 allowed, gate_message = trace.accept_gate(cv_score, previous_best)
                 if not allowed:
@@ -1086,7 +1252,7 @@ def bayesian_optimisation(
 
             # Update lists
             x_list.append(next_sample)
-            y_list.append(cv_score)
+            y_list.append(gp_target(cv_score) if failed else cv_score)
 
             # projected_parameter_values = fill_plane(next_sample, integer_type_params)
             # for projected_param in projected_parameter_values:
@@ -1101,6 +1267,9 @@ def bayesian_optimisation(
             if config.verbosity >= 3:
                 tl8 = time.time()
                 config.logger.info(f"Bayesian optimisation loop part 8: {tl8 - tl7}")
+
+            if trace.should_stop(util.get_objective_score(config, best_scores, feature_penalty=config.feature_penalty)):
+                break
 
     else:
         remote_processes = []
@@ -1122,6 +1291,7 @@ def bayesian_optimisation(
         #    pg = ray.util.placement_group([{"CPU": config.proc_n // (config.multi_gpu), 'GPU':1}], name=f"pg_{i}")
         #    ray.get(pg.ready())
 
+        dispatched = []
         for p in range(number_of_procs):
             next_sample, draw_kind = draw_random_sample(config, bounds, scaler, best_params)
             trace.record_dispatch(next_sample, f"init/{draw_kind}")
@@ -1145,6 +1315,7 @@ def bayesian_optimisation(
             #proc_id = remote_function.remote(com_queue, out_queue, store, para_number, gpu_share, p, config_ref_container)
             
             remote_processes.append((com_queue, out_queue, proc_id))
+            dispatched.append(next_sample)
 
         if config.verbosity >= 1:
             config.logger.info(f'Started {len(remote_processes)} para_eval processes: {para_number=} {gpu_share=}')
@@ -1154,6 +1325,8 @@ def bayesian_optimisation(
         for i in range(len(remote_processes)):
             dones.append(False)
             counts.append(0)
+        # The candidate every worker is evaluating (None: no candidate)
+        in_flight = list(dispatched)
         all_done = False
         
         append_counter = 0
@@ -1164,11 +1337,19 @@ def bayesian_optimisation(
         count_var = 0
 
         while not all_done:
+            # A para_eval task only ends by itself after its None stop signal. Ending earlier means it died
+            # (exception, killed): without this check the loop waited for its answer until the timeouts.
+            check_dead_para_eval_workers(config, remote_processes, dones, in_flight)
+            n_of_sent_hpo_sets = sum(sample is not None for sample in in_flight)
+            if all(dones):
+                break
+
             for i, (com_queue, out_queue, proc_id) in enumerate(remote_processes):
-                
+
                 if not out_queue.empty():
                     (scores, next_sample, first_scores) = out_queue.get(timeout=0.5)
                     n_of_sent_hpo_sets -= 1
+                    in_flight[i] = None
                 else:
                     continue
                 """
@@ -1191,13 +1372,14 @@ def bayesian_optimisation(
                     counts[i] += 1
                     config.logger.info(f"Objective score: {cv_score}, unpenalized: {scores.objective_value(config)} {interrupted=}")
 
-                trace.record_result(next_sample, cv_score, interrupted=interrupted, scores=scores)
+                failed = getattr(scores, 'failed_folds', 0) > 0
+                trace.record_result(next_sample, cv_score, interrupted=interrupted, scores=scores, failed=failed)
 
                 previous_best = util.get_objective_score(config, best_scores, feature_penalty=config.feature_penalty)
                 if isinstance(previous_best, bool):
                     previous_best = None
 
-                accept = (not interrupted) and util.objective_function_criterium(config, scores, best_scores, feature_penalty=config.feature_penalty)
+                accept = (not interrupted) and (not failed) and util.objective_function_criterium(config, scores, best_scores, feature_penalty=config.feature_penalty)
                 if accept:
                     allowed, gate_message = trace.accept_gate(cv_score, previous_best)
                     if not allowed:
@@ -1236,7 +1418,7 @@ def bayesian_optimisation(
 
                 # Update lists
                 x_list.append(next_sample)
-                y_list.append(cv_score)
+                y_list.append(gp_target(cv_score) if failed else cv_score)
                 append_counter += 1
 
                 # Update xp and yp
@@ -1244,7 +1426,11 @@ def bayesian_optimisation(
                 yp = np.array(y_list)
                 scaled_xp = scaler.transform(xp)
 
-                if current_params_id >= n_iters:
+                # Early stopping: the worker is released like at the end of the budget,
+                # the evaluations still in flight finish and are judged as usual.
+                stop = trace.should_stop(util.get_objective_score(config, best_scores, feature_penalty=config.feature_penalty))
+
+                if current_params_id >= n_iters or stop:
                     com_queue.put(None)
                     dones[i] = True
                 else:
@@ -1285,7 +1471,8 @@ def bayesian_optimisation(
                         trace.record_dispatch(next_sample, f"fill/{draw_kind}")
                     com_queue.put(next_sample)
                     n_of_sent_hpo_sets += 1
-                    
+                    in_flight[i] = next_sample
+
             all_done = True
             for done in dones:
                 if not done:
@@ -1381,6 +1568,11 @@ def bayesian_optimisation(
         )
 
     trace.summary(best_scores, new_optimimum)
+
+    # Relevance of the parameters as the gp saw them, for the weighting of the tree
+    if relevance_log is not None and trace.length_scales:
+        for name, length_scale in trace.length_scales.items():
+            relevance_log.setdefault(name, []).append(length_scale)
 
     if get_bayes_tuple:
         return new_optimimum, best_scores, best_first_scores, return_cv_obj, x_list, y_list
@@ -1672,6 +1864,27 @@ def get_scores(
     return scores
 
 
+def check_dead_para_eval_workers(config, remote_processes, dones, in_flight):
+    """Marks para_eval workers whose task ended without having been stopped as done, and logs why they ended."""
+    running = [(i, proc_id) for i, (_, _, proc_id) in enumerate(remote_processes) if not dones[i]]
+    if not running:
+        return
+    ready, _ = ray.wait([proc_id for _, proc_id in running], num_returns=len(running), timeout=0)
+    ready = set(ready)
+    for i, proc_id in running:
+        if proc_id not in ready:
+            continue
+        try:
+            ray.get(proc_id)
+            reason = 'it returned without a stop signal'
+        except Exception as e:
+            reason = f'it failed:\n{e}'
+        candidate = None if in_flight[i] is None else [float(v) for v in in_flight[i]]
+        config.logger.error(f'para_eval worker {i} ended, the HPO continues without it (candidate in evaluation: {candidate}): {reason}')
+        dones[i] = True
+        in_flight[i] = None
+
+
 @ray.remote
 def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_share, proc_id, config_ref_container):
     (cv_obj, parameters, raw_feature_matrix_store_id, best_first_scores, feat_corr_matrix, feature_names) = store
@@ -1716,21 +1929,27 @@ def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_share,
         # the object store does not grow.
         candidate_config_ref = [ray.put(config)]
 
-        scores, first_scores = get_scores(
-            config,
-            cv_obj,
-            feat_corr_matrix,
-            feature_names,
-            raw_feature_matrix_store_id=raw_feature_matrix_store_id,
-            remote=True,
-            para_number=para_number,
-            get_first_scores=True,
-            cv_interuption=(0.95, best_first_scores),
-            gpu_share=gpu_share, proc_id=proc_id,
-            config_ref_container=candidate_config_ref
-            )
-        
-        
+        # An exception here would end this worker without an answer, and the HPO driver would wait for it until
+        # its timeouts (hours). A failed candidate gets a zero score instead and the error goes to the main log.
+        try:
+            scores, first_scores = get_scores(
+                config,
+                cv_obj,
+                feat_corr_matrix,
+                feature_names,
+                raw_feature_matrix_store_id=raw_feature_matrix_store_id,
+                remote=True,
+                para_number=para_number,
+                get_first_scores=True,
+                cv_interuption=(0.95, best_first_scores),
+                gpu_share=gpu_share, proc_id=proc_id,
+                config_ref_container=candidate_config_ref
+                )
+        except Exception:
+            config.logger.error(f"para_eval {proc_id}: evaluation of the candidate {[float(v) for v in params]} failed, scored as zero:\n{traceback.format_exc()}")
+            scores = util.Scores(zero=True)
+            first_scores = util.Scores(zero=True)
+
         out_queue.put((scores, params, first_scores))
     return
 
@@ -1866,7 +2085,11 @@ def initParameters(
                 parameters["colsample_bylevel"] = Parameter("colsample_bylevel", "real", half_step_limits=[0.01,1.])
                 parameters["colsample_bynode"] = Parameter("colsample_bynode", "real", half_step_limits=[0.01,1.])
                 parameters["max_delta_step"] = Parameter("max_delta_step", "real", half_step_limits=[0.,50.], log_scale=True, log_offset=1.0)
-                parameters["feat_impact_thresh"] = Parameter("feat_impact_thresh", "real", half_step_limits=[-0.01,0.01])
+                # Lower bound 0: negative thresholds removed every feature of some sub slices,
+                # zeroing whole folds (94 such events in the goldstandard_strict run)
+                # In units of the impact metric: protein-wise Spearman changes, or absolute errors of the target
+                impact_upper = 0.05 if getattr(config, 'feat_impact_metric', 'protein_spearman') == 'protein_spearman' else 0.01
+                parameters["feat_impact_thresh"] = Parameter("feat_impact_thresh", "real", half_step_limits=[0.,impact_upper])
                 parameters["tree_depth"] = Parameter("tree_depth", "integer", half_step_limits=[1,31])
                 parameters["num_of_trees"] = Parameter("num_of_trees", "integer", half_step_limits=[10,10_000], log_scale=True)
                 parameters["max_cat_to_onehot"] = Parameter("max_cat_to_onehot", "integer", half_step_limits=[1,500], log_scale=True)
@@ -1958,6 +2181,101 @@ def measure_current_config(
         return None, None
 
     return scores, first_scores
+
+
+def random_start_parameters(config: util.Config) -> list[Parameter]:
+    """The parameters the selected HPO mode will search, so the random start covers
+    exactly that space."""
+    if config.hyperOptimization == "bayesianComplete":
+        return list(initParameters(config, do_feat_selection=False).values())
+
+    fss_parameters, fs_parameters, parameters = initParameters(config, split_fs_parameters=True)
+    return list({**fss_parameters, **fs_parameters, **parameters}.values())
+
+
+def random_start(
+    config: util.Config,
+    cv_obj: DataSAIL_cv,
+    parameters: list[Parameter],
+    samples: SampleSpace | None = None,
+    raw_feature_matrix_store_id: ray.ObjectRef | None = None,
+    n_rounds: int = 20,
+    debug=False,
+):
+    """Replace the initial training on the given hyperparameters with `n_rounds` random
+    hyperparameter sets, and leave the best of them in `config` as the starting point
+    of the HPO.
+
+    Every round is a full measurement (no cv interruption), so the scores are comparable
+    to each other and to the ones the HPO produces afterwards. Returns
+    (best_scores, best_first_scores), or (None, None) if no round produced a usable score.
+    """
+    if debug:
+        n_rounds = 2  # Just for testing
+
+    bounds = np.array([p.half_step_limits for p in parameters])
+    param_names = [p.name for p in parameters]
+
+    config.logger.info(f"=========== Random start: {n_rounds} random hyperparameter sets over {param_names} ===========")
+
+    best_scores = None
+    best_first_scores = None
+    best_params = None
+    # Not config.snapshotHyperParameter(): config.hyperparameters does not list all of the
+    # searched parameters, so the raw values are kept here instead.
+    given_values = {p.name: config.getByString(p.name) for p in parameters}
+
+    t0 = time.time()
+    for n in range(n_rounds):
+        params = np.random.uniform(bounds[:, 0], bounds[:, 1], bounds.shape[0])
+        for pos, para_value in enumerate(params):
+            parameters[pos].setValue(config, para_value)
+
+        if config.verbosity >= 1:
+            config.logger.info(f"Random start round {n + 1}/{n_rounds}: {params}")
+
+        scores, first_scores = measure_current_config(
+            config, cv_obj, samples=samples,
+            raw_feature_matrix_store_id=raw_feature_matrix_store_id,
+            debug=debug, label=f"random start round {n + 1}",
+        )
+
+        if scores is None:
+            continue
+
+        obj_sc = util.get_objective_score(config, scores, feature_penalty=config.feature_penalty)
+        if getattr(scores, 'failed_folds', 0) > 0:
+            config.logger.info(f"Random start round {n + 1} FAILED: {scores.failed_folds} fold(s) without a model, score={obj_sc}")
+            continue
+        if util.objective_function_criterium(config, scores, best_scores, feature_penalty=config.feature_penalty):
+            best_scores = scores
+            best_first_scores = first_scores
+            best_params = params
+            config.logger.info("===========Found new optimum:=======================\n")
+            config.logger.info(f'{params}')
+            scores.printOut(config=config)
+            config.logger.info("====================================================")
+        elif config.verbosity >= 2:
+            config.logger.info(
+                f"No new optimun ({util.get_objective_score(config, best_scores, feature_penalty=config.feature_penalty)}): {obj_sc}"
+            )
+
+    config.logger.info(f"Time for random start: {time.time() - t0}")
+
+    if best_params is None:
+        config.logger.warning("Random start produced no usable score, falling back to the given hyperparameters")
+        for name, value in given_values.items():
+            setattr(config, name, value)
+        return None, None
+
+    for pos, para_value in enumerate(best_params):
+        parameters[pos].setValue(config, para_value)
+    config.logger.info("=========== Random start finished, starting the HPO from: ===========")
+    for p in parameters:
+        config.logger.info(f"{p.name}: {config.getByString(p.name)}")
+    best_scores.printOut(config=config)
+
+    return best_scores, best_first_scores
 
 
 def confirm_new_optimum(
@@ -2122,6 +2440,26 @@ def threeDimHyperOptimization(
     n = 1
     score_matrix = {}
 
+    # A search range can have been narrowed since the incumbent was found (e.g.
+    # feat_impact_thresh, now >= 0). Move such values onto the range; the incumbent is
+    # re-measured at the start of the round, so its score reflects the change.
+    for param_set in (fss_parameters, fs_parameters, parameters):
+        for parameter in param_set.values():
+            if parameter.param_type == "categorical":
+                continue
+            value = parameter.getValue(config)
+            if value is None:
+                continue
+            low, high = parameter.half_step_limits
+            if value < low or value > high:
+                clipped = min(max(value, low), high)
+                config.logger.info(f"Incumbent {parameter.name} is outside its search range [{low}, {high}] (search space value {value}); clipped to {clipped}")
+                parameter.setValue(config, clipped)
+
+    # GP length scales of every subspace optimization of this run, the evidence the
+    # weighted tree blends into its prior weights
+    relevance_log = {}
+
     # The starting configuration and its measured score. Nothing may leave the
     # optimization in a state worse than this without it being noticed.
     archive = (config.snapshotHyperParameter(), best_scores, first_scores)
@@ -2208,17 +2546,31 @@ def threeDimHyperOptimization(
             param_names = list(param.keys())
             random.shuffle(param_names)
 
-            SDTree = SubdimensionTree(
-                param_names,
-                parameters,
-                config,
-                cv_obj,
-                best_scores,
-                first_scores,
-                samples,
-                samples_store_id,
-                raw_feature_matrix_store_id,
-                distance_map = distance_map)
+            if getattr(config, "hpo_weighted_tree", True):
+                SDTree = WeightedSubdimensionTree(
+                    param_names,
+                    parameters,
+                    config,
+                    cv_obj,
+                    best_scores,
+                    first_scores,
+                    samples,
+                    samples_store_id,
+                    raw_feature_matrix_store_id,
+                    distance_map=distance_map,
+                    relevance_log=relevance_log)
+            else:
+                SDTree = SubdimensionTree(
+                    param_names,
+                    parameters,
+                    config,
+                    cv_obj,
+                    best_scores,
+                    first_scores,
+                    samples,
+                    samples_store_id,
+                    raw_feature_matrix_store_id,
+                    distance_map = distance_map)
 
             tree_converged, best_scores, first_scores, cv_obj = SDTree.ascend()
             # Must not overwrite: the feature selection stages above may already have
@@ -2415,4 +2767,257 @@ class SubdimensionTree:
         
     def ascend(self):
         self.root.optimize()
+        return self.converged, self.best_scores, self.first_scores, self.cv_obj
+
+
+# Prior importance of the tree parameters, by base name (the second booster's copies carry
+# the suffix _1). From the tunability study of Probst, Boulesteix & Bischl (JMLR 2019,
+# 38 OpenML datasets: eta clearly first, then min_child_weight, subsample, nrounds,
+# lambda, alpha, then max_depth and colsample) and the fANOVA ranking of SigOpt Mulch
+# (2023: eta > max_depth > max_delta_step > alpha > num_boost_round > gamma > lambda >
+# subsample > min_child_weight). corr_thresh and feat_impact_thresh decide which features
+# the final booster sees, so they are weighted like the learning rate.
+PARAMETER_PRIOR_WEIGHTS = {
+    "learning_rate": 1.0,
+    "corr_thresh": 1.0,
+    "feat_impact_thresh": 1.0,
+    "tree_depth": 0.6,
+    "num_of_trees": 0.6,
+    "early_stopping": 0.6,
+    "min_child_weight": 0.6,
+    "max_sample_parameter": 0.6,
+    "xgb_alpha": 0.4,
+    "xgb_lambda": 0.4,
+    "xgb_gamma": 0.4,
+    "max_delta_step": 0.4,
+    "colsample_bytree": 0.25,
+    "colsample_bylevel": 0.25,
+    "colsample_bynode": 0.25,
+    # Only have an effect with categorical features
+    "max_cat_to_onehot": 0.1,
+    "max_cat_threshold": 0.1,
+}
+DEFAULT_PRIOR_WEIGHT = 0.4
+FEATURE_SELECTION_PARAMETERS = {"corr_thresh", "feat_impact_thresh"}
+SECOND_BOOSTER_SUFFIX = "_1"
+# Parameters that trade off against each other and are optimized together in at least one
+# leaf: a smaller learning rate needs more trees and a later early stop.
+COUPLED_PARAMETERS = [("learning_rate", "num_of_trees", "early_stopping")]
+
+
+def parameter_base_name(name: str) -> str:
+    if name.endswith(SECOND_BOOSTER_SUFFIX):
+        return name[:-len(SECOND_BOOSTER_SUFFIX)]
+    return name
+
+
+def parameter_prior_weight(name: str, config: util.Config) -> float:
+    """Prior importance of a parameter: its tier, times hpo_first_booster_factor for the
+    first (feature selection) booster's parameters. config.hpo_param_weights overrides."""
+    overrides = getattr(config, "hpo_param_weights", None) or {}
+    if name in overrides:
+        return float(overrides[name])
+    base = parameter_base_name(name)
+    weight = PARAMETER_PRIOR_WEIGHTS.get(base, DEFAULT_PRIOR_WEIGHT)
+    is_booster_parameter = base in PARAMETER_PRIOR_WEIGHTS and base not in FEATURE_SELECTION_PARAMETERS
+    if is_booster_parameter and not name.endswith(SECOND_BOOSTER_SUFFIX):
+        weight *= float(getattr(config, "hpo_first_booster_factor", 0.5))
+    return weight
+
+
+def relevance_from_length_scales(length_scales: list[float]) -> float:
+    """How strongly the score reacted to a parameter, from the gp's ARD length scales in
+    the [0, 1] scaled search space, one per fit: each fit gives 1 for length scales up to
+    1 (the score changes within the range), down to 0.05 at the upper bound of 100 (no
+    effect), and the fits are averaged on that scale. Not the median length scale: with
+    two fits that is their mean, where one fit at the bound (100) outweighs any evidence."""
+    per_fit = [min(1.0, max(0.05, 1.0 / max(float(ls), 1e-9))) for ls in length_scales]
+    return float(sum(per_fit) / len(per_fit))
+
+
+def parameter_weights(param_names: list[str], config: util.Config, relevance_log: dict | None = None) -> dict[str, dict]:
+    """Prior weight blended with the relevance the gps measured.
+
+    w = (1 - a) * prior + a * relevance, with a = n / (n + hpo_relevance_prior_strength)
+    and n the number of fits the parameter took part in, so the measurements take over as
+    they accumulate. Returns {name: {prior, relevance, n, weight}}.
+    """
+    strength = float(getattr(config, "hpo_relevance_prior_strength", 4))
+    table = {}
+    for name in param_names:
+        prior = parameter_prior_weight(name, config)
+        scales = (relevance_log or {}).get(name, [])
+        if scales:
+            relevance = relevance_from_length_scales(scales)
+            alpha = len(scales) / (len(scales) + strength)
+            weight = (1.0 - alpha) * prior + alpha * relevance
+        else:
+            relevance = None
+            weight = prior
+        table[name] = {"prior": prior, "relevance": relevance, "n": len(scales), "weight": weight}
+    return table
+
+
+def build_weighted_leaves(weights: dict[str, float], config: util.Config, rng=random) -> list[list[str]]:
+    """Pack the parameters into leaves by weight.
+
+    Every parameter gets max(1, round(hpo_max_copies * w / w_max)) copies, so important
+    parameters are optimized in several leaves. The first copies of each COUPLED_PARAMETERS
+    group (per booster) go in as one unit. Units are packed first fit decreasing (ties
+    broken at random, so every round groups differently) into leaves whose summed weight
+    stays within hpo_leaf_budget and whose size stays within hpo_max_leaf_size, never
+    twice the same parameter in a leaf. Important parameters therefore end up in small,
+    focused leaves and unimportant ones in large ones. Leaves below hpo_min_leaf_size are
+    dissolved into the lightest leaves that can take their parameters.
+    """
+    budget = float(getattr(config, "hpo_leaf_budget", 2.5))
+    max_copies = int(getattr(config, "hpo_max_copies", 3))
+    min_size = int(getattr(config, "hpo_min_leaf_size", 3))
+    max_size = int(getattr(config, "hpo_max_leaf_size", LEAF_SIZE))
+
+    w_max = max(weights.values())
+    copies = {p: max(1, round(max_copies * w / w_max)) for p, w in weights.items()}
+
+    units: list[list[str]] = []
+    for suffix in ("", SECOND_BOOSTER_SUFFIX):
+        for group in COUPLED_PARAMETERS:
+            names = [g + suffix for g in group]
+            if all(n in copies for n in names):
+                units.append(names)
+                for n in names:
+                    copies[n] -= 1
+    for p, n_copies in copies.items():
+        units.extend([[p]] * n_copies)
+
+    def weight_of(names):
+        return sum(weights[p] for p in names)
+
+    units.sort(key=lambda unit: (-weight_of(unit), rng.random()))
+
+    leaves: list[list[str]] = []
+    for unit in units:
+        for leaf in leaves:
+            if (not set(unit) & set(leaf)
+                    and weight_of(leaf) + weight_of(unit) <= budget + 1e-9
+                    and len(leaf) + len(unit) <= max_size):
+                leaf.extend(unit)
+                break
+        else:
+            leaves.append(list(unit))
+
+    for leaf in [l for l in leaves if len(l) < min_size]:
+        if len(leaves) == 1:
+            break
+        leaves.remove(leaf)
+        if config.verbosity >= 2:
+            config.logger.info(f"Dissolving leaf {leaf}: below hpo_min_leaf_size, its parameters may push other leaves over the budget")
+        for p in leaf:
+            candidates = [l for l in leaves if p not in l and len(l) < max_size]
+            if not candidates:
+                candidates = [l for l in leaves if p not in l]
+            if candidates:
+                min(candidates, key=weight_of).append(p)
+            # else: p is already in every remaining leaf, dropping this copy loses nothing
+
+    return leaves
+
+
+class WeightedSubdimensionTree:
+    """Subspace tree built from parameter weights (see build_weighted_leaves).
+
+    The leaves are optimized one after the other. Adjacent leaves (in packing order, so the
+    heavy ones pair up) form parents that are optimized over the union of their parameters,
+    started from the histories of their children, as long as that union has at most
+    MAX_PARAMS parameters (hpo_tree_parent_levels = 0 disables the parents).
+    """
+
+    def __init__(
+            self,
+            param_names: list[str],
+            parameters: dict[str, Parameter],
+            config: util.Config,
+            cv_obj: DataSAIL_cv,
+            best_scores: util.Scores,
+            first_scores: util.Scores,
+            samples,
+            samples_store_id,
+            raw_feature_matrix_store_id,
+            distance_map=None,
+            relevance_log: dict | None = None,
+            rng=random,
+            ):
+        self.parameters = parameters
+        self.config = config
+        self.cv_obj = cv_obj
+        self.best_scores = best_scores
+        self.first_scores = first_scores
+        self.samples = samples
+        self.samples_store_id = samples_store_id
+        self.raw_feature_matrix_store_id = raw_feature_matrix_store_id
+        self.distance_map = distance_map
+        self.relevance_log = relevance_log
+        self.converged = True
+
+        self.weight_table = parameter_weights(param_names, config, relevance_log)
+        weights = {name: row["weight"] for name, row in self.weight_table.items()}
+        self.leaves = build_weighted_leaves(weights, config, rng=rng)
+        self.log_tree(weights)
+
+    def log_tree(self, weights):
+        c = self.config
+        counts = {}
+        for leaf in self.leaves:
+            for p in leaf:
+                counts[p] = counts.get(p, 0) + 1
+        c.logger.info("=========== Weighted subspace tree ===========")
+        c.logger.info(f"{'parameter':<24} {'prior':>6} {'relev.':>6} {'fits':>4} {'weight':>6} {'leaves':>6}")
+        for name, row in sorted(self.weight_table.items(), key=lambda kv: -kv[1]["weight"]):
+            relevance = "-" if row["relevance"] is None else f"{row['relevance']:.2f}"
+            c.logger.info(f"{name:<24} {row['prior']:6.2f} {relevance:>6} {row['n']:4d} {row['weight']:6.2f} {counts.get(name, 0):6d}")
+        for i, leaf in enumerate(self.leaves):
+            c.logger.info(f"Leaf {i} (weight {sum(weights[p] for p in leaf):.2f}, {len(leaf)} parameters): {leaf}")
+        c.logger.info("==============================================")
+
+    def optimize_subspace(self, names: list[str], bayes_tuple=None):
+        new_opti, self.best_scores, self.first_scores, self.cv_obj, x_list, y_list = bayesian_optimisation(
+            None,
+            self.config,
+            [self.parameters[name] for name in names],
+            self.cv_obj,
+            self.best_scores,
+            self.first_scores,
+            self.distance_map,
+            samples=self.samples,
+            samples_store_id=self.samples_store_id,
+            raw_feature_matrix_store_id=self.raw_feature_matrix_store_id,
+            n_pre_samples=None,
+            get_bayes_tuple=True,
+            bayes_tuple=bayes_tuple,
+            relevance_log=self.relevance_log,
+        )
+        if new_opti:
+            self.converged = False
+        return x_list, y_list
+
+    def ascend(self):
+        parent_levels = int(getattr(self.config, "hpo_tree_parent_levels", 1))
+        groups = [self.leaves[i:i + 2] for i in range(0, len(self.leaves), 2)] if parent_levels > 0 else [[leaf] for leaf in self.leaves]
+
+        for group in groups:
+            parent_names = list(dict.fromkeys(p for leaf in group for p in leaf))
+            combined_x, combined_y = [], []
+            for leaf in group:
+                # The parameters outside the leaf keep their values while it runs, so its
+                # history extends to the parent's space with this snapshot
+                snapshot = {name: self.parameters[name].getValue(self.config) for name in parent_names}
+                x_list, y_list = self.optimize_subspace(leaf)
+                positions = {name: pos for pos, name in enumerate(leaf)}
+                for x, y in zip(x_list, y_list):
+                    combined_x.append(np.array([x[positions[name]] if name in positions else snapshot[name] for name in parent_names], dtype=float))
+                    combined_y.append(y)
+
+            if len(group) > 1 and len(parent_names) <= MAX_PARAMS:
+                self.config.logger.info(f"Optimizing the parent of {len(group)} leaves over {len(parent_names)} parameters")
+                self.optimize_subspace(parent_names, bayes_tuple=(combined_x, combined_y))
+
         return self.converged, self.best_scores, self.first_scores, self.cv_obj

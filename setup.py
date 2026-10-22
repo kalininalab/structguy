@@ -39,7 +39,11 @@ setup(
     include_package_data=True,
     install_requires=[
         "scikit-learn>=1.5.0",
-        "numpy==1.26.4",
+        # numpy 2 is needed next to structman (biotite 2 requires numpy>=2.1); the upper
+        # bound follows numba and scipy. grakel (pulled in by datasail) only works with
+        # numpy 2 from 0.1.11 on.
+        "numpy>=1.26.4,<2.5",
+        "grakel>=0.1.11",
         "xgboost>=3.4.1",
         "fgclustering==2.0.2",
         "shap>=0.48.0",

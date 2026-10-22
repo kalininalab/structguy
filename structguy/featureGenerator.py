@@ -1,18 +1,10 @@
-import random
-import sys
-import traceback
 import time
-import ray
 import numpy as np
-from structguy import consts
-from structguy.sampleSpace import SampleSpace
+from structguy.sampleSpace import SampleSpace, load_samples_dump
 from structguy import sequence_feature_generation as seqfg
-from structguy.util import Config, categorize_feat_by_name
-from structguy.base_classes import Feature
-from structguy.consts import feature_categories
-import zstd
-import pickle
-from structman.base_utils.base_utils import unpack
+from structguy.util import Config, log_timing
+from structguy.feature_table_parsing import parse_feature_table_to_matrix
+from structguy.feature_interactions import combination_names_from_config, parse_combination_name
 
 
 def expand_structural_feature_table(config):
@@ -40,187 +32,6 @@ def msa_bench(config):
 
     seqfg.msa_bench(config, samples)
 
-@ray.remote(max_calls=1)
-def parseLines_remote_wrapper(store, left, right):
-    config, features, package = store
-    lines, primary_protein_id_col, amount_of_struct_col, effect_col, aac_col_s, tags_col, non_feature_cols, feature_names, ablation_structural_feature_filter, no_evo_structural_feature_filter = unpack(package)
-
-    output = parseLines(config, left, right, features, lines, primary_protein_id_col, amount_of_struct_col, effect_col, aac_col_s, tags_col, non_feature_cols, feature_names, ablation_structural_feature_filter = ablation_structural_feature_filter, no_evo_structural_feature_filter = no_evo_structural_feature_filter)
-
-    return output
-
-
-def parseLines(
-        config,
-        left,
-        right,
-        features: dict[str, Feature],
-        lines, 
-        primary_protein_id_col, 
-        amount_of_struct_col, 
-        effect_col, 
-        aac_col_s, 
-        tags_col, 
-        non_feature_cols, 
-        feature_names,
-        ablation_structural_feature_filter = False,
-        no_evo_structural_feature_filter = False):
-    output = []
-    if config.verbosity >= 1:
-        config.logger.info(
-            f"parseLines: non_feature_cols: {non_feature_cols}, primary_protein_id_col: {primary_protein_id_col}, aac_col_s: {aac_col_s}, effect_col: {effect_col}, tags_col: {tags_col}, config.target_values: {config.target_values}, lines: {left}-{right} of {len(lines)} {ablation_structural_feature_filter=} {no_evo_structural_feature_filter=}"
-        )
-
-    max_print = 10
-    print_n = 0
-
-    for line in lines[left:right]:
-        if line == "":
-            continue
-        force_filter = False
-        words = line.split("\t")
-        if len(words) == 1:
-            config.logger.info(f'{list(line)}')
-            words = line.split("    ")
-        # if effectRegressor != None:
-        #    words = words[:-1]
-
-        """
-        if (len(words) - len(non_feature_cols)) < len(feature_names):
-            if config.verbosity >= 4:
-                config.logger.info(f'Line reject, count incorrect: {len(words)}, {len(non_feature_cols)}, {len(feature_names)}')
-            continue
-        """
-
-        primary_protein_id = words[primary_protein_id_col]
-        if len(aac_col_s) == 1:
-            aac = words[aac_col_s[0]]
-        else:
-            aac = f"{words[aac_col_s[0]]}{words[aac_col_s[1]]}{words[aac_col_s[2]]}"
-
-        if config.filter_synonymous and aac[0] == aac[-1]:
-            continue
-
-        tags = words[tags_col]
-        try:
-            amount_of_structures = int(words[amount_of_struct_col])
-        except:
-            amount_of_structures = 0
-
-        sample_id = (primary_protein_id, aac)
-
-        if config.verbosity >= 6:
-            config.logger.info(f"Parsing sample: {sample_id}")
-
-        if primary_protein_id in config.blacklist:
-            if config.verbosity >= 4:
-                config.logger.info(f"Sample was blacklisted {sample_id}")
-
-            continue
-
-        if config.target_values is not None:
-            target_values = []
-            for tag in tags.split(","):
-                if tag == "":
-                    continue
-                if tag[0] != "#":
-                    continue
-                try:
-                    tag_id, tag_value = tag.split(":")
-                except:
-                    try:
-                        tag_id, tag_value = tag.split("=")
-                    except:
-                        continue
-                if tag_id != config.target_values:
-                    continue
-                try:
-                    tag_value = float(tag_value)
-                except:
-                    config.logger.info(f"Given effect tag had non-float tag value: {tag_value} for {sample_id}")
-                    continue
-                target_values.append(tag_value)
-            if len(target_values) == 0:
-                target_value = None
-            else:
-                target_value = sum(target_values) / len(target_values)
-        else:
-            if effect_col is not None:
-                if words[effect_col] == "None" and config.target_values is not None:
-                    if config.verbosity >= 4:
-                        config.logger.info(f"Sample rejected: {config.target_values=}, while {words[effect_col]=}")
-
-                    continue
-
-                if not config.regression:
-                    target_value = words[effect_col]
-                else:
-                    try:
-                        target_value = float(words[effect_col])
-                    except:
-                        target_value = None
-            else:
-                target_value = None
-                for tag in tags.split(","):
-                    if tag[:6] == "label:":
-                        target_value = tag[6:]
-
-        """
-        if add_file_to_samples:
-            if target_value in config.target_translator:
-                target_value = config.target_translator[target_value]
-            else:
-                target_value = None
-        """
-
-        feat_out = []
-
-        for pos, x in enumerate(words):
-            if pos in non_feature_cols:
-                continue
-            try:
-                feat_name = feature_names[pos]
-            except:
-                continue
-            if feat_name in consts.FEAT_NAME_SYNONYMS:
-                feat_name = consts.FEAT_NAME_SYNONYMS[feat_name]
-            if feat_name == "Classification confidence":
-                continue
-            feat = features[feat_name]
-
-            if ablation_structural_feature_filter:
-                feat_cat = feat.group
-                #config.logger.info(f"{sample_id=} {pos=} {feat_name=} {feat_cat=}")
-                if feat_cat != 'evolutionary' and feat_cat != 'amino acid properties':
-                    continue
-
-            if no_evo_structural_feature_filter:
-                feat_cat = feat.group
-                if feat_cat == 'evolutionary':
-                    continue
-
-            try:
-                value = feat.value_from_string(x)
-            except:
-                [e, f, g] = sys.exc_info()
-                g = traceback.format_exc()
-                config.logger.info(f"Feature parse error, sample will be filtered: {primary_protein_id} {aac} {tags} {feat_name} {x}\n{e}\n{f}\n{g}")
-                # force_filter = True
-                continue
-
-            feat_out.append((value, feat_name))
-
-        if target_value is None and print_n < max_print and config.verbosity >= 1:
-            config.logger.info(f"In parseLines - Target value is None for {sample_id}")
-            print_n += 1
-        if force_filter:
-            continue
-
-        output.append((sample_id, target_value, amount_of_structures, tags, feat_out))
-
-    return output
-
-
 def parse_structural_features(
     samples: SampleSpace,
     config: Config, 
@@ -232,10 +43,14 @@ def parse_structural_features(
     effect_col=None, 
     filter_none_tv=False
 ):
-    file_path = config.path_structural_feature_table
+    # The expanded table (the same rows and leading columns, plus the features of each
+    # position's interacting positions) replaces the plain one when the project names it.
+    file_path = getattr(config, 'path_expanded_feature_table', None) or config.path_structural_feature_table
     if file_path is None:
         config.logger.info(f'Critical error in parse_structural_features: {config.path_structural_feature_table=}')
         raise TypeError(f'{config.path_structural_feature_table=}')
+    if config.verbosity >= 1 and file_path != config.path_structural_feature_table:
+        config.logger.info(f'parse_structural_features: using the expanded feature table {file_path}')
     
     parse_feature_table(
         file_path,
@@ -249,6 +64,8 @@ def parse_structural_features(
         amount_of_struct_col=amount_of_struct_col,
         effect_col=effect_col
     )
+    # The sequence features get added value-wise afterwards (seqfg.getSequenceFeatures)
+    samples.matrix_to_dict()
 
 
 def parse_feature_table(
@@ -270,73 +87,21 @@ def parse_feature_table(
             f"Reading feature file: {file_path}, non_feature_cols: {non_feature_cols}, primary_protein_id_col: {primary_protein_id_col}, aac_col_s: {aac_col_s}, effect_col: {effect_col}, tags_col: {tags_col}, filter none TV: {filter_none_tv}"
         )
 
-    f = open(file_path, "r")
-    lines = f.read().split("\n")
-    f.close()
+    if samples.feature_matrix_dict:
+        samples.transform_matrix_dict()
 
-    if config.verbosity >= 1:
-        t0 = time.time()
-
-    non_feature_cols = set(non_feature_cols)
-
-    feature_names = lines[0].split("\t")
-    for pos, feat_name in enumerate(feature_names):
-        if pos in non_feature_cols:
-            continue
-        if feat_name in consts.FEAT_NAME_SYNONYMS:
-            feat_name = consts.FEAT_NAME_SYNONYMS[feat_name]
-        if feat_name not in samples.features:
-            feat_cat_pos, _ = categorize_feat_by_name(feat_name)
-            feat_cat = feature_categories[feat_cat_pos]
-            samples.addFeature(feat_name, "unknown", group=feat_cat)
-
-    if config.verbosity >= 1:
-        t1 = time.time()
-        config.logger.info(f"parse_feature_table, part 1: {t1 - t0}")
-
-    headless_lines = lines[1:]
-    random.shuffle(headless_lines)
-
-    if config.verbosity >= 1:
-        t2 = time.time()
-        config.logger.info(f"parse_feature_table, part 2: {t2 - t1}")
-
-    if config.verbosity >= 4:
-        samples.print_feat_types(config)
-
-    output = parseLines(
-        config, 0, len(headless_lines), samples.features, 
-        headless_lines, primary_protein_id_col, 
-        amount_of_struct_col, effect_col, aac_col_s, tags_col, 
-        non_feature_cols, feature_names,
-        ablation_structural_feature_filter = ablation_structural_feature_filter,
-        no_evo_structural_feature_filter = no_evo_structural_feature_filter
-    )
-
-    if config.verbosity >= 1:
-        t5 = time.time()
-        config.logger.info(f"parse_feature_table, part 5: {t5 - t2}, {len(output)}")
-
-    n_f = 0
-    n_s = 0
-    max_print = 10
-    n_print = 0
-    for sample_id, target_value, amount_of_structures, tags, feat_out in output:
-        if filter_none_tv and target_value is None:
-            continue
-        for value, feat_name in feat_out:
-            if config.verbosity >= 5:
-                samples.addValue(sample_id, value, feat_name, config = config)
-            else:
-                samples.addValue(sample_id, value, feat_name)
-            n_f += 1
-        samples.addTargetValue(sample_id, target_value)
-        if target_value is None and n_print < max_print:
-            config.logger.info(f"TV is None for {sample_id}")
-            n_print += 1
-        samples.samples[sample_id].amount_of_structures = amount_of_structures
-        samples.samples[sample_id].tags = tags
-        n_s += 1
+    with log_timing(config, f'parse_feature_table total ({file_path})'):
+        parse_feature_table_to_matrix(
+            file_path, samples, config, filter_none_tv,
+            non_feature_cols=non_feature_cols,
+            primary_protein_id_col=primary_protein_id_col,
+            aac_col_s=aac_col_s,
+            tags_col=tags_col,
+            amount_of_struct_col=amount_of_struct_col,
+            effect_col=effect_col,
+            ablation_structural_feature_filter=ablation_structural_feature_filter,
+            no_evo_structural_feature_filter=no_evo_structural_feature_filter,
+        )
 
     if config.verbosity >= 3:
         samples.print_stats(config)
@@ -344,10 +109,6 @@ def parse_feature_table(
     if config.verbosity >= 4:
         samples.print_feat_types(config)
 
-    if config.verbosity >= 1:
-        t6 = time.time()
-        config.logger.info(f"parse_feature_table, part 6: {t6 - t5}")
-        config.logger.info(f"Total samples: {n_s}, total feature values: {n_f}")
     if config.verbosity >= 1:
         config.logger.info("Finished parsing of feature file")
 
@@ -359,7 +120,8 @@ def createTrainingSet(
         stop_matrix_transformation=False,
         other_features_path=None,
         filter_none_tv=False,
-        filter_synon=False        
+        filter_synon=False,
+        combination_names=None
         ):
     if config.verbosity >= 2:
         config.logger.info(f"Call of createTrainingSet: {external_impute is None=} {for_prediction=} {config.path_to_processed_features_file=}")
@@ -368,19 +130,26 @@ def createTrainingSet(
 
     if config.path_to_processed_features_file is not None and not config.overwrite:
         if config.path_to_processed_features_file[-5:] == '.dump':
-            f = open(config.path_to_processed_features_file, 'rb')
-            packed_samples = f.read()
-            f.close()
-            bu_slotmask = samples.deactivate_slot_mask()
-            try:
-                samples = unpack(packed_samples)
-            except zstd.Error:
-                samples = pickle.loads(packed_samples)
-            samples.reactivate_slot_mask(bu_slotmask)
-            config.n_of_features = len(samples.feature_names)
-            if isinstance(samples.raw_feature_matrix, tuple):
-                samples.raw_feature_matrix = np.array(samples.raw_feature_matrix)
-            return samples 
+            with log_timing(config, f'createTrainingSet: loading {config.path_to_processed_features_file}'):
+                empty_samples = samples
+                bu_slotmask = empty_samples.deactivate_slot_mask()
+                try:
+                    samples = load_samples_dump(config.path_to_processed_features_file)
+                finally:
+                    empty_samples.reactivate_slot_mask(bu_slotmask)
+                config.n_of_features = len(samples.feature_names)
+                if isinstance(samples.raw_feature_matrix, tuple):
+                    samples.raw_feature_matrix = np.array(samples.raw_feature_matrix)
+                # Dumps of older versions hold an object array with None for missing values
+                if samples.raw_feature_matrix.dtype == object:
+                    samples.raw_feature_matrix = np.array(samples.raw_feature_matrix, dtype=np.float64)
+            # A dump written without the configured combination features: add them, the stored feature
+            # correlations then miss their columns and are computed again where needed
+            all_combination_names = combination_names_from_config(config) + list(combination_names or [])
+            if all_combination_names and samples.add_combination_features(all_combination_names, config) > 0:
+                samples.feat_corr_matrix = None
+                config.n_of_features = len(samples.feature_names)
+            return samples
 
     # strfg.initFeatures(samples)
     seqfg.initFeatures(config, samples)
@@ -401,15 +170,16 @@ def createTrainingSet(
             # config.logger.info(samples.samples.keys())
             config.target_values = ["all neutral", "possibly damaging"]
 
-        samples.standardFilter(config, filter_synon=filter_synon)
+        with log_timing(config, 'createTrainingSet: sample filters'):
+            samples.standardFilter(config, filter_synon=filter_synon)
 
-        if config.structure_threshold is not None:
-            samples.filterSamplesByMappedStructures(config)
+            if config.structure_threshold is not None:
+                samples.filterSamplesByMappedStructures(config)
 
-        if config.transform:
-            samples.targetTransformation(config)
-        if config.regression and not for_prediction:
-            samples.detectOutliers(config)
+            if config.transform:
+                samples.targetTransformation(config)
+            if config.regression and not for_prediction:
+                samples.detectOutliers(config)
 
         if config.verbosity >= 1:
             samples.printPureMixedProportion(config)
@@ -419,26 +189,29 @@ def createTrainingSet(
         if config.filterStructuralFeatures:
             samples.removeFeaturesByType("structural", config)
 
+        # Before the imputation, so a combination of a missing value is missing (and gets imputed itself)
+        all_combination_names = combination_names_from_config(config) + list(combination_names or [])
+        if all_combination_names:
+            with log_timing(config, 'createTrainingSet: combination features'):
+                samples.add_combination_features(all_combination_names, config)
+
         #samples.oneHotifyAll(config)
 
         if external_impute is None:
             if config.impute_missing_values:
-                samples.impute_all()
+                with log_timing(config, 'createTrainingSet: imputation'):
+                    samples.impute_all()
                 path_to_impute_map_dump = f"{config.outfolder}/{config.dataset_name}_structguy_trained_impute_map.dump"
                 samples.dump_impute_map(path_to_impute_map_dump)
                 config.add_entry_to_project_file("path_to_impute_map", path_to_impute_map_dump)
 
-            config.path_to_processed_features_file = f"{config.outfolder}/{config.dataset_name}_structguy_features_processed.tsv"
-            samples.write(config.path_to_processed_features_file)
+            write_processed_tsv(samples, config)
             config.path_to_processed_features_file = f"{config.outfolder}/{config.dataset_name}_structguy_features_processed.dump"
             if not stop_matrix_transformation:
-                t_0 = time.time()
-                samples.transform_matrix_dict(config = config)
-                samples.calc_subsamples_feat_corr_matrix(config)
-                t_1 = time.time()
-                config.logger.info(f'Time for calculating feat_corr_matrix 1: {t_1-t_0}')
+                transform_and_calc_feat_corr(samples, config, calc_corr=not for_prediction)
                 stop_matrix_transformation = True
-            samples.dump(config.path_to_processed_features_file)
+            with log_timing(config, 'createTrainingSet: writing the .dump'):
+                samples.dump(config.path_to_processed_features_file)
 
             config.add_entry_to_project_file("path_to_processed_features_file", config.path_to_processed_features_file)
         else:
@@ -447,21 +220,19 @@ def createTrainingSet(
 
                 config.path_to_imputed_features_file = f"{config.outfolder}/{config.dataset_name}_structguy_features_imputed.tsv"
 
-                samples.write(config.path_to_imputed_features_file)
+                # Later runs parse this file again
+                with log_timing(config, 'createTrainingSet: writing the imputed feature table'):
+                    samples.write(config.path_to_imputed_features_file)
 
                 config.add_entry_to_project_file("path_to_imputed_features_file", config.path_to_imputed_features_file)
             else:
-                config.path_to_processed_features_file = f"{config.outfolder}/{config.dataset_name}_structguy_features_processed.tsv"
-                samples.write(config.path_to_processed_features_file)
+                write_processed_tsv(samples, config)
                 config.path_to_processed_features_file = f"{config.outfolder}/{config.dataset_name}_structguy_features_processed.dump"
                 if not stop_matrix_transformation:
-                    t_0 = time.time()
-                    samples.transform_matrix_dict()
-                    samples.calc_subsamples_feat_corr_matrix(config)
-                    t_1 = time.time()
-                    config.logger.info(f'Time for calculating feat_corr_matrix 2: {t_1-t_0}')
+                    transform_and_calc_feat_corr(samples, config, calc_corr=not for_prediction)
                     stop_matrix_transformation = True
-                samples.dump(config.path_to_processed_features_file)
+                with log_timing(config, 'createTrainingSet: writing the .dump'):
+                    samples.dump(config.path_to_processed_features_file)
 
                 config.add_entry_to_project_file("path_to_processed_features_file", config.path_to_processed_features_file)
 
@@ -477,12 +248,26 @@ def createTrainingSet(
         # Propably call some stuff here, TODO
     config.n_of_features = len(samples.feature_names)
     if not stop_matrix_transformation:
-        t_0 = time.time()
-        samples.transform_matrix_dict()
-        samples.calc_subsamples_feat_corr_matrix(config)
-        t_1 = time.time()
-        config.logger.info(f'Time for calculating feat_corr_matrix 3: {t_1-t_0}')
+        transform_and_calc_feat_corr(samples, config, calc_corr=not for_prediction)
     return samples
+
+
+def write_processed_tsv(samples: SampleSpace, config: Config):
+    # build_model and predict reload the .dump, so the TSV is only written on request
+    if not config.write_processed_tsv:
+        return
+    path = f"{config.outfolder}/{config.dataset_name}_structguy_features_processed.tsv"
+    with log_timing(config, f'createTrainingSet: writing {path}'):
+        samples.write(path)
+
+
+def transform_and_calc_feat_corr(samples: SampleSpace, config: Config, calc_corr: bool = True):
+    with log_timing(config, 'createTrainingSet: transform_matrix_dict'):
+        samples.transform_matrix_dict(config = config)
+    # Predictions take feat_stats and the features from the model, the correlations are only needed for training
+    if calc_corr:
+        with log_timing(config, 'createTrainingSet: calc_subsamples_feat_corr_matrix'):
+            samples.calc_subsamples_feat_corr_matrix(config)
 
 
 def load_data_for_pred(
@@ -492,7 +277,12 @@ def load_data_for_pred(
     extern_features
 ):
     t0 = time.time()
-    samples = createTrainingSet(config, external_impute=impute_map, for_prediction=True, filter_synon=config.trace_decisions)
+    # Combination features the model was trained with are rebuilt from their names
+    model_combination_names = [feat_name for _, feature_names in booster_list for feat_name in feature_names if parse_combination_name(feat_name) is not None]
+    samples = createTrainingSet(config, external_impute=impute_map, for_prediction=True, filter_synon=config.trace_decisions, combination_names=model_combination_names)
+    # A cached or re-parsed feature table may lack them
+    if model_combination_names:
+        samples.add_combination_features(model_combination_names, config)
     t1 = time.time()
 
     config.logger.info(f"Time for loading dataset: {t1 - t0}")

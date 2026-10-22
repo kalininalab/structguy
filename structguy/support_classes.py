@@ -13,7 +13,7 @@ from scipy import stats
 #from memory_profiler import profile
 from typing import Callable
 
-from structguy.util import Config
+from structguy.util import Config, get_gpu_memory
 from structguy.class_utils import get_feat_matrix_from_ids, get_raw_feat_matrix_from_ids, get_feat_id_vec
 
 from structman.base_utils.base_utils import Slotted_obj
@@ -45,74 +45,123 @@ def distance_weighting_subroutine(store, package):
     return outputs
 
 
+def extmem_batch_bytes(config: Config) -> int:
+    """Largest batch, in bytes of feature data, that the Iterator hands to xgboost at once.
+
+    The chunks stored by put_data_to_tmp_storage hold a whole DataSAIL cluster each, sized
+    before it is known how many features are selected and how much of the GPU the training
+    process gets. Handed over as they are, a single chunk took 25% of a process' pool, and
+    xgboost needs a multiple of a batch while sketching it (the sliding window buffers, plus
+    the previous batch that the proxy still references), so building the external memory
+    DMatrix ran out of pool. The batches are therefore cut to a share of the pool this
+    process actually has; setup_memory_resources sets config.gpu_pool_bytes before the
+    DMatrix is built.
+    """
+    pool_bytes = getattr(config, 'gpu_pool_bytes', None)
+    if not pool_bytes:
+        pool_bytes = get_gpu_memory()[0] * 1024 * 1024 * config.vram_limit
+    return max(1, int(pool_bytes * getattr(config, 'extmem_batch_vram_share', 0.1)))
+
+
 class Iterator(xgb.DataIter):
-    """A custom iterator for loading files in batches."""
+    """A custom iterator for loading files in batches.
+
+    Every stored chunk is split into batches of at most `max_batch_bytes` of selected
+    feature data, so the size of a batch does not depend on how the chunks were stored.
+    The row order is kept, so labels and protein id vectors stay aligned.
+    """
 
     def __init__(
-        self, file_paths: list[tuple[str, str, str]], device: str = 'cuda'
+        self, file_paths: list[tuple[str, str, str]], device: str = 'cuda', max_batch_bytes: int | None = None
     ) -> None:
         self.device = device
 
         self._file_paths = file_paths
+        self._max_batch_bytes = max_batch_bytes
         self._it = 0
+        self._row = 0
+        self._chunk = None
         self._ext_dat = None
         # XGBoost will generate some cache files under the current directory with the
         # prefix "cache"
         super().__init__(cache_prefix=os.path.join(".", "cache"))
 
-    def load_file(self) -> tuple[numpy.ndarray, numpy.ndarray, list[str], list[str]]:
-        """Load a single batch of data."""
-        X_path, y_path, ext_path = self._file_paths[self._it]
+    def load_chunk(self) -> tuple[numpy.ndarray, numpy.ndarray]:
+        """Load the stored chunk the iterator is currently in (host memory)."""
+        if self._chunk is None:
+            X_path, y_path, _ = self._file_paths[self._it]
+            if self.device == "cpu":
+                X = numpy.load(X_path)
+                y = numpy.load(y_path)
+            else:
+                X = ray.get(X_path)
+                y = numpy.asarray(ray.get(y_path))
+            assert X.shape[0] == y.shape[0]
+            self._chunk = X, y
+        return self._chunk
 
+    def load_batch(self) -> tuple[numpy.ndarray, numpy.ndarray, list[str], list[str]]:
+        """Load the next batch of at most max_batch_bytes and advance the position."""
         if self._ext_dat is None:
+            self._ext_dat = ray.get(self._file_paths[0][2])
+        feat_names, cat_vec, feat_id_vec = self._ext_dat
 
-            feat_names, cat_vec, feat_id_vec = ray.get(ext_path)
-            self._ext_dat = feat_names, cat_vec, feat_id_vec
+        X, y = self.load_chunk()
+
+        if self._max_batch_bytes is None:
+            n_rows = X.shape[0]
         else:
-            feat_names, cat_vec, feat_id_vec = self._ext_dat
+            row_bytes = max(1, len(feat_id_vec) * X.itemsize)
+            n_rows = max(1, self._max_batch_bytes // row_bytes)
+
+        end = min(self._row + n_rows, X.shape[0])
+        #trim down to selected features, only the rows of this batch are copied
+        X_batch = X[self._row:end][:, feat_id_vec]
+        y_batch = y[self._row:end]
+
+        self._row = end
+        if self._row >= X.shape[0]:
+            self._it += 1
+            self._row = 0
+            self._chunk = None
 
         # When the `ExtMemQuantileDMatrix` is used, the device must match. GPU cannot
         # consume CPU input data and vice-versa.
-        if self.device == "cpu":
-            X = numpy.load(X_path)
-            y = numpy.load(y_path)
-        else:
-            #import cupy as cp
-            #X = numpy.load(X_path, allow_pickle=True)
-            X = ray.get(X_path)
-            #y = cp.load(y_path, allow_pickle=True)
-            y = cp.array(ray.get(y_path))
+        if self.device != "cpu":
+            X_batch = cp.array(X_batch)
+            y_batch = cp.array(y_batch)
 
-            #trim down to selected features
-            X = cp.array(X[:, feat_id_vec])
-
-        assert X.shape[0] == y.shape[0]
-
-        return X, y, feat_names, cat_vec
+        return X_batch, y_batch, feat_names, cat_vec
 
     def next(self, input_data: Callable) -> bool:
         """Advance the iterator by 1 step and pass the data to XGBoost.  This function
         is called by XGBoost during the construction of ``DMatrix``
 
         """
+        # Skip stored chunks without rows
+        while self._it < len(self._file_paths) and self.load_chunk()[0].shape[0] == 0:
+            self._it += 1
+            self._chunk = None
+
         if self._it == len(self._file_paths):
             # return False to let XGBoost know this is the end of iteration
             return False
 
         # input_data is a keyword-only function passed in by XGBoost and has the similar
         # signature to the ``DMatrix`` constructor.
-        X, y, feat_names, cat_vec = self.load_file()
+        X, y, feat_names, cat_vec = self.load_batch()
         input_data(data=X,
             label=y,
             feature_names = feat_names,
             feature_types=cat_vec
             )
-        self._it += 1
         return True
 
     def reset(self) -> None:
         """Reset the iterator to its beginning"""
         self._it = 0
+        self._row = 0
+        self._chunk = None
 
 class CrossValidationSlice(Slotted_obj):
     __slots__ = [
@@ -322,6 +371,17 @@ class CrossValidationSlice(Slotted_obj):
 
             print(f'Init CV slice part 6: {t6-t5}')
 
+        # Restrict to the features of the parent slice before printBalance, so that the
+        # logged feature count is the one this slice actually works with.
+        n_feats_before = len(self.feature_names)
+        for feat_name in features_to_remove:
+            self.removeFeature(feat_name)
+        if config.verbosity >= 2 and len(features_to_remove) > 0:
+            config.logger.info(
+                f'{self.name}: removed {n_feats_before - len(self.feature_names)} of {n_feats_before} features '
+                f'that are not in the feature list of the parent slice, {len(self.feature_names)} left'
+            )
+
         if config.verbosity >= 1:
             self.printBalance(config)
 
@@ -334,9 +394,6 @@ class CrossValidationSlice(Slotted_obj):
                 self.calcSampleWeights(config, geometric_distance_map)
             elif config.weighting == 'subsample_distance':
                 self.calcSubsampleDistanceWeights(config, para_number = para_number)
-
-        for feat_name in features_to_remove:
-            self.removeFeature(feat_name)
 
         t8 = time.time()
         if config.verbosity >= 3:
@@ -1141,7 +1198,10 @@ class CrossValidationSlice(Slotted_obj):
         else:
             mem_context = xgb.config_context(use_rmm=True)
         with mem_context:
-            it = Iterator(device="cuda", file_paths=file_paths)
+            max_batch_bytes = extmem_batch_bytes(config)
+            if config.verbosity >= 3:
+                config.logger.info(f'External memory batches limited to {max_batch_bytes / 2**20:.1f} MiB of feature data ({len(file_paths)} stored chunks)')
+            it = Iterator(device="cuda", file_paths=file_paths, max_batch_bytes=max_batch_bytes)
 
             if config.verbosity >= 5:
                 config.logger.info('Iterator is setup in get_extmem_dtrain')
@@ -1260,7 +1320,10 @@ class CrossValidationSlice(Slotted_obj):
         else:
             mem_context = xgb.config_context(use_rmm=True)
         with mem_context:
-            it = Iterator(device="cuda", file_paths=file_paths)
+            max_batch_bytes = extmem_batch_bytes(config)
+            if config.verbosity >= 3:
+                config.logger.info(f'External memory batches limited to {max_batch_bytes / 2**20:.1f} MiB of feature data ({len(file_paths)} stored chunks)')
+            it = Iterator(device="cuda", file_paths=file_paths, max_batch_bytes=max_batch_bytes)
 
             if config.verbosity >= 5:
                 config.logger.info('Iterator is setup in get_extmem_dtrain')

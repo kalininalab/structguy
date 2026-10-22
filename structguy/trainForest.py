@@ -37,6 +37,8 @@ from structguy import featureSelection, util
 from structman.base_utils.base_utils import pack, unpack, add_to_times, print_times, aggregate_times, deep_get_size_of, sizeof_fmt
 from structguy.support_classes import CrossValidationSlice
 from structguy.sampleSpace import DataSAIL_cv
+from structguy.feature_correlation import average_ranks, standardized
+from structguy.feature_interactions import ext_shap_interactions, interaction_pairs, write_interaction_file, interaction_folder
 import numpy
 #from ray.util.queue import Queue
 #from ray.train import RunConfig
@@ -140,49 +142,114 @@ def shap_internal_loop(
 
     return acc_feat_impacts
 
+FEAT_IMPACT_CHUNK = 256
+
+
+def protein_spearman_impacts(contributions: numpy.ndarray, pred: numpy.ndarray, y: numpy.ndarray) -> numpy.ndarray:
+    """Change of the Spearman correlation of one protein when each feature's SHAP contribution is taken out.
+
+    contributions: (n_samples, n_feats). Returns rho(y, pred - contribution_f) - rho(y, pred) per feature:
+    positive means the ranking of this protein would be better without the feature.
+    """
+    n_feats = contributions.shape[1]
+    z_y = standardized(average_ranks(y.reshape(1, -1).astype(numpy.float64)))[0].astype(numpy.float64)
+    z_pred = standardized(average_ranks(pred.reshape(1, -1).astype(numpy.float64)))[0].astype(numpy.float64)
+    rho_with = 0. if numpy.isnan(z_pred).any() else float(z_pred @ z_y)
+    impacts = numpy.zeros(n_feats, dtype=numpy.float64)
+    for start in range(0, n_feats, FEAT_IMPACT_CHUNK):
+        chunk = contributions[:, start:start + FEAT_IMPACT_CHUNK].T.astype(numpy.float64)
+        used = numpy.any(chunk != 0, axis=1)
+        if not used.any():
+            continue
+        z_without = standardized(average_ranks(pred[None, :] - chunk[used])).astype(numpy.float64)
+        # A prediction made constant by taking a feature out ranks nothing
+        rho_without = numpy.nan_to_num(z_without @ z_y, nan=0.)
+        impacts[start + numpy.flatnonzero(used)] = rho_without - rho_with
+    return impacts
+
+
+def abs_error_impacts(contributions: numpy.ndarray, pred: numpy.ndarray, y: numpy.ndarray) -> numpy.ndarray:
+    """Mean decrease of the absolute error of one protein when each feature's SHAP contribution is taken out."""
+    loss = numpy.abs(y - pred)[:, None]
+    impacts = numpy.zeros(contributions.shape[1], dtype=numpy.float64)
+    for start in range(0, contributions.shape[1], FEAT_IMPACT_CHUNK):
+        chunk = contributions[:, start:start + FEAT_IMPACT_CHUNK].astype(numpy.float64)
+        impacts[start:start + chunk.shape[1]] = (loss - numpy.abs(y[:, None] - (pred[:, None] - chunk))).mean(axis=0)
+    return impacts
+
+
+def protein_wise_feature_impacts(metric: str, contributions, pred, y, prot_vec) -> tuple[numpy.ndarray, int]:
+    """Feature impacts averaged over the proteins (the unit of the out-of-distribution split), each protein weighted equally.
+
+    Returns the impacts and the number of proteins that contributed.
+    """
+    n_feats = contributions.shape[1]
+    total = numpy.zeros(n_feats, dtype=numpy.float64)
+    n_proteins = 0
+    order = numpy.argsort(prot_vec, kind='stable')
+    sorted_prots = prot_vec[order]
+    boundaries = numpy.flatnonzero(sorted_prots[1:] != sorted_prots[:-1]) + 1
+    for rows in numpy.split(order, boundaries):
+        y_q = y[rows]
+        if metric == 'protein_spearman':
+            # A protein with less than 2 samples or a constant target has no ranking
+            if len(rows) < 2 or numpy.all(y_q == y_q[0]):
+                continue
+            total += protein_spearman_impacts(contributions[rows], pred[rows], y_q)
+        else:
+            total += abs_error_impacts(contributions[rows], pred[rows], y_q)
+        n_proteins += 1
+    if n_proteins > 0:
+        total /= n_proteins
+    return total, n_proteins
+
+
 #@profile
 def ext_shap_analysis(
         feature_names: list[str],
         booster: xgb.Booster,
-        data_refs: list[tuple[ray.ObjectRef, ray.ObjectRef, ray.ObjectRef]]):
+        data_refs: list[tuple[ray.ObjectRef, ray.ObjectRef, ray.ObjectRef]],
+        prot_vec=None,
+        metric: str = 'protein_spearman'):
+    """Impact of every feature on the held-out samples: how much better the predictions get without its SHAP contribution.
+
+    metric 'protein_spearman': change of the Spearman correlation within each protein, averaged over the proteins
+    (the objective of the early stopping and the HPO). 'abs_error': decrease of the absolute error, averaged per
+    protein. Positive impacts mark harmful features. Returns ([(feat_name, impact)] sorted by impact descending,
+    number of proteins, times).
+    """
 
     times = []
     ta = time.time()
 
-    acc_feat_impacts = None
     feat_names, cat_vec, feat_id_vec = ray.get(data_refs[0][2])
 
-    n_samples: int = 0
-
+    contributions, preds, targets = [], [], []
     for X_ref, y_ref, _ in data_refs:
 
         X: numpy.ndarray = ray.get(X_ref)
         X = X[:, feat_id_vec]
-        n_samples += len(X)
 
         dmatrix: xgb.DMatrix = xgb.DMatrix(X, feature_names=feat_names, feature_types=cat_vec, enable_categorical=True)
 
-        explanation = booster.predict(dmatrix, pred_contribs=True)
+        # The last column is the bias
+        contributions.append(booster.predict(dmatrix, pred_contribs=True)[:, :len(feature_names)])
+        preds.append(booster.predict(dmatrix))
+        targets.append(numpy.asarray(ray.get(y_ref), dtype=numpy.float64))
 
-        pred_vector = booster.predict(dmatrix)
-
-        acc_feat_impacts_slice = shap_internal_loop(
-            len(feature_names),
-            explanation,
-            pred_vector,
-            ray.get(y_ref)
-            )
-        
-        if acc_feat_impacts is None:
-            acc_feat_impacts = acc_feat_impacts_slice
-        else:
-            acc_feat_impacts += acc_feat_impacts_slice
-
+    contributions = numpy.concatenate(contributions, axis=0)
+    pred = numpy.concatenate(preds).astype(numpy.float64)
+    y = numpy.concatenate(targets)
     ta = add_to_times(times, ta)
 
-    acc_feat_impacts = sorted(zip(feature_names, [x/n_samples for x in acc_feat_impacts]), key=lambda x:x[1], reverse=True)
+    if prot_vec is None or len(prot_vec) != len(y):
+        # Without protein ids, all samples count as one protein
+        prot_vec = numpy.zeros(len(y), dtype=numpy.int64)
+    impacts, n_proteins = protein_wise_feature_impacts(metric, contributions, pred, y, numpy.asarray(prot_vec))
+
+    acc_feat_impacts = sorted(zip(feature_names, impacts.tolist()), key=lambda x:x[1], reverse=True)
     ta = add_to_times(times, ta)
-    return acc_feat_impacts, times
+    return acc_feat_impacts, n_proteins, times
 
 def shap_analysis(config, forest, d_feat_vecs: xgb.DMatrix, feature_names, prediction_vector, target_vector):
     if config.verbosity >= 3:
@@ -399,42 +466,50 @@ def booster_list_predict(
         booster_list: list[tuple[xgb.Booster, any]],
         feat_mats: list[xgb.DMatrix],
         n_row_slice = 50_000,
-        get_std_vec = False
+        get_std_vec = False,
+        logger = None
         ):
+    """Mean prediction of the boosters.
+
+    With get_std_vec, additionally the std of the SHAP feature contributions per sample is
+    returned. That needs exact TreeSHAP (pred_contribs), which is orders of magnitude slower
+    than a plain prediction on deep trees, so only request it when it is actually needed.
+    """
     y_preds = []
     y_stds = []
+    t_start = time.time()
+    n_boosters = len(booster_list)
     for booster_index, (booster, _) in enumerate(booster_list):
         feat_mat = feat_mats[booster_index]
         total_rows = feat_mat.num_row()
+        t_booster = time.time()
 
-        y_pred = numpy.array([])
-        y_std_vec = numpy.array([])
+        pred_parts = []
+        std_parts = []
         for i in range(0, total_rows, n_row_slice):
-            # Calculate end index, ensuring we don't exceed total_rows
             end = min(i + n_row_slice, total_rows)
-            
-            # Create the index list for the current slice
-            indices = list(range(i, end))
-            
-            # Slice the DMatrix
-            dslice = feat_mat.slice(indices)
+            dslice = feat_mat.slice(numpy.arange(i, end))
+
+            pred_parts.append(booster.predict(dslice))
 
             if get_std_vec:
-                
-                full_pred_matrix = booster.predict(dslice, pred_contribs=True)
+                contribs = booster.predict(dslice, pred_contribs=True)
+                # The last column is the bias term
+                std_parts.append(numpy.std(contribs[:, :-1], axis=1))
 
-                pred_vector = numpy.mean(full_pred_matrix, axis=1)
-                STD_vector = numpy.std(full_pred_matrix[:, :-1], axis=1)
+            if logger is not None:
+                done = booster_index * total_rows + end
+                total = n_boosters * total_rows
+                elapsed = time.time() - t_start
+                eta = elapsed * (total - done) / done
+                logger.info(f'Prediction: booster {booster_index + 1}/{n_boosters}, rows {end}/{total_rows}, elapsed {elapsed:.1f} s, ETA {eta:.1f} s')
 
-                y_pred = numpy.concatenate((y_pred, pred_vector))
-                y_std_vec = numpy.concatenate((y_std_vec, STD_vector))
-            else:
-                pred_vector = booster.predict(dslice)
-                y_pred = numpy.concatenate((y_pred, pred_vector))
+        if logger is not None:
+            logger.info(f'Prediction: booster {booster_index + 1}/{n_boosters} done in {time.time() - t_booster:.1f} s')
 
-        y_preds.append(y_pred)
+        y_preds.append(numpy.concatenate(pred_parts) if pred_parts else numpy.array([]))
         if get_std_vec:
-            y_stds.append(y_std_vec)
+            y_stds.append(numpy.concatenate(std_parts) if std_parts else numpy.array([]))
     y_pred = numpy.mean(y_preds, axis=0)
     if get_std_vec:
         y_std = numpy.mean(y_stds, axis=0)
@@ -559,6 +634,7 @@ def xgb_train_wrapper(
                 "max_cat_threshold": int(config.max_cat_threshold),
                 'random_state' : seed
                 }
+            xgb_params.update(gpu_tree_params(config, dtrain, max_bin, xgb_params['max_depth']))
             booster: xgb.Booster = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees), early_stopping_rounds= config.early_stopping, evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
         else:
             es = xgb.callback.EarlyStopping(
@@ -595,9 +671,69 @@ def xgb_train_wrapper(
                 "max_cat_threshold": int(config.max_cat_threshold_1),
                 'random_state' : seed
                 }
+            xgb_params.update(gpu_tree_params(config, dtrain, max_bin, xgb_params['max_depth']))
             booster: xgb.Booster = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees_1), early_stopping_rounds=int(config.early_stopping_1), evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
 
     return booster
+
+HIST_BYTES_PER_BIN = 16  # one gradient pair of the GPU histogram
+# Candidate nodes of one tree level that xgboost's GPU depthwise growth expands in one batch
+GPU_NODE_BATCH = 256
+
+
+def gpu_pool_size(config: util.Config) -> float:
+    pool_bytes = getattr(config, 'gpu_pool_bytes', None)
+    if not pool_bytes:
+        pool_bytes = util.get_gpu_memory()[0] * 1024 * 1024 * config.vram_limit
+    return pool_bytes
+
+
+def gpu_tree_params(config: util.Config, dtrain, max_bin: int, max_depth) -> dict:
+    """xgboost parameters that keep the histogram memory of the GPU hist method within the pool.
+
+    Depthwise growth builds the histograms of up to GPU_NODE_BATCH nodes of a level and of their siblings in one
+    allocation, outside the cache bounded by max_cached_hist_node. For deep trees on many features that allocation
+    alone can exceed the pool; lossguide growth expands one node at a time instead. Without a leaf limit
+    (max_leaves=0) and with the same max_depth, the splits follow the same gain and depth rules.
+    """
+    params = {'max_cached_hist_node': histogram_cache_nodes(config, dtrain, max_bin)}
+    pool_bytes = gpu_pool_size(config)
+    bytes_per_node = max(1, dtrain.num_col()) * max_bin * HIST_BYTES_PER_BIN
+    depth = max(1, int(max_depth))
+    level_batch = 2 * min(GPU_NODE_BATCH, 2 ** min(depth - 1, 30)) * bytes_per_node
+    budget = pool_bytes * getattr(config, 'hist_level_vram_share', 0.15)
+    if level_batch > budget:
+        params['grow_policy'] = 'lossguide'
+        params['max_leaves'] = 0
+    if config.verbosity >= 1:
+        config.logger.info(
+            f"xgboost grow_policy={params.get('grow_policy', 'depthwise')}: max_depth={depth}, "
+            f"worst-case depthwise histogram batch {level_batch / 2**30:.2f} GiB, budget {budget / 2**30:.2f} GiB of a {pool_bytes / 2**30:.2f} GiB pool"
+        )
+    return params
+
+
+def histogram_cache_nodes(config: util.Config, dtrain, max_bin: int) -> int:
+    """Value of xgboost's max_cached_hist_node that keeps the histogram allocations within a share of the GPU pool.
+
+    The GPU hist method caches one histogram (features x bins gradient pairs) per tree node. Its buffer grows by
+    doubling, and the cap is only checked before growing: a cache just below the cap still doubles. So the largest
+    single allocation is up to twice the cap (and the old buffer lives on during the copy). hist_cache_vram_share is
+    that largest allocation as share of the pool, the cap is half of it.
+    """
+    pool_bytes = gpu_pool_size(config)
+    largest_allocation = pool_bytes * getattr(config, 'hist_cache_vram_share', 0.1)
+    cache_cap = largest_allocation / 2
+    bytes_per_node = max(1, dtrain.num_col()) * max_bin * HIST_BYTES_PER_BIN
+    n_nodes = max(8, int(cache_cap // bytes_per_node))
+    if config.verbosity >= 3:
+        config.logger.info(
+            f'max_cached_hist_node={n_nodes}: {dtrain.num_col()} features x {max_bin} bins = '
+            f'{bytes_per_node / 2**20:.1f} MiB per node histogram, cache cap {n_nodes * bytes_per_node / 2**30:.2f} GiB, '
+            f'largest histogram allocation about {2 * n_nodes * bytes_per_node / 2**30:.2f} GiB of a {pool_bytes / 2**30:.2f} GiB pool'
+        )
+    return n_nodes
+
 
 def usable_vram_share(config: util.Config, total_mib: float, sub_share: float) -> float:
     """MiB this process may claim on its GPU, after reserving room for CUDA contexts.
@@ -646,6 +782,8 @@ def setup_cuda_memory(config: util.Config, sub_share: float):
     if config.verbosity >= 4:
         config.logger.info(f'Setup cuda memory resources: {pool_size=}')
 
+    config.gpu_pool_bytes = pool_size
+
     v = driver.cuuint64_t(pool_size)
 
     cudart.cudaMemPoolSetAttribute(
@@ -665,6 +803,7 @@ def setup_rmm_memory(config: util.Config, sub_share: float):
     # allocator fragmentation. 0.95 of the reserved-adjusted share leaves both.
     init_pool = 1024*1024*int(usable*sub_share*0.7*config.vram_limit)
     max_pool = 1024*1024*int(usable*sub_share*0.95*config.vram_limit)
+    config.gpu_pool_bytes = max_pool
 
     if config.verbosity >= 4:
         config.logger.info(f'Setup memory resources: {sub_share=} {init_pool=:_} {max_pool=:_} {config.multi_gpu=}')
@@ -767,7 +906,18 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
         del packed_slice_slice
 
     ta = add_to_times(times, ta) #0
+    n_feats_before = len(slice_slice.feature_names)
     slice_slice.filterFeatures(filtered_features)
+    if config.verbosity >= 2:
+        config.logger.info(
+            f'Correlation filter in {proc_id}: removed {n_feats_before - len(slice_slice.feature_names)} of {n_feats_before} features '
+            f'of this sub slice, {len(slice_slice.feature_names)} left for the first booster '
+            f'({len(filtered_features)} features flagged by {config.corr_thresh=}, the rest of them were already absent in this sub slice)'
+        )
+    if len(slice_slice.feature_names) == 0:
+        if config.verbosity >= 2:
+            config.logger.info(f'No features left in {proc_id} after the correlation filter, no model trained')
+        return p_id
     ta = add_to_times(times, ta) #1
 
     # Seed from the position in the cross validation, not from the clock, so that every
@@ -816,6 +966,10 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
 
 
     booster = xgb_train_wrapper(config, dtrain, dtest_feature_matrix, seed=seed_first)
+    # The proteins of the held-out samples, in the order of test_data_refs, for the protein-wise feature impacts
+    test_prot_vec = getattr(dtest_feature_matrix, 'encoded_prot_vec', None)
+    if test_prot_vec is not None:
+        test_prot_vec = cp.asnumpy(test_prot_vec) if isinstance(test_prot_vec, cp.ndarray) else numpy.asarray(test_prot_vec)
     del dtrain
     del dtest_feature_matrix
     ta = add_to_times(times, ta) #4
@@ -829,8 +983,17 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
 
         return p_id
     
-    acc_feat_impacts, shap_times = ext_shap_analysis(slice_slice.feature_names, booster, test_data_refs)
-    
+    impact_metric = getattr(config, 'feat_impact_metric', 'protein_spearman')
+    acc_feat_impacts, n_impact_proteins, shap_times = ext_shap_analysis(
+        slice_slice.feature_names, booster, test_data_refs, prot_vec=test_prot_vec, metric=impact_metric)
+    if config.verbosity >= 3 and acc_feat_impacts:
+        def format_impacts(entries):
+            return ', '.join(f'{name}: {impact:+.4g}' for name, impact in entries)
+        config.logger.info(
+            f'Feature impacts ({impact_metric}, {n_impact_proteins} held-out proteins) in {proc_id}, '
+            f'most harmful: {format_impacts(acc_feat_impacts[:10])}; most helpful: {format_impacts(acc_feat_impacts[::-1][:10])}'
+        )
+
     if config.verbosity >= 4:
         for name, size in sorted(((name, deep_get_size_of(value)) for name, value in locals().items()), key=lambda x: -x[1])[:10]:
             config.logger.info("In dbr: {:>30}: {:>8}".format(name, sizeof_fmt(size)))
@@ -854,7 +1017,21 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
     """
     times.append(shap_times) #6
     ta = add_to_times(times, ta) #7
-    
+
+    if getattr(config, 'log_feature_interactions', False):
+        # Interaction discovery is diagnostic: a failure here must not end the training
+        try:
+            t_inter = time.time()
+            inter_names, inter_strength, inter_main, inter_proteins = ext_shap_interactions(
+                slice_slice.feature_names, booster, test_data_refs, test_prot_vec, config, seed=seed_first)
+            pairs = interaction_pairs(inter_names, inter_strength, inter_main, inter_proteins)
+            path = f'{interaction_folder(config.outfolder)}/cv{cv_slice_id}_sub{subslice_id}_rep{repeat_index}_{proc_id}.tsv'
+            write_interaction_file(path, pairs)
+            if config.verbosity >= 2:
+                config.logger.info(f'Feature interactions of {proc_id}: {len(pairs)} pairs of {len(inter_names)} features on {inter_proteins} proteins in {time.time() - t_inter:.1f} s -> {path}')
+        except Exception:
+            config.logger.error(f'Feature interaction analysis failed in {proc_id}:\n{traceback.format_exc()}')
+
     del booster
 
     if config.verbosity >= 3:
@@ -866,9 +1043,10 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
         
         return p_id
     
+    # Strictly greater: a feature that the first booster never used has an impact of exactly 0 and stays
     feats_to_remove = filtered_features[:]
     for feat_name, feat_impact in acc_feat_impacts:
-        if feat_impact >= config.feat_impact_thresh:
+        if feat_impact > config.feat_impact_thresh:
             feats_to_remove.append(feat_name)
 
     if len(feats_to_remove) >= (len(cv_slice.feature_names)+ len(filtered_features)):
@@ -876,7 +1054,21 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
             print_times(times, label = 'double booster 3', logger=config.logger)
         return p_id
     
+    n_feats_before = len(slice_slice.feature_names)
     slice_slice.filterFeatures(feats_to_remove)
+    if config.verbosity >= 2:
+        n_impact_hits = len(feats_to_remove) - len(filtered_features)
+        config.logger.info(
+            f'SHAP feature impact filter in {proc_id}: removed {n_feats_before - len(slice_slice.feature_names)} '
+            f'of {n_feats_before} features, {len(slice_slice.feature_names)} left for the second booster '
+            f'({n_impact_hits} features with {impact_metric} impact > {config.feat_impact_thresh=})'
+        )
+    # The check above compares against the parent slice and counts names that this sub
+    # slice may not have, so it does not catch every case where nothing is left.
+    if len(slice_slice.feature_names) == 0:
+        if config.verbosity >= 2:
+            config.logger.info(f'No features left in {proc_id} after the feature impact filter ({config.feat_impact_thresh=}), no model trained')
+        return p_id
     ta = add_to_times(times, ta) #8
 
     dtrain, dtest_feature_matrix, _, _, ret_times = retrieve_dmatrix(
@@ -913,7 +1105,13 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
         del dtest_feature_matrix
         return booster_2, slice_slice.feature_names[:], p_id
 
+    n_feats_before = len(cv_slice.feature_names)
     cv_slice.filterFeatures(feats_to_remove)
+    if config.verbosity >= 3:
+        config.logger.info(
+            f'Applied the correlation and feature impact filters of {proc_id} to the parent slice {cv_slice.name}: '
+            f'{n_feats_before} -> {len(cv_slice.feature_names)} active features'
+        )
     ta = add_to_times(times, ta) #12
 
     if config.verbosity >= 3:
@@ -1051,14 +1249,14 @@ def trainRegressionForest(
 
     zero_scores = util.Scores(zero=True, n_of_features=len(cv_slice.feature_names))
 
+    # Must have the same shape as the regular returns at the end of this function
     if remote:
-        zero_return = zero_scores, None, cv_counter, times, None
+        zero_return = zero_scores, cv_counter, times
     else:
         zero_return = (
             None,
             zero_scores,
             cv_counter,
-            None,
             times
         )
 
@@ -1157,7 +1355,9 @@ def trainRegressionForest(
 
     if print_out or config.verbosity >= 3:
         config.logger.info(
-            f"Train regression {config.forest_type} forest, call of fit with # of features: {len(cv_slice.feature_names)}, skip feature selection {skip_feature_selection}, skip scoring {skip_scoring} {sub_gpu_share=}"
+            f"Train regression {config.forest_type} forest, call of fit with # of features: {len(cv_slice.feature_names)} "
+            f"(before the {len(feats_to_filter)} correlation filtered and the per sub slice filters), "
+            f"skip feature selection {skip_feature_selection}, skip scoring {skip_scoring} {sub_gpu_share=}"
         )
 
     if config.verbosity >= 4:
@@ -1177,7 +1377,11 @@ def trainRegressionForest(
         
         if sub_gpu_share is not None:
             if config.slice_by_slice:
-                sub_share = sub_gpu_share
+                # Only one process on the card at a time, and it takes the card fully.
+                # Requesting the whole GPU makes ray queue the sub-boosters of all CV folds
+                # and of all parallel HPO evaluations behind each other, whatever share of
+                # the GPU the caller was handed. The callers above request no GPU themselves.
+                sub_share = 1.0
             else:
                 sub_share = sub_gpu_share/len(cv_slice.slice_slices)
             if sub_share < 1.0 and sub_share > 0.5:
@@ -1673,7 +1877,6 @@ def trainForest(
                             forest,
                             scores_obj,
                             cv_counter,
-                            cv_slice,
                             reg_forest_times
                         ) = slice_result_ids[0]
                         margin, best_first_scores = cv_interuption

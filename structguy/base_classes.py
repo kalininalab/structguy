@@ -2,7 +2,7 @@ from structguy import dicts
 
 from structman.base_utils.base_utils import Slotted_obj
 
-possible_na_values = set(['-', 'None', 'inf'])
+possible_na_values = set(['-', 'None', 'inf', 'nan'])
 class Feature(Slotted_obj):
     __slots__ = ['name', 'f_type', 'group', 'default', 'mutation_specific', 'category_map', 'category_counter', 'category_backmap']
     def __init__(self, name = None, f_type = None,group=None,default_value=None,mutation_specific=False):
@@ -16,6 +16,20 @@ class Feature(Slotted_obj):
             self.category_map = {}
             self.category_counter = 0
             self.category_backmap = {}
+
+    def set_categorical(self):
+        self.f_type = 'categorical'
+        if getattr(self, 'category_map', None) is None:
+            self.category_map = {}
+            self.category_counter = 0
+            self.category_backmap = {}
+
+    def encode(self, value) -> int:
+        if value not in self.category_map:
+            self.category_map[value] = self.category_counter
+            self.category_backmap[self.category_counter] = value
+            self.category_counter += 1
+        return self.category_map[value]
 
 
     def value_from_string(self, string):
@@ -70,10 +84,13 @@ class Feature(Slotted_obj):
         return value
 
     def string_convert(self,value):
-        if not self.f_type == 'categorical':
-            return str(value)
-        elif value is None:
+        # NaN is the missing value of the numeric feature matrix
+        if value is None or value != value:
             return 'None'
+        if not self.f_type == 'categorical':
+            if self.f_type in ('integer', 'binary') and float(value).is_integer():
+                return str(int(value))
+            return str(value)
         else:
-            return str(self.category_backmap[value])
+            return str(self.category_backmap[int(value)])
             #return str(value)

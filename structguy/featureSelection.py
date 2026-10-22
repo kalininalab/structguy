@@ -4,6 +4,7 @@ import random
 import ray
 import time
 
+import numpy as np
 from scipy import stats
 
 from structguy import reguFeatureSelectionRegressor as reguFSreg
@@ -12,7 +13,7 @@ from structguy import featureAnalysis, trainForest
 from structguy.sampleSpace import splitDataSet
 from structguy.support_classes import CrossValidationSlice
 from structman.base_utils.base_utils import pack, unpack, add_to_times
-from structguy.util import Config
+from structguy.util import Config, put_samples, get_samples
 from structguy.prefiltering import detectBiasedFeaturesByMeanCorrelation
 
 
@@ -177,7 +178,7 @@ def crossFoldConfusionSelect(
             slice_slices = []
 
             if samples is None:
-                samples = unpack(ray.get(samples_store_id))
+                samples = get_samples(samples_store_id)
 
             for i, subslice_test_proteins in enumerate(subslices):
                 try:
@@ -289,7 +290,7 @@ def crossFoldConfusionSelect(
             if calc_at_least_once:
                 store = ray.put((pre_filter, sequence_number, config, distance_map, n_sub_threads, force_confusion))
                 if samples_store_id is None:
-                    samples_store_id = ray.put(pack(samples))
+                    samples_store_id = put_samples(samples)
             else:
                 store = ray.put((pre_filter, sequence_number, config, distance_map, n_sub_threads, force_confusion))
             loop_ray_ids = []
@@ -664,13 +665,28 @@ def filterCorrelatedFeats(
     else:
         thresh = custom_tresh
     feats_to_filter = set()
+
+    # Only the pairs that pass the correlation criterion can filter a feature, so the loop below visits only those
+    try:
+        corr_array = np.asarray(feat_corr_matrix)
+    except (TypeError, ValueError):
+        corr_array = None
+    if corr_array is not None and corr_array.dtype.kind == 'f' and corr_array.ndim == 3 and corr_array.shape[0] == len(feature_names):
+        with np.errstate(invalid='ignore'):
+            candidates = (np.abs(corr_array[:, :, 0]) > thresh) & (corr_array[:, :, 3] > 0.01)
+        np.fill_diagonal(candidates, False)
+        candidate_rows = [np.flatnonzero(row) for row in candidates]
+    else:
+        candidate_rows = [range(len(feature_names))] * len(feature_names)
+
     for feat_nr_a, feat_name_a in enumerate(feature_names):
         if feat_name_a in feats_to_filter:
             continue
-        for feat_nr_b, feat_name_b in enumerate(feature_names):
+        for feat_nr_b in candidate_rows[feat_nr_a]:
+            feat_name_b = feature_names[feat_nr_b]
             if feat_nr_a == feat_nr_b:
                 continue
-        
+
             if feat_name_b in feats_to_filter:
                 continue
 
@@ -682,15 +698,15 @@ def filterCorrelatedFeats(
                 
                 if feat_score_a > feat_score_b:
                     feats_to_filter.add(feat_name_b)
-                    if config.verbosity >= 3:
+                    if config.verbosity >= 4:
                         config.logger.info(f'Filtering {feat_name_b} due its {corr=} to {feat_name_a}')
                 else:
                     feats_to_filter.add(feat_name_a)
-                    if config.verbosity >= 3:
+                    if config.verbosity >= 4:
                         config.logger.info(f'Filtering {feat_name_a} due its {corr=} to {feat_name_b}')
 
-    if config.verbosity >= 3:
-        config.logger.info(f'Filtering correlated features {thresh=} {len(feats_to_filter)=}')
+    if config.verbosity >= 1:
+        config.logger.info(f'Filtering correlated features {thresh=}: {len(feats_to_filter)} of {len(feature_names)} features filtered')
 
     return list(feats_to_filter)
 

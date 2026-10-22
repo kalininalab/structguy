@@ -11,7 +11,7 @@ import xgboost as xgb
 import matplotlib.pyplot as plt
 from structman.base_utils.base_utils import calculate_chunksizes, pack, unpack
 from structguy.support_classes import CrossValidationSlice
-from structguy.util import Config, loadModel
+from structguy.util import Config, loadModel, get_samples
 from structguy.sampleSpace import SampleSpace, FullSlice
 from structguy.featureGenerator import createTrainingSet, load_data_for_pred
 
@@ -382,7 +382,7 @@ def calcSliceConfusion(
         remote = False
 
     if samples is None:
-        samples = unpack(ray.get(samples_store_id))
+        samples = get_samples(samples_store_id)
 
     X_test = cv_slice.get_test_feature_matrix(samples)
     y_test = cv_slice.test_targets
@@ -704,11 +704,11 @@ def plot_violins(config):
         no_nones_feat_vec_l = []
         no_nones_feat_vec_r = []
         for feat_val in l_feat_vec:
-            if feat_val is not None:
+            if feat_val is not None and feat_val == feat_val:
                 no_nones_feat_vec_l.append(feat_val)
 
         for feat_val in r_feat_vec:
-            if feat_val is not None:
+            if feat_val is not None and feat_val == feat_val:
                 no_nones_feat_vec_r.append(feat_val)
 
         if len(no_nones_feat_vec_l) > 1:

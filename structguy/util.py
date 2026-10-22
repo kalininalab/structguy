@@ -1,7 +1,10 @@
 #!/usr/bin/python3
 import os
+import re
 import sys
 import logging
+import contextlib
+import time
 import getopt
 import statistics
 import numpy as np
@@ -18,7 +21,7 @@ import xgboost as xgb
 
 from structguy.scripts import radarplot
 from structman.base_utils.base_utils import Errorlog, resolve_path, pack, unpack, deep_get_size_of, sizeof_fmt
-from structguy.consts import feat_name_category_dict, feature_categories
+from structguy.consts import feat_name_category_dict, feature_categories, INTERACTING_POSITIONS_CATEGORY
 from structguy.base_classes import Feature
 
 class OutputCapture:
@@ -80,6 +83,10 @@ class Config:
         self.gpu_mode = False
 
         self.vram_limit = 1.0
+        # Largest single allocation of xgboost's histogram cache, as share of a process' GPU pool (sets max_cached_hist_node)
+        self.hist_cache_vram_share = 0.1
+        # Largest per-level histogram batch of depthwise tree growth, as share of the GPU pool; beyond it xgboost grows lossguide
+        self.hist_level_vram_share = 0.15
         self.setup_cuda_mem = False
         # MiB of VRAM kept free per co-resident worker process on a GPU. Every process
         # that touches a GPU needs its own CUDA context on top of whatever RMM pool it
@@ -91,6 +98,30 @@ class Config:
         # this multiple of the estimated evaluation noise before it is adopted. 0 or None
         # restores the old behaviour of accepting any improvement, however small.
         self.hpo_noise_gate = 1.0
+        # Early stopping of an HPO subspace: stop once none of the last hpo_stop_window
+        # GP proposals beat the incumbent by the acceptance threshold, and the GP, after
+        # subtracting its observed optimism, does not expect its next proposal to either.
+        # The threshold is the acceptance gate, but never below hpo_min_improvement.
+        self.hpo_early_stop = True
+        self.hpo_stop_window = 8
+        self.hpo_min_improvement = 0.001
+        # Weighted subspace tree (hyperParameterOptimization.WeightedSubdimensionTree):
+        # important parameters appear in up to hpo_max_copies leaves, and a leaf is filled
+        # up to hpo_leaf_budget summed weight, so important parameters get small leaves.
+        # The weights are the prior (PARAMETER_PRIOR_WEIGHTS, first booster scaled by
+        # hpo_first_booster_factor, overridable per name with hpo_param_weights) blended
+        # with the relevance the gps measured; hpo_relevance_prior_strength is how many
+        # fits it takes until the measurement counts as much as the prior.
+        # hpo_weighted_tree = False restores the halving tree.
+        self.hpo_weighted_tree = True
+        self.hpo_leaf_budget = 2.5
+        self.hpo_max_copies = 3
+        self.hpo_min_leaf_size = 3
+        self.hpo_max_leaf_size = 8
+        self.hpo_tree_parent_levels = 1
+        self.hpo_first_booster_factor = 0.5
+        self.hpo_relevance_prior_strength = 4
+        self.hpo_param_weights = None
         # Fraction of the non-GP samples that are drawn uniformly from the whole box.
         # The rest are drawn around the incumbent, which is far more productive when the
         # optimization starts from an already good hyperparameter set.
@@ -124,6 +155,17 @@ class Config:
         self.path_to_processed_features_file = None
         self.path_to_imputed_features_file = None
         self.path_structural_feature_table = None
+        # StructMAn's <session>.expanded_features_<N>.tsv (--local_features N): the rows of the
+        # features table plus the features of each position's interacting positions. When
+        # given, the feature table expansion starts from it instead of
+        # path_structural_feature_table.
+        self.path_expanded_feature_table = None
+        # StructMAn's <session>.interacting_positions.tsv, the ranked lists themselves.
+        self.path_interacting_positions_table = None
+        # StructMAn's alignments folder (--fetch_alignments): one query anchored structure
+        # alignment per protein, used as the 'structural' stacked alignment. Defaults to
+        # the alignments folder next to path_structural_feature_table, if there is one.
+        self.path_to_structman_alignments = None
         self.path_to_multi_savs_table = None
         self.outfolder = None
         self.skip_final_model = False
@@ -171,6 +213,9 @@ class Config:
 
         self.split_rate = 0.2
 
+        # Compute the SHAP based STD of the predictions (--sd); expensive on deep trees
+        self.calc_sd = False
+
         self.mafft_path = ''
         self.blast_path = ''
         self.psic_source = f'{util_scriptpath.rsplit("/",1)[0]}/resources/psic'
@@ -186,10 +231,15 @@ class Config:
         self.select_feature_for_first_slice_only = True
 
         self.impute_missing_values = False
+        # The processed feature table as TSV; build_model reloads the .dump, so this is only for inspection
+        self.write_processed_tsv = False
 
         self.hpo_do_feat_selection = True
         self.hpo_do_forest_param = True
         self.hpo_do_sample_weighting = True
+        # Start the HPO from the best of n random hyperparameter sets instead of the given ones
+        self.hpo_random_start = False
+        self.hpo_random_start_rounds = 20
 
         self.hp_outputFile = "hyperparameters.conf"
 
@@ -307,6 +357,17 @@ class Config:
         self.max_cat_threshold_1 = 50
 
         self.feat_impact_thresh = 0.
+        # 'protein_spearman': change of the protein-wise Spearman without a feature's SHAP contribution,
+        # 'abs_error': change of the absolute error; both averaged over the held-out proteins
+        self.feat_impact_metric = 'protein_spearman'
+        # SHAP interaction values of the first boosters, written per booster and ranked at the end of build_model
+        self.log_feature_interactions = False
+        self.interaction_max_rows = 4000
+        self.interaction_top_features = 200
+        # Combination features of the first combination_pairs pairs of this file (e.g. feature_interactions_ranked.tsv)
+        self.combination_features_file = None
+        self.combination_pairs = 25
+        self.combination_ops = ['product', 'ratio', 'difference']
         self.fs_tree_depth = 10
         self.fs_num_of_trees = 50
         self.fs_min_impurity_decrease_exp = 15.
@@ -401,6 +462,24 @@ class Config:
                     self.cv_hpo = True
                 elif arg == 'False':
                     self.cv_hpo = False
+
+            elif opt == 'write_processed_tsv':
+                self.write_processed_tsv = arg == 'True'
+
+            elif opt == 'feat_impact_metric':
+                self.feat_impact_metric = arg
+            elif opt == 'log_feature_interactions':
+                self.log_feature_interactions = arg == 'True'
+            elif opt == 'interaction_max_rows':
+                self.interaction_max_rows = int(arg)
+            elif opt == 'interaction_top_features':
+                self.interaction_top_features = int(arg)
+            elif opt == 'combination_features_file':
+                self.combination_features_file = arg
+            elif opt == 'combination_pairs':
+                self.combination_pairs = int(arg)
+            elif opt == 'combination_ops':
+                self.combination_ops = [op.strip() for op in arg.split(',') if op.strip()]
 
             elif opt == 'multiple_lopo':
                 self.multiple_lopo = int(arg)
@@ -656,6 +735,15 @@ class Config:
             elif opt == 'Path_to_structman_features_file':
                 self.path_structural_feature_table = arg
 
+            elif opt == 'Path_to_structman_expanded_features_file':
+                self.path_expanded_feature_table = arg
+
+            elif opt == 'Path_to_structman_interacting_positions_file':
+                self.path_interacting_positions_table = arg
+
+            elif opt == 'Path_to_structman_alignments_folder':
+                self.path_to_structman_alignments = arg
+
             elif opt == 'Path_to_sequences_file':
                 self.path_to_sequence_fasta = arg
 
@@ -682,6 +770,11 @@ class Config:
 
             elif opt == 'msa_folder_path':
                 self.msa_folder_path = arg
+
+        if self.path_to_structman_alignments is None and self.path_structural_feature_table is not None:
+            default_alignments = f'{os.path.dirname(self.path_structural_feature_table)}/alignments'
+            if os.path.isdir(default_alignments):
+                self.path_to_structman_alignments = default_alignments
 
         if self.mmseqs_search_db_ref50 != '':
             self.search_dbs.append('ref50')
@@ -929,6 +1022,9 @@ class Config:
                 if opt == 'feat_impact_thresh':
                     self.feat_impact_thresh = float(arg)
                     continue
+                if opt == 'feat_impact_metric':
+                    self.feat_impact_metric = arg
+                    continue
                 if opt == 'fs_tree_depth':
                     self.fs_tree_depth = int(arg)
                     continue
@@ -1149,7 +1245,7 @@ class Scores:
     __slots__ = [
                     'mse', 'wmse', 'r2', 'wr2', 'corr', 'acc', 'roc', 'precision', 'recall', 'f1',
                     'mcc', 'pearson_r', 'n_of_features', 'mean_spearman', 'mean_spear_repeat_std', 'mean_pearson', 'feature_penalty',
-                    'train_scores', 'runtime_penalty'
+                    'train_scores', 'runtime_penalty', 'failed_folds'
                 ]
     def __init__(
                     self, mse = None, r2 = None, corr = None, acc = None, roc = None, precision = None,
@@ -1161,6 +1257,9 @@ class Scores:
         self.feature_penalty = feature_penalty
         self.train_scores = None
         self.mean_spear_repeat_std = mean_spear_repeat_std
+        # Number of folds (or repeats) that produced no model and entered as zero scores.
+        # Read it with getattr(scores, 'failed_folds', 0): pickled older objects lack it.
+        self.failed_folds = 1 if zero else 0
         if zero:
             self.mse = float('inf')
             self.wmse = float('inf')
@@ -1503,6 +1602,7 @@ def mean_scores(scores_list):
     mean_pearsons = []
     n_of_features_s = []
     train_scores_list = []
+    failed_folds = 0
 
     scores_obj: Scores
 
@@ -1536,6 +1636,7 @@ def mean_scores(scores_list):
             n_of_features_s.append(scores_obj.n_of_features)
         if scores_obj.train_scores is not None:
             train_scores_list.append(scores_obj.train_scores)
+        failed_folds += getattr(scores_obj, 'failed_folds', 0)
 
 
     if len(n_of_features_s) == 0:
@@ -1555,6 +1656,7 @@ def mean_scores(scores_list):
                         precision = mean(precisions), recall = mean(recalls), f1 = mean(f1s), mcc = mean(mccs),
                         pearson_r = mean(pearson_rs), mean_pearson = mean(mean_pearsons), mean_spearman = mean(mean_spearmans),
                         n_of_features = n_of_features, mean_spear_repeat_std = mean_spear_repeat_std)
+    scores_obj.failed_folds = failed_folds
     if len(train_scores_list) > 0:
         mean_train_scores = mean_scores(train_scores_list)
         scores_obj.train_scores = mean_train_scores
@@ -2193,37 +2295,59 @@ def loadModel(fn: str) -> tuple[list[tuple[xgb.Booster, list[str]]], list[str], 
         print("\n============\nLoaded model from {}\n============\n".format(fn))
     return model, feature_names, impute_map, config, feat_stats, features
 
+# The interaction partners of StructMAn's profile columns and their category: contacts within
+# the own chain, to other proteins, and to everything else.
+PROFILE_PARTNER_CATEGORIES = {
+    'neighbor': (1, 0), 'short': (1, 0), 'long': (1, 0),
+    'Protein': (5, 1), 'Homomer': (5, 1),
+    'Peptide': (8, 1), 'ligand': (8, 1), 'ion': (8, 1), 'metal': (8, 1), 'Sugar': (8, 1),
+    'DNA': (8, 1), 'RNA': (8, 1),
+}
+
+
+# 'IP<k> <feature>' and its one-hot columns 'oh_IP<k> <feature>...': the features of the k-th
+# interacting position (StructMAn's expanded feature table).
+_INTERACTING_POSITION_FEATURE = re.compile(r'^(oh_)?IP\d+ ')
+
+
 def categorize_feat_by_name(featname):
+    # Combination features (comb||<op>||<feature a>||<feature b>) belong to the category of their first feature
+    if featname.startswith('comb||'):
+        parts = featname.split('||')
+        if len(parts) == 4:
+            return categorize_feat_by_name(parts[2])
     if featname in feat_name_category_dict:
         return feat_name_category_dict[featname]
+    if _INTERACTING_POSITION_FEATURE.match(featname):
+        return INTERACTING_POSITIONS_CATEGORY, 0
     if featname.count('GPW ref') > 0:
-        return 0, None
-    if featname.count('MSA ') > 0:
-        return 0, None
-
+        if featname.count('close') > 0:
+            return 0, 0
+        else:
+            return 0, 1
+    
     if featname[:5] == 'gemme':
-        return 0, None
-    if featname[1:3] == 'c ':
-        if featname[3:7] == 'long' or featname[3:8] == 'neigh' or featname[3:8] == 'short':
-            return 1, 0
-        if featname[3:10] == 'Protein':
-            return 5, 1
-        
-        if featname[3:10] == 'Homomer':
-            return 5, 1
+        if featname.count('close') > 0:
+            return 0, 2
+        else:
+            return 0, 3
 
-        if featname[3:10] == 'Peptide':
-            return 8, 1
-        if featname[3:9] == 'ligand':
-            return 8, 1
-        if featname[3:6] == 'ion':
-            return 8, 1
-        if featname[3:6] == 'DNA':
-            return 8, 1
-        if featname[3:6] == 'RNA':
-            return 8, 1
-        if featname[3:8] == 'metal':
-            return 8, 1
+    if featname.count('MSA ') > 0:
+        if featname.count('close') > 0:
+            return 0, 0
+        else:
+            return 0, 1
+
+
+    if featname[:3] == 'mc ' or featname[:3] == 'sc ':
+        # StructMAn's interaction profile columns: '<side> <partner> <measure>' (degree, and
+        # the older 'score' / 'H-bond score') or '<side> <family> <partner> <measure>' (area,
+        # count, presence per RIN family). The partner is the right-most partner word among the
+        # middle tokens - a family can share a partner's name ('mc metal neighbor count').
+        tokens = featname.split()
+        for token in reversed(tokens[1:-1]):
+            if token in PROFILE_PARTNER_CATEGORIES:
+                return PROFILE_PARTNER_CATEGORIES[token]
 
     if featname[:4] == 'lig_' or featname[:4] == 'rna_':
         return 8, 1
@@ -2252,13 +2376,13 @@ def categorize_feat_by_name(featname):
         return 3, 3
     
     if featname [-7:] == ' change':
-        return 4, None
+        return 4, 0
     
     if featname.count(' AA_') > 0 or featname[:6] == 'oh_AA ':
-        return 4, None
+        return 4, 1
 
     if featname[:5] == 'Site_' or featname[:9] == 'Backbone_' or featname[:9] == 'nof_site_' or featname[:8] == 'All_atom':
-        return 6, 2
+        return 6, 3
     
     if featname[:12] == 'inter_chain_':
         return 5, 1
@@ -2267,7 +2391,7 @@ def categorize_feat_by_name(featname):
         return 1, 0
     
     if featname[:16] == 'oh_Function Type' or featname == 'Function Type':
-        return 10, None
+        return 10, 3
     
     if featname[:4] == 'cis_' or featname[:7] == 'ssbond_' or featname[-6:] == 'ssbond':
         return 7, 0
@@ -2316,14 +2440,57 @@ def cat_shap_full_matrix(explanations, feat_names):
     return np.array(cat_expl)
         
 
+LOG_FORMAT = '%(asctime)s %(levelname)s %(name)s: %(message)s'
+
+def put_samples(samples):
+    """Puts a SampleSpace into the ray object store.
+
+    ray serializes its numpy arrays out-of-band (zero-copy for the workers); structman's pack fails for feature
+    matrices over 4 GiB, as msgpack cannot hold larger bytes objects.
+    """
+    import ray
+    return ray.put(samples)
+
+def get_samples(samples_store_id):
+    """The SampleSpace behind an object ref of put_samples, or of the older ray.put(pack(samples))."""
+    import ray
+    samples = ray.get(samples_store_id)
+    if isinstance(samples, bytes):
+        return unpack(samples)
+    return samples
+
 def reset_logger_for_remotes(config):
     numba_logger = logging.getLogger('numba')
     numba_logger.setLevel(logging.WARNING)
     fl_logger = logging.getLogger('filelock')
     fl_logger.setLevel(logging.WARNING)
     main_logger = logging.getLogger(__name__)
-    logging.basicConfig(filename=config.logfile, encoding='utf-8', level=logging.DEBUG)
+    logging.basicConfig(filename=config.logfile, encoding='utf-8', level=logging.DEBUG, format=LOG_FORMAT)
     config.logger = main_logger
+
+def memory_usage_str() -> str:
+    try:
+        import psutil
+        rss = psutil.Process().memory_info().rss
+    except Exception:
+        return ''
+    try:
+        import resource
+        # ru_maxrss is in KiB on Linux
+        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+        return f', RSS {rss / 2**30:.1f} GiB (peak {peak / 2**30:.1f} GiB)'
+    except Exception:
+        return f', RSS {rss / 2**30:.1f} GiB'
+
+@contextlib.contextmanager
+def log_timing(config, label: str, min_verbosity: int = 1):
+    """Logs the wall time and memory of the enclosed block as '[timing] label: ...', so the log shows the bottlenecks of a run."""
+    t0 = time.time()
+    try:
+        yield
+    finally:
+        if config is not None and config.verbosity >= min_verbosity:
+            config.logger.info(f'[timing] {label}: {time.time() - t0:.1f} s{memory_usage_str()}')
 
 def count_dtypes(mat):
     typedict = {}

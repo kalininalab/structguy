@@ -6,6 +6,8 @@ import time
 import logging
 from datetime import datetime
 
+import numpy as np
+
 from structguy import featureGenerator, util, learn, featureAnalysis, baseline
 from structguy.sequence_feature_generation import prepare_gemme
 from ray.train import ScalingConfig
@@ -18,6 +20,7 @@ structguy_main.py generate_features [-i -o --verbosity]\n
 structguy_main.py build_model [-i -o --verbosity]\n
 structguy_main.py build_lasso [-i -o --verbosity]\n
 structguy_main.py predict_lasso [-i -m --verbosity]\n
+structguy_main.py predict [-i -m --verbosity --sd (SHAP based STD of the predictions, slow)]\n
 MORE TODO\n
 """
 
@@ -57,7 +60,9 @@ def parse_arguments(argument_start = 2, manual_args = None):
                 'slice_by_slice',
                 'ablation',
                 'no_evo',
-                'cuda_async_pool'
+                'cuda_async_pool',
+                'random_start', # Start the HPO with random hyperparameter rounds instead of the given/default ones
+                'log_interactions', # SHAP interaction values of the first boosters, ranked in feature_interactions_ranked.tsv
             ]
             opts, args = getopt.getopt(argv, "i:n:m:d", long_paras)
 
@@ -110,6 +115,8 @@ def parse_arguments(argument_start = 2, manual_args = None):
     ablation = False
     no_evo = False
     cuda_async_pool = False
+    random_start = False
+    log_interactions = False
 
     for opt, arg in opts:
         if opt == '-i':
@@ -223,6 +230,12 @@ def parse_arguments(argument_start = 2, manual_args = None):
         if opt == '--cuda_async_pool':
             cuda_async_pool = True
 
+        if opt == '--random_start':
+            random_start = True
+
+        if opt == '--log_interactions':
+            log_interactions = True
+
     if path_to_model is not None:
         if path_to_model.count('/') > 0:
             model_name = path_to_model.rsplit("/",1)[1].rsplit('.',1)[0]
@@ -243,6 +256,9 @@ def parse_arguments(argument_start = 2, manual_args = None):
         config.skip_final_model = True
 
     config.vram_limit = vram_limit
+    # The flag switches it on; without it the setting of the project conf stays
+    if log_interactions:
+        config.log_feature_interactions = True
     config.slice_by_slice = slice_by_slice
     config.ablation = ablation
     config.no_evo = no_evo
@@ -258,6 +274,7 @@ def parse_arguments(argument_start = 2, manual_args = None):
     config.threads_per_gpu = threads_per_gpu
     config.use_external_memory_qdm = use_external_memory_qdm
     config.setup_cuda_mem = cuda_async_pool
+    config.hpo_random_start = random_start
 
     if repeat is not None:
         config.repeat_training = repeat
@@ -332,7 +349,7 @@ def parse_arguments(argument_start = 2, manual_args = None):
     time_stamp = str(datetime.now()).replace(' ','_')
 
     log_file = f'{config.outfolder}/main_log_{time_stamp}.log'
-    logging.basicConfig(filename=log_file, encoding='utf-8', level=logging.DEBUG)
+    logging.basicConfig(filename=log_file, encoding='utf-8', level=logging.DEBUG, format=util.LOG_FORMAT)
 
     config.logfile = log_file
     config.logger = main_logger
@@ -346,7 +363,8 @@ def generate_violins():
 def feature_generator_main():
     config, test_config = parse_arguments()
 
-    if config.path_structural_feature_table is not None or config.overwrite:
+    if (config.path_structural_feature_table is not None or config.path_expanded_feature_table is not None
+            or config.overwrite):
         featureGenerator.expand_structural_feature_table(config)
 
 #@profile
@@ -424,37 +442,25 @@ def check_data():
     for feat_name in samples.feature_names:
         feat_pos = samples.feat_pos_dict[feat_name]
 
-        min_val = None
-        max_val = None
-        min_sample_id = None
-        max_sample_id = None
-        values = []
-        for pos, row in enumerate(samples.raw_feature_matrix):
-            value = row[feat_pos]
-            if value is None:
-                continue
-            values.append(value)
-            sample_id = pos_to_sample_id[pos]
-            if min_val is None or value < min_val:
-                min_val = value
-                min_sample_id = sample_id
-            if max_val is None or value > max_val:
-                max_val = value
-                max_sample_id = sample_id
+        column = np.asarray(samples.raw_feature_matrix[:, feat_pos], dtype=np.float64)
+        valid_positions = np.flatnonzero(~np.isnan(column))
+        values = column[valid_positions]
 
         n = len(values)
         if n == 0:
             outlines.append(f'{feat_name}\t0\tNA\tNA\tNA\tNA\tNA\tNA\tNA')
             continue
 
-        u_ac, aac = min_sample_id
+        min_val = values.min()
+        max_val = values.max()
+        u_ac, aac = pos_to_sample_id[valid_positions[np.argmin(values)]]
         min_sample_str = f'{u_ac}_{aac}'
-        u_ac, aac = max_sample_id
+        u_ac, aac = pos_to_sample_id[valid_positions[np.argmax(values)]]
         max_sample_str = f'{u_ac}_{aac}'
 
-        mean_val = sum(values) / n
-        variance_val = sum((value - mean_val) ** 2 for value in values) / n
-        median_val = util.median(values)
+        mean_val = values.mean()
+        variance_val = values.var()
+        median_val = np.median(values)
 
         outlines.append(f'{feat_name}\t{n}\t{min_val}\t{min_sample_str}\t{max_val}\t{max_sample_str}\t{mean_val}\t{variance_val}\t{median_val}')
 

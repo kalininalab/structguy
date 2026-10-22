@@ -8,6 +8,7 @@ import time
 import pickle
 import copy
 import contextlib
+import zstd
 
 
 from scipy import stats
@@ -15,13 +16,30 @@ from scipy import stats
 from datasail.sail import datasail
 
 from structguy.sequence_util import parseFromFasta
-from structguy.base_classes import Feature
+from structguy.base_classes import Feature, possible_na_values
 from structguy.support_classes import CrossValidationSlice
-from structguy.util import median, get_gpu_memory, Config
+from structguy.util import get_gpu_memory, Config
 from structguy.prefiltering import detectBiasedFeaturesByMeanCorrelation
 from structguy.class_utils import get_feat_matrix_from_ids, get_feat_matrix, get_raw_feat_matrix_from_sample_ids
+from structguy.feature_correlation import compute_feature_correlations
+from structguy.feature_interactions import parse_combination_name, combine
 
 from structman.base_utils.base_utils import pack, unpack, Slotted_obj
+
+MAX_PACKED_MATRIX_BYTES = 2**31
+
+
+def load_samples_dump(path):
+    """Loads a SampleSpace.dump file, which is either packed or (for large feature matrices) a pickle."""
+    with open(path, 'rb') as f:
+        if f.peek(1)[:1] == b'\x80':
+            return pickle.load(f)
+        packed = f.read()
+    try:
+        return unpack(packed)
+    except zstd.Error:
+        return pickle.loads(packed)
+
 
 class Sample(Slotted_obj):
     __slots__ = ['sample_id', 'targetValue', 'nr', 'amount_of_structures', 'tags']
@@ -34,141 +52,6 @@ class Sample(Slotted_obj):
 
     def addTargetValue(self,value):
         self.targetValue = value
-
-@ray.remote
-def para_calc_feat_corr(data_store, left, right):
-    feat_matrix, tv_vector = data_store
-    corr_values = []
-    #none_replacement = -1_000_000
-    tv_corrs = {}
-    feat_stats: dict[int, tuple[float, float, float, float]] = {}
-    for index, value_vec in enumerate(feat_matrix[left:right]):
-        feat_nr_a = index + left
-        corr_values.append([])
-        for feat_nr_b, value_vec_b in enumerate(feat_matrix):
-            if feat_nr_a == feat_nr_b:
-                corr_values[index].append(1.0)
-                continue
-            #config.logger.info(f'{value_vec=} {value_vec_b=}')
-            cleaned_value_vec = []
-            n_a = 0
-            cleaned_value_vec_b = []
-            n_b = 0
-            if feat_nr_a not in tv_corrs:
-                tv_vec_a = []
-                vec_a = []
-                calc_a = True
-            else:
-                calc_a = False
-            if feat_nr_b not in tv_corrs:
-                tv_vec_b = []
-                vec_b = []
-                calc_b = True
-            else:
-                calc_b = False
-            n_both_none = 0
-
-
-            for ind, value in enumerate(value_vec):
-                if tv_vector[ind] is None:
-                    continue
-                value_b = value_vec_b[ind]
-                if value is not None and value_b is not None:
-                    cleaned_value_vec.append(value)
-                    cleaned_value_vec_b.append(value_b)
-                    n_a += 1
-                    n_b += 1
-                elif value is None and value_b is not None:
-                    #cleaned_value_vec.append(none_replacement)
-                    #cleaned_value_vec_b.append(value_b)
-                    n_b += 1
-                elif value is not None and value_b is None:
-                    #cleaned_value_vec.append(value)
-                    #cleaned_value_vec_b.append(none_replacement)
-                    n_a += 1
-                else:
-                    n_both_none += 1
-
-                if calc_a:
-                    if value is not None:
-                        tv_vec_a.append(tv_vector[ind])
-                        vec_a.append(value)
-                if calc_b:
-                    if value_b is not None:
-                        tv_vec_b.append(tv_vector[ind])
-                        vec_b.append(value_b)
-            if calc_a:
-                tv_corr_a, _ = stats.spearmanr(vec_a, tv_vec_a)
-                tv_corrs[feat_nr_a] = tv_corr_a
-
-                try:
-                    min_val = min(vec_a)
-                    max_val = max(vec_a)
-                except ValueError:
-                    min_val = None
-                    max_val = None
-                try:
-                    mean_val = sum(vec_a) / len(vec_a)
-                    
-                except ZeroDivisionError:
-                    mean_val = None
-                except TypeError:
-                    mean_val = None
-
-                try:
-                    median_val = median(vec_a)
-                except IndexError:
-                    median_val = None
-                except TypeError:
-                    median_val = None
-
-                feat_stats[feat_nr_a] = (min_val, max_val, mean_val, median_val)
-
-            else:
-                tv_corr_a = tv_corrs[feat_nr_a]
-
-
-            if calc_b:
-                tv_corr_b, _ = stats.spearmanr(vec_b, tv_vec_b)
-                tv_corrs[feat_nr_b] = tv_corr_b
-                if feat_nr_b >= left and feat_nr_b < right:
-                    try:
-                        min_val = min(vec_b)
-                        max_val = max(vec_b)
-                    except ValueError:
-                        min_val = None
-                        max_val = None
-
-                    try:
-                        mean_val = sum(vec_b) / len(vec_b)
-                    except ZeroDivisionError:
-                        mean_val = None
-                    except TypeError:
-                        mean_val = None
-
-                    try:
-                        median_val = median(vec_b)
-                    except IndexError:
-                        median_val = None
-                    except TypeError:
-                        median_val = None
-
-                    feat_stats[feat_nr_b] = (min_val, max_val, mean_val, median_val)
-
-            else:
-                tv_corr_b = tv_corrs[feat_nr_b]
-
-
-            corr, _ = stats.spearmanr(cleaned_value_vec, cleaned_value_vec_b)
-            cov_a = n_a / len(value_vec)
-            cov_b = n_b / len(value_vec)
-            try:
-                cov_both = len(cleaned_value_vec)/(len(value_vec)-n_both_none)
-            except ZeroDivisionError:
-                cov_both = 0.
-            corr_values[index].append((corr, cov_a, cov_b, cov_both, tv_corr_a, tv_corr_b))
-
-    return corr_values, left, right, feat_stats
 
 @ray.remote(max_calls = 1)
 def calc_gdm_submatrix(store,i):
@@ -304,20 +187,179 @@ class SampleSpace(Slotted_obj):
             self.sequence_map = None
         self.impute_map = {}
 
-    def fuse_samples(self, other_samples):
-        self.samples.update(other_samples.samples)
-        self.features.update(other_samples.features)
-        self.feature_matrix_dict.update(other_samples.feature_matrix_dict)
-        self.sequence_map.update(other_samples.sequence_map)
-        self.fillDefaultValues()
-        self.feature_names = list(self.features.keys())
+    # Pickling (ray.put, dump of large matrices) sends the same slots as structman's pack, the ones on in slot_mask
+    def __getstate__(self):
+        return {att: getattr(self, att, None) for att, active in zip(self.__slots__, self.slot_mask) if active}
 
-        self.transform_matrix_dict()
+    def __setstate__(self, state):
+        for att in self.__slots__:
+            setattr(self, att, state.get(att))
+
+    def fuse_samples(self, other_samples):
+        if self.sequence_map is not None and other_samples.sequence_map is not None:
+            self.sequence_map.update(other_samples.sequence_map)
+        if self.feature_matrix_dict is not None or other_samples.feature_matrix_dict is not None:
+            self.matrix_to_dict()
+            other_samples.matrix_to_dict()
+            self.samples.update(other_samples.samples)
+            self.features.update(other_samples.features)
+            self.feature_matrix_dict.update(other_samples.feature_matrix_dict)
+            self.fillDefaultValues()
+            self.feature_names = list(self.features.keys())
+            self.transform_matrix_dict()
+            return
+
+        for feat_name, feat in other_samples.features.items():
+            if feat_name not in self.features:
+                self.features[feat_name] = copy.deepcopy(feat)
+                if feat.f_type == 'categorical':
+                    self.features[feat_name].category_map = {}
+                    self.features[feat_name].category_counter = 0
+                    self.features[feat_name].category_backmap = {}
+                self.feature_names.append(feat_name)
+        self.ensure_feature_columns()
+
+        # The rows of other_samples in the column layout of self, categorical codes translated into the maps of self
+        other_ids = list(other_samples.samples.keys())
+        other_rows = [other_samples.sample_pos_dict[sample_id] for sample_id in other_ids]
+        other_matrix = other_samples.raw_feature_matrix[other_rows]
+        block = np.empty((len(other_ids), len(self.feat_pos_dict)), dtype=np.float64)
+        block[:] = self.default_value_vector(list(self.feat_pos_dict.keys()))
+        file_cols = []
+        for feat_name, other_pos in other_samples.feat_pos_dict.items():
+            col = self.feat_pos_dict[feat_name]
+            values = other_matrix[:, other_pos]
+            other_feat = other_samples.features[feat_name]
+            if other_feat.f_type == 'categorical':
+                decoded = np.array([other_feat.category_backmap.get(int(v)) if v == v else None for v in values.tolist()], dtype=object)
+                self.features[feat_name].set_categorical()
+                values = self.encode_categories(self.features[feat_name], decoded)
+            block[:, col] = values
+            file_cols.append(col)
+
+        sample_meta = [
+            (sample_id, sample.targetValue, sample.amount_of_structures, sample.tags)
+            for sample_id, sample in ((sample_id, other_samples.samples[sample_id]) for sample_id in other_ids)
+        ]
+        self.add_parsed_rows(sample_meta, block, np.array(sorted(file_cols), dtype=np.int64))
 
     def addFeature(self,name,f_type,group=None,default_value=None,mutation_specific=False):
         feat = Feature(name = name, f_type = f_type,group=group,default_value=default_value,mutation_specific=mutation_specific)
         self.features[name] = feat
         self.feature_names.append(name)
+
+    def default_value_vector(self, feat_names: list[str]) -> np.ndarray:
+        """The default value of every given feature, as a row of the feature matrix."""
+        defaults = np.full(len(feat_names), np.nan, dtype=np.float64)
+        for j, feat_name in enumerate(feat_names):
+            feat = self.features.get(feat_name)
+            if feat is None or feat.default is None:
+                continue
+            if feat.f_type == 'categorical':
+                defaults[j] = feat.encode(feat.default)
+            else:
+                try:
+                    defaults[j] = float(feat.default)
+                except (TypeError, ValueError):
+                    pass
+        return defaults
+
+    def encode_categories(self, feat: Feature, values: np.ndarray) -> np.ndarray:
+        """Encodes raw categorical values (strings, missing values as NA string or None) to the codes of the feature.
+
+        New categories get codes in the order of their first appearance and a missing value is a category of its own,
+        as in addValue.
+        """
+        strings = np.array(['\x00None' if value is None or value in possible_na_values else str(value) for value in values.tolist()], dtype=str)
+        uniques, first_index, inverse = np.unique(strings, return_index=True, return_inverse=True)
+        unique_codes = np.empty(len(uniques), dtype=np.float64)
+        for u in np.argsort(first_index):
+            value = None if uniques[u] == '\x00None' else str(uniques[u])
+            unique_codes[u] = feat.encode(value)
+        return unique_codes[inverse.reshape(-1)]
+
+    def ensure_feature_columns(self):
+        """Gives every feature a column in raw_feature_matrix, new columns are filled with the feature defaults."""
+        if self.feat_pos_dict is None:
+            self.feat_pos_dict = {}
+        if self.sample_pos_dict is None:
+            self.sample_pos_dict = {}
+        n_rows = len(self.sample_pos_dict)
+        if self.raw_feature_matrix is None or self.raw_feature_matrix.ndim != 2:
+            self.raw_feature_matrix = np.empty((n_rows, 0), dtype=np.float64)
+        missing = [feat_name for feat_name in self.feature_names if feat_name not in self.feat_pos_dict]
+        if len(missing) == 0:
+            return
+        new_columns = np.empty((n_rows, len(missing)), dtype=np.float64)
+        new_columns[:] = self.default_value_vector(missing)
+        if self.raw_feature_matrix.shape[1] == 0:
+            self.raw_feature_matrix = new_columns
+        else:
+            self.raw_feature_matrix = np.hstack([self.raw_feature_matrix, new_columns])
+        for feat_name in missing:
+            self.feat_pos_dict[feat_name] = len(self.feat_pos_dict)
+
+    def add_parsed_rows(self, sample_meta: list[tuple], block: np.ndarray, file_cols: np.ndarray):
+        """Adds parsed samples, block holds their rows in the column layout of feat_pos_dict.
+
+        A sample that is already present gets the values of the columns file_cols overwritten, like addValue does.
+        """
+        self.feature_matrix_dict = None
+        new_rows = []
+        for i, (sample_id, target_value, amount_of_structures, tags) in enumerate(sample_meta):
+            if sample_id in self.sample_pos_dict:
+                self.raw_feature_matrix[self.sample_pos_dict[sample_id], file_cols] = block[i, file_cols]
+                sample = self.samples[sample_id]
+            else:
+                self.sample_pos_dict[sample_id] = len(self.sample_pos_dict)
+                new_rows.append(i)
+                sample = Sample(sample_id, self.sample_nr)
+                self.sample_nr += 1
+                self.samples[sample_id] = sample
+            sample.addTargetValue(target_value)
+            sample.amount_of_structures = amount_of_structures
+            sample.tags = tags
+
+        if len(new_rows) == len(sample_meta) and self.raw_feature_matrix.shape[0] == 0:
+            self.raw_feature_matrix = np.ascontiguousarray(block)
+        elif len(new_rows) > 0:
+            self.raw_feature_matrix = np.vstack([self.raw_feature_matrix, block[new_rows]])
+
+    def matrix_to_dict(self):
+        """Converts the feature matrix back to feature_matrix_dict, for the code paths that need it (fusePositions, addValue)."""
+        if self.feature_matrix_dict is not None:
+            return
+        feat_items = list(self.feat_pos_dict.items())
+        self.feature_matrix_dict = {}
+        for sample_id in self.samples:
+            row = self.raw_feature_matrix[self.sample_pos_dict[sample_id]].tolist()
+            sample_dict = {}
+            for feat_name, pos in feat_items:
+                value = row[pos]
+                if value != value:
+                    value = None
+                elif self.features[feat_name].f_type in ('categorical', 'integer', 'binary') and value.is_integer():
+                    value = int(value)
+                sample_dict[feat_name] = value
+            self.feature_matrix_dict[sample_id] = sample_dict
+        self.raw_feature_matrix = np.array([])
+        self.feat_pos_dict = {}
+        self.sample_pos_dict = {}
+
+    def compact_matrix_rows(self):
+        """Removes the rows of samples that were deleted from self.samples."""
+        if len(self.sample_pos_dict) == len(self.samples):
+            return
+        keep_rows = [self.sample_pos_dict[sample_id] for sample_id in self.samples]
+        self.raw_feature_matrix = self.raw_feature_matrix[keep_rows]
+        self.sample_pos_dict = {sample_id: pos for pos, sample_id in enumerate(self.samples)}
+
+    def quantitative_columns(self):
+        """(feat_name, column) of all non-categorical features in the feature matrix."""
+        return [
+            (feat_name, self.feat_pos_dict[feat_name]) for feat_name, feat in self.features.items()
+            if feat.f_type != 'categorical' and feat_name in self.feat_pos_dict
+        ]
 
     def removeFeature(self, feat_name):
         del self.features[feat_name]
@@ -388,7 +430,49 @@ class SampleSpace(Slotted_obj):
         subsamples = random.sample(sample_list, n_of_subsamples)
         return subsamples
 
-    def calc_subsamples_feat_corr_matrix(self, config, n_of_subsamples = 50_000) -> list[list[tuple[float, float, float, float, float, float, float]]]:
+    def add_combination_features(self, names: list[str], config=None) -> int:
+        """Adds the combination features (comb||<op>||<feature a>||<feature b>) that are missing as matrix columns.
+
+        Pairs with an unknown or categorical feature are skipped. Returns the number of added features.
+        """
+        if self.feature_matrix_dict is not None:
+            self.transform_matrix_dict(config=config)
+        new_columns = []
+        for name in dict.fromkeys(names):
+            if name in self.features:
+                continue
+            parsed = parse_combination_name(name)
+            if parsed is None:
+                continue
+            op, feat_a, feat_b = parsed
+            if feat_a not in self.feat_pos_dict or feat_b not in self.feat_pos_dict:
+                if config is not None and config.verbosity >= 2:
+                    config.logger.info(f'Combination feature {name} skipped: a feature of the pair is not in the feature matrix')
+                continue
+            if self.features[feat_a].f_type == 'categorical' or self.features[feat_b].f_type == 'categorical':
+                if config is not None and config.verbosity >= 2:
+                    config.logger.info(f'Combination feature {name} skipped: categorical features are not combined')
+                continue
+            column = combine(op, self.raw_feature_matrix[:, self.feat_pos_dict[feat_a]], self.raw_feature_matrix[:, self.feat_pos_dict[feat_b]])
+            new_columns.append((name, column, self.features[feat_a].group))
+        if not new_columns:
+            return 0
+        self.raw_feature_matrix = np.hstack([self.raw_feature_matrix, np.column_stack([column for _, column, _ in new_columns])])
+        for name, _, group in new_columns:
+            self.addFeature(name, 'real', group=group)
+            self.feat_pos_dict[name] = len(self.feat_pos_dict)
+        if config is not None and config.verbosity >= 1:
+            config.logger.info(f'Added {len(new_columns)} combination features, feature matrix: {self.raw_feature_matrix.shape}')
+        return len(new_columns)
+
+    def ensure_feat_corr_matrix(self, config):
+        """Computes the feature correlations if missing: prediction runs and fused support samples skip them."""
+        if self.feat_corr_matrix is None:
+            self.transform_matrix_dict(config=config)
+            self.calc_subsamples_feat_corr_matrix(config)
+
+    def calc_subsamples_feat_corr_matrix(self, config, n_of_subsamples = 50_000) -> np.ndarray:
+        """Returns a float32 array of shape (n_feats, n_feats, 6) holding (corr, cov_a, cov_b, cov_both, tv_corr_a, tv_corr_b) per feature pair."""
         subsamples = self.draw_subsamples(n_of_subsamples=n_of_subsamples)
         feat_matrix, cat_vec = get_feat_matrix_from_ids(
             self.feat_pos_dict,
@@ -397,60 +481,25 @@ class SampleSpace(Slotted_obj):
             self.raw_feature_matrix,
             subsamples,
             self.feature_names)
-        feat_matrix = np.array(feat_matrix)#, dtype=float)
-        #feat_matrix = np.nan_to_num(feat_matrix, nan=-1_000_000)
-        feat_matrix = feat_matrix.transpose()
-        feats_per_process = len(self.feature_names) // config.proc_n
-        n_of_procs = config.proc_n
-        if feats_per_process == 0:
-            feats_per_process = 1
-            n_of_procs = len(self.feature_names)
-        elif len(self.feature_names) % config.proc_n != 0:
-            feats_per_process += 1
+        # float dtype turns None into NaN; an object array would be unpickled as a full copy in every worker
+        feat_matrix = np.ascontiguousarray(np.array(feat_matrix, dtype=np.float64).transpose())
+        tv_vector = np.array([self.samples[sample_id].targetValue for sample_id in subsamples], dtype=np.float64)
 
-        tv_vector = []
-        for sample_id in subsamples:
-            target_value = self.samples[sample_id].targetValue
-            tv_vector.append(target_value)
+        feat_corr_matrix, feat_stats = compute_feature_correlations(feat_matrix, tv_vector, config)
+        del feat_matrix
 
-        data_store = ray.put((feat_matrix, tv_vector))
-
-        feat_corr_processes = []
-
-        feat_corr_matrix: list[list[tuple[float, float, float, float, float, float, float]]] = [[]]*len(self.feature_names) 
-
-        for proc_id in range(n_of_procs):
-            left = proc_id * feats_per_process
-            right = (proc_id+1) * feats_per_process
-            feat_corr_processes.append(para_calc_feat_corr.remote(data_store, left, right))
-            if right >= len(self.feature_names):
-                break 
-
-        results = ray.get(feat_corr_processes)
-
-        complete_feat_stats: dict[str, tuple[float, float, float, float]] = {}
-        for feat_corr_slice, left, right, feat_stats in results:
-            #config.logger.info(f'{left=} {right=} {len(feat_corr_slice)=} {feat_stats=}')
-            for index in range(left,right):
-                slice_index = index-left
-                if slice_index >= len(feat_corr_slice):
-                    break
-                feat_corr_matrix[index] = feat_corr_slice[slice_index]
-                #config.logger.info(f'{index=} {slice_index=} {feat_corr_slice[slice_index][:10]=}')
-        
-            for feat_nr in feat_stats:
-                feat_name = self.feature_names[feat_nr]
-                #config.logger.info(f'{feat_nr} {feat_name}')
-                complete_feat_stats[feat_name] = feat_stats[feat_nr]
-
-        self.feat_stats = complete_feat_stats
+        self.feat_stats = {feat_name: feat_stats[feat_nr] for feat_nr, feat_name in enumerate(self.feature_names)}
         self.feat_corr_matrix = feat_corr_matrix
 
         config.logger.info(f'{len(self.feat_stats)=} {len(self.feat_corr_matrix)=} {len(self.feature_names)}')
         return feat_corr_matrix
 
-
     def external_impute(self, external_impute):
+        if self.feature_matrix_dict is None:
+            for feat_name, col in self.quantitative_columns():
+                column = self.raw_feature_matrix[:, col]
+                column[np.isnan(column)] = external_impute.get(feat_name, 0.)
+            return
         for feat_name in self.features:
             feat = self.features[feat_name]
             if feat.f_type == 'categorical':
@@ -466,6 +515,11 @@ class SampleSpace(Slotted_obj):
                     self.feature_matrix_dict[sample_id][feat_name] = impute_value
 
     def get_bounds(self, feat_name):
+        if self.feature_matrix_dict is None:
+            column = self.raw_feature_matrix[:, self.feat_pos_dict[feat_name]]
+            if np.isnan(column).all():
+                return None, None
+            return float(np.nanmin(column)), float(np.nanmax(column))
         min_value = None
         max_value = None
         for sample_id in self.feature_matrix_dict:
@@ -483,6 +537,17 @@ class SampleSpace(Slotted_obj):
         return min_value, max_value
 
     def impute_all(self):
+        if self.feature_matrix_dict is None:
+            for feat_name, col in self.quantitative_columns():
+                min_val, max_val = self.get_bounds(feat_name)
+                if min_val is not None:
+                    impute_value = min_val - abs(max_val - min_val)
+                else:
+                    impute_value = 0
+                self.impute_map[feat_name] = impute_value
+                column = self.raw_feature_matrix[:, col]
+                column[np.isnan(column)] = impute_value
+            return
         for feat_name in self.features:
             feat = self.features[feat_name]
             if feat.f_type == 'categorical':
@@ -505,6 +570,7 @@ class SampleSpace(Slotted_obj):
             pickle.dump(self.impute_map, output, pickle.HIGHEST_PROTOCOL)
 
     def fusePositions(self):
+        self.matrix_to_dict()
         pos_map = {}
         for sample_id in self.samples:
             (u_ac,aac) = sample_id
@@ -546,6 +612,9 @@ class SampleSpace(Slotted_obj):
         self.cleanFeatureValues()
 
     def cleanFeatureValues(self):
+        if self.feature_matrix_dict is None:
+            self.compact_matrix_rows()
+            return
         del_values = []
         for sample_id in self.feature_matrix_dict:
             if sample_id not in self.samples:
@@ -595,6 +664,9 @@ class SampleSpace(Slotted_obj):
             self.samples[sample_id].targetValue = math.sqrt(val)
 
     def fillDefaultValues(self):
+        if self.feature_matrix_dict is None:
+            self.ensure_feature_columns()
+            return
         for sample_id in self.samples:
             for feat_name in self.features:
                 if feat_name not in self.feature_matrix_dict[sample_id]:
@@ -603,14 +675,86 @@ class SampleSpace(Slotted_obj):
     def dump(self, outfile):
         bu_slotmask = self.deactivate_slot_mask()
         try:
-            packed = pack(self)
-        except ValueError:
-            packed = pickle.dumps(self)
-        with open(outfile, 'wb') as f:
-            f.write(packed)
-        self.reactivate_slot_mask(bu_slotmask)
+            # msgpack cannot hold bytes objects over 4 GiB, which a large feature matrix becomes in pack
+            packed = None
+            if getattr(self.raw_feature_matrix, 'nbytes', 0) < MAX_PACKED_MATRIX_BYTES:
+                try:
+                    packed = pack(self)
+                except ValueError:
+                    packed = None
+            with open(outfile, 'wb') as f:
+                if packed is not None:
+                    f.write(packed)
+                else:
+                    pickle.dump(self, f, protocol=pickle.HIGHEST_PROTOCOL)
+        finally:
+            self.reactivate_slot_mask(bu_slotmask)
 
-    def write(self, outfile):
+    def write(self, outfile, block_size: int = 1000):
+        if self.feature_matrix_dict is not None:
+            self.write_from_dict(outfile)
+            return
+
+        self.ensure_feature_columns()
+        feature_names = list(self.features.keys())
+        cols = [self.feat_pos_dict[feature_name] for feature_name in feature_names]
+        header = 'Uniprot Ac\tAAC\tTarget value\tTags\tAmount of mapped structures\t%s' % '\t'.join(feature_names)
+
+        int_cols = [j for j, feature_name in enumerate(feature_names) if self.features[feature_name].f_type in ('integer', 'binary')]
+        cat_cols = [j for j, feature_name in enumerate(feature_names) if self.features[feature_name].f_type == 'categorical']
+        class_col = feature_names.index('RIN-based simple classification') if 'RIN-based simple classification' in feature_names else None
+
+        sample_ids = list(self.samples.keys())
+        class_files = {}
+        if class_col is not None:
+            base_name, file_type = outfile.rsplit('.', 1)
+            if not os.path.isdir(base_name):
+                os.mkdir(base_name)
+
+        with open(outfile, 'w') as f:
+            f.write(header)
+            for start in range(0, len(sample_ids), block_size):
+                block_ids = sample_ids[start:start + block_size]
+                block = self.raw_feature_matrix[[self.sample_pos_dict[sample_id] for sample_id in block_ids]][:, cols]
+                # Python floats and ints, so str() formats them like the values of the old dict based writer
+                values = block.astype(object)
+                if int_cols:
+                    sub = block[:, int_cols]
+                    with np.errstate(invalid='ignore'):
+                        integral = ~np.isnan(sub) & (sub == np.floor(sub))
+                    int_values = values[:, int_cols]
+                    int_values[integral] = np.where(integral, sub, 0).astype(np.int64).astype(object)[integral]
+                    values[:, int_cols] = int_values
+                for j in cat_cols:
+                    backmap = self.features[feature_names[j]].category_backmap
+                    values[:, j] = ['None' if v != v else str(backmap[int(v)]) for v in block[:, j].tolist()]
+
+                lines = []
+                for sample_id, row in zip(block_ids, values.tolist()):
+                    u_ac, aac = sample_id
+                    sample = self.samples[sample_id]
+                    feature_str = '\t'.join(map(str, row))
+                    if 'nan' in feature_str:
+                        # Missing values are written as None; twice, as adjacent cells share their tab
+                        feature_str = f'\t{feature_str}\t'.replace('\tnan\t', '\tNone\t').replace('\tnan\t', '\tNone\t')[1:-1]
+                    target_value_str = str(sample.targetValue)
+                    lines.append('\n%s\t%s\t%s\t%s\t%s\t%s' % (u_ac, aac, target_value_str, sample.tags, str(sample.amount_of_structures), feature_str))
+
+                    if class_col is None:
+                        continue
+                    class_name = row[class_col]
+                    if class_name == 'None':
+                        continue
+                    if class_name not in class_files:
+                        class_files[class_name] = open('%s_%s.%s' % (base_name, class_name, file_type), 'w')
+                        class_files[class_name].write(header)
+                    class_files[class_name].write('\n%s\t%s\t%s\t%s' % (u_ac, aac, target_value_str, feature_str))
+                f.write(''.join(lines))
+
+        for class_file in class_files.values():
+            class_file.close()
+
+    def write_from_dict(self, outfile):
 
         self.fillDefaultValues()
         class_out_lines = {}
@@ -663,10 +807,33 @@ class SampleSpace(Slotted_obj):
     def write_feature_coverage_matrix(self, outfile, config: Config):
         prot_wise_feature_coverage = {'total':{}}
         feat_name_list = list(self.features.keys())
-        
+
         sample_id_list = list(self.samples.keys())
 
-        for feat_name in self.features:
+        if self.feature_matrix_dict is None:
+            # [non-missing, zeros, total] per protein and feature, counted on the row blocks of each protein
+            prot_rows = {}
+            for sample_id in sample_id_list:
+                prot_rows.setdefault(sample_id[0], []).append(self.sample_pos_dict[sample_id])
+            present = [(j, self.feat_pos_dict[feat_name]) for j, feat_name in enumerate(feat_name_list) if feat_name in self.feat_pos_dict]
+            present_j = np.array([j for j, _ in present], dtype=np.int64)
+            present_cols = np.array([col for _, col in present], dtype=np.int64)
+            total_counts = np.zeros((len(feat_name_list), 3), dtype=np.int64)
+            for prot_id, rows in prot_rows.items():
+                counts = np.zeros((len(feat_name_list), 3), dtype=np.int64)
+                if len(present_cols) > 0:
+                    block = self.raw_feature_matrix[np.ix_(rows, present_cols)]
+                    counts[present_j, 0] = (~np.isnan(block)).sum(axis=0)
+                    counts[present_j, 1] = (block == 0).sum(axis=0)
+                counts[:, 2] = len(rows)
+                total_counts += counts
+                prot_wise_feature_coverage[prot_id] = {feat_name: counts[j].tolist() for j, feat_name in enumerate(feat_name_list)}
+            prot_wise_feature_coverage['total'] = {feat_name: total_counts[j].tolist() for j, feat_name in enumerate(feat_name_list)}
+            feat_iter = []
+        else:
+            feat_iter = self.features
+
+        for feat_name in feat_iter:
             val_list = self.get_feature_value_vector(sample_id_list, feat_name)
             for index, sample_id in enumerate(sample_id_list):
                 prot_id ,aac = sample_id
@@ -748,59 +915,29 @@ class SampleSpace(Slotted_obj):
 
     def remove_samples_by_prot_ids_after_matrix_transform(self, prots_to_remove):
         prots_to_remove = set(prots_to_remove)
-        samples_to_remove = []
-        sample_pos_to_remove = []
-        for sample_id in self.samples:
-            prot_id, _ = sample_id
-            if prot_id in prots_to_remove:
-                samples_to_remove.append(sample_id)
-                sample_pos_to_remove.append(self.sample_pos_dict[sample_id])
-
-        sample_pos_to_remove_rev = sorted(sample_pos_to_remove, reverse=True)
-        sample_pos_to_remove = sorted(sample_pos_to_remove_rev)
-
+        samples_to_remove = [sample_id for sample_id in self.samples if sample_id[0] in prots_to_remove]
         for sample_id in samples_to_remove:
             del self.samples[sample_id]
-
-        update_pos_list = []
-        updater = 0
-        for pos in sample_pos_to_remove:
-            while len(update_pos_list) < pos:
-                update_pos_list.append(updater)
-            updater += 1
-
-        while len(update_pos_list) < len(self.sample_pos_dict):
-            update_pos_list.append(updater)
-
-        for sample_id in self.sample_pos_dict:
-            old_pos = self.sample_pos_dict[sample_id]
-            updater = update_pos_list[old_pos]
-            new_pos = old_pos-updater
-            self.sample_pos_dict[sample_id] = new_pos
-
-        for pos in sample_pos_to_remove_rev:
-
-            try:
-                del self.raw_feature_matrix[pos]
-            except TypeError:
-                self.raw_feature_matrix = list(self.raw_feature_matrix)
-                del self.raw_feature_matrix[pos]
+        self.compact_matrix_rows()
 
     def transform_matrix_dict(self, exclude_feats = None, config= None):
+        if self.feature_matrix_dict is None:
+            # Already a matrix: only drop the excluded feature columns
+            if self.raw_feature_matrix.dtype == object:
+                self.raw_feature_matrix = np.array(self.raw_feature_matrix, dtype=np.float64)
+            kept_feats = [feat_name for feat_name in self.feat_pos_dict if exclude_feats is None or feat_name not in exclude_feats]
+            if len(kept_feats) < len(self.feat_pos_dict):
+                kept_cols = [self.feat_pos_dict[feat_name] for feat_name in kept_feats]
+                self.raw_feature_matrix = np.ascontiguousarray(self.raw_feature_matrix[:, kept_cols])
+                self.feat_pos_dict = {feat_name: pos for pos, feat_name in enumerate(kept_feats)}
+            if config is not None and config.verbosity >= 1:
+                config.logger.info(f'Feature matrix: {self.raw_feature_matrix.shape}, {len(self.feat_pos_dict)} features')
+            return
+
         raw_feature_matrix = []
         fixed_feat_names = []
-        
-        if self.feature_matrix_dict is not None:
-            feature_matrix_dict = self.feature_matrix_dict
-        else:
-            feature_matrix_dict = {}
-            for sample_id in self.sample_pos_dict:
-                sample_pos = self.sample_pos_dict[sample_id]
-                feature_matrix_dict[sample_id] = {}
-                for featname in self.feat_pos_dict:
-                    feat_pos = self.feat_pos_dict[featname]
-                    feature_matrix_dict[sample_id][featname] = self.raw_feature_matrix[sample_pos][feat_pos]
-                    
+        feature_matrix_dict = self.feature_matrix_dict
+
         self.feat_pos_dict = {}
         self.sample_pos_dict = {}
 
@@ -815,7 +952,7 @@ class SampleSpace(Slotted_obj):
                             continue
                     self.feat_pos_dict[feat_name] = len(self.feat_pos_dict)
 
-                    if config is not None:
+                    if config is not None and config.verbosity >= 4:
                         config.logger.info(f'Setting {feat_name=} to feat_pos_dict')
 
                     fixed_feat_names.append(feat_name)
@@ -824,7 +961,8 @@ class SampleSpace(Slotted_obj):
                     raw_feature_matrix[sample_pos].append(feature_matrix_dict[sample_id][feat_name])
                 except KeyError:
                     raw_feature_matrix[sample_pos].append(0.)
-        self.raw_feature_matrix = np.array(raw_feature_matrix)
+        # None becomes NaN
+        self.raw_feature_matrix = np.array(raw_feature_matrix, dtype=np.float64)
         self.feature_matrix_dict = None
 
 
@@ -832,6 +970,9 @@ class SampleSpace(Slotted_obj):
         try:
             feat_value = self.raw_feature_matrix[self.sample_pos_dict[sample_id]][self.feat_pos_dict[feat_name]]
         except KeyError:
+            feat_value = None
+        # NaN is the missing value of the matrix
+        if feat_value is not None and feat_value != feat_value:
             feat_value = None
         return feat_value
 
@@ -841,14 +982,9 @@ class SampleSpace(Slotted_obj):
         except KeyError as err:
             print(f'Error in get_feature_value_vector: {err=}')
             return None
-        feature_value_vector = []
-        sample_positions = []
-        for sample_id in sample_ids:
-            sample_positions.append(self.sample_pos_dict[sample_id])
-        for sample_pos in sample_positions:
-            feature_value_vector.append(self.raw_feature_matrix[sample_pos][feature_id])
-
-        return feature_value_vector
+        sample_positions = [self.sample_pos_dict[sample_id] for sample_id in sample_ids]
+        values = self.raw_feature_matrix[sample_positions, feature_id].tolist()
+        return [None if value is None or value != value else value for value in values]
 
     def get_feat_matrix_from_feat_names(self, feat_names : list[str], config, get_feat_id_dict = False):
         feat_id_vec = []
@@ -960,8 +1096,10 @@ class SampleSpace(Slotted_obj):
         for bin_lower in bins:
             if len(bins[bin_lower]) <= min_bin_size:
                 for sample_id in bins[bin_lower]:
+                    if config.verbosity >= 3 or len(deletion_list) < 10:
+                        config.logger.info(f'Outlier detection: {sample_id=} {self.samples[sample_id].targetValue=}')
                     deletion_list.append(sample_id)
-                    config.logger.info(f'Outlier detection: {sample_id=} {self.samples[sample_id].targetValue=}')
+        config.logger.info(f'Outlier detection removed {len(deletion_list)} of {N} samples')
         self.removeSamples(deletion_list)
 
     def printPureMixedProportion(self,config):
@@ -1030,7 +1168,10 @@ class SampleSpace(Slotted_obj):
                 for sample_id, _ in enumerate(test_feature_matrix):
                     feat_id = feat_id_dict[feat_name]
                     old_encoded_value = test_feature_matrix[sample_id][feat_id]
-                    decoded_value = self.features[feat_name].category_backmap[old_encoded_value]
+                    if old_encoded_value is None or old_encoded_value != old_encoded_value:
+                        decoded_value = None
+                    else:
+                        decoded_value = self.features[feat_name].category_backmap[int(old_encoded_value)]
                     if decoded_value not in extern_features[feat_name].category_map:
                         extern_features[feat_name].category_map[decoded_value] = extern_features[feat_name].category_counter
                         extern_features[feat_name].category_backmap[extern_features[feat_name].category_counter] = decoded_value
@@ -1601,6 +1742,9 @@ def put_data_to_tmp_storage(cv_slice: CrossValidationSlice, samples: SampleSpace
 
     file_paths: list[tuple[str, str]] = []
 
+    # These chunks only partition the host side storage. The batches that reach the GPU
+    # are cut from them by support_classes.Iterator, sized to the pool of the training
+    # process and the selected features (see extmem_batch_bytes).
     gmem = get_gpu_memory()[0]*config.vram_limit
     sub_share = 1 / (config.threads_per_gpu * config.crossValidation_fold * (config.crossValidation_fold-1))
     num_of_batches = max([1, int(1 * (len(feat_matrix)/ (600 * gmem*sub_share)))])

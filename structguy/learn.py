@@ -37,9 +37,11 @@ from structguy.support_classes import CrossValidationSlice
 from structguy.util import (
     Config, loadModel, storeModel, calc_protein_wise_corr, scatterplot, hexbinplot,
     printMean, radar, parse_multi_savs_table, combine_individual_effects, cat_shap_full_matrix,
-    categorize_shap_from_xgb, protein_wise_scatter_plot
+    categorize_shap_from_xgb, protein_wise_scatter_plot, log_timing, put_samples
 )
 from structguy.consts import feature_categories
+from structguy.feature_interactions import aggregate_feature_interactions, interaction_folder
+import glob
 
 from xgboost import plot_tree, DMatrix, build_info, Booster
 import xgboost as xgb
@@ -165,42 +167,62 @@ def learn(config: Config):
     t_0 = time.time()
     config.logger.info(f"Time for loading dataset: {t_0 - t0} {config.n_of_features=} {config.select_samples=}")
 
-    feats_to_filter = set(filterCorrelatedFeats(config, samples.feat_corr_matrix, samples.feature_names, custom_tresh=0.97))
+    if config.log_feature_interactions:
+        # The files of an earlier run would be ranked together with the ones of this run
+        for old_file in glob.glob(f'{interaction_folder(config.outfolder)}/*.tsv'):
+            os.remove(old_file)
+
+    with log_timing(config, 'build_model: feature correlations, if not loaded'):
+        samples.ensure_feat_corr_matrix(config)
+
+    with log_timing(config, 'build_model: initial correlation filter'):
+        feats_to_filter = set(filterCorrelatedFeats(config, samples.feat_corr_matrix, samples.feature_names, custom_tresh=0.97))
 
     if config.verbosity >= 4:
         config.logger.info(f'Feats_to_filter from initial correlation filter: {feats_to_filter}')
 
-    samples.transform_matrix_dict(exclude_feats=feats_to_filter)
+    with log_timing(config, f'build_model: removing {len(feats_to_filter)} correlated features from the matrix'):
+        samples.transform_matrix_dict(exclude_feats=feats_to_filter, config=config)
+    if config.verbosity >= 2:
+        config.logger.info(
+            f'Initial correlation filter: {len(feats_to_filter)} features removed from the feature matrix, '
+            f'samples.feature_names still lists {len(samples.feature_names)}; the CV slices drop the missing ones '
+            f'in their unusable feature filter ("not in feature matrix")'
+        )
 
     feat_coverage_file = f"{config.outfolder}/prot_wise_feat_coverage.tsv"
     if not os.path.exists(feat_coverage_file) or config.overwrite:
-        prot_wise_feature_coverage = samples.write_feature_coverage_matrix(feat_coverage_file, config)
+        with log_timing(config, 'build_model: feature coverage matrix'):
+            prot_wise_feature_coverage = samples.write_feature_coverage_matrix(feat_coverage_file, config)
         config.logger.info(f'Wrote prot-wise feature coverages to {feat_coverage_file}')
 
     if config.select_samples:
         samples.select_bad_prots(prot_wise_feature_coverage, config)
-        
+
     if config.weighting == "geometric":
-        samples.setGeometricDistanceMap(config)
-        distance_map = ray.put(samples.geometric_distance_map)
+        with log_timing(config, 'build_model: geometric distance map'):
+            samples.setGeometricDistanceMap(config)
+            distance_map = ray.put(samples.geometric_distance_map)
     else:
         distance_map = None
 
     out_value = None
-    samples_store_id = ray.put(pack(samples))
+    with log_timing(config, 'build_model: packing the samples into the object store'):
+        samples_store_id = put_samples(samples)
 
-    raw_feature_matrix_store_id = ray.put((samples.feat_pos_dict, samples.features))
-    
+        raw_feature_matrix_store_id = ray.put((samples.feat_pos_dict, samples.features))
+
     if not config.skip_cv:
 
-        if crossValidation == "LOPO":
-            cross_val_obj = sampleSpace.LOPO(samples, config)
-        elif crossValidation == "DataSAIL":
-            cross_val_obj = sampleSpace.DataSAIL_cv(samples_store_id=samples_store_id, sampleSpace=samples, config=config)
-        elif crossValidation == "specific":
-            cross_val_obj = sampleSpace.Given_split(samples, config)
-        else:
-            cross_val_obj = sampleSpace.X_fold_cv(samples, config, crossValidation)
+        with log_timing(config, f'build_model: setting up the cross validation ({crossValidation})'):
+            if crossValidation == "LOPO":
+                cross_val_obj = sampleSpace.LOPO(samples, config)
+            elif crossValidation == "DataSAIL":
+                cross_val_obj = sampleSpace.DataSAIL_cv(samples_store_id=samples_store_id, sampleSpace=samples, config=config)
+            elif crossValidation == "specific":
+                cross_val_obj = sampleSpace.Given_split(samples, config)
+            else:
+                cross_val_obj = sampleSpace.X_fold_cv(samples, config, crossValidation)
 
         cv_slice = cross_val_obj.getCurrentSlice()
 
@@ -214,18 +236,33 @@ def learn(config: Config):
         if config.verbosity >= 3:
             config.logger.info(f"Before initial model training: {config.cv_hpo=} {initial_training_input.slice_slices=}")
 
-        if config.hyperOptimization == "bayesianComplete":
-            forest, scores = trainForest.trainForest(
+        # With --random_start, the HPO starts from the best of n random hyperparameter sets
+        # instead of a model trained on the given/default hyperparameters.
+        scores = first_scores = None
+        if config.hpo_random_start and config.hyperOptimization in ("bayesianComplete", "threeDim"):
+            scores, first_scores = hpo.random_start(
                 config,
                 initial_training_input,
-                samples.feat_corr_matrix, samples.feature_names,
+                hpo.random_start_parameters(config),
+                samples=samples,
                 raw_feature_matrix_store_id=raw_feature_matrix_store_id,
-                repeat=config.repeat_training,
-                cv_repeat=config.cv_hpo,
-                print_out=True,
+                n_rounds=config.hpo_random_start_rounds,
                 debug=debug,
-                remote=False,
             )
+
+        if config.hyperOptimization == "bayesianComplete":
+            if scores is None:
+                forest, scores = trainForest.trainForest(
+                    config,
+                    initial_training_input,
+                    samples.feat_corr_matrix, samples.feature_names,
+                    raw_feature_matrix_store_id=raw_feature_matrix_store_id,
+                    repeat=config.repeat_training,
+                    cv_repeat=config.cv_hpo,
+                    print_out=True,
+                    debug=debug,
+                    remote=False,
+                )
             hpo.bayesianComplete(
                 config,
                 initial_training_input,
@@ -241,20 +278,21 @@ def learn(config: Config):
                 gpu_share = config.multi_gpu
             else:
                 gpu_share = None
-            forest, (first_scores, scores) = trainForest.trainForest(
-                config,
-                initial_training_input,
-                samples.feat_corr_matrix, samples.feature_names,
-                raw_feature_matrix_store_id=raw_feature_matrix_store_id,
-                repeat=config.repeat_training,
-                cv_repeat=config.cv_hpo,
-                print_out=True,
-                debug=debug,
-                #remote=(config.multi_gpu >= len(initial_training_input.slices)),
-                remote=(config.multi_gpu > 0),
-                get_first_scores=True,
-                gpu_share=gpu_share
-            )
+            if scores is None:
+                forest, (first_scores, scores) = trainForest.trainForest(
+                    config,
+                    initial_training_input,
+                    samples.feat_corr_matrix, samples.feature_names,
+                    raw_feature_matrix_store_id=raw_feature_matrix_store_id,
+                    repeat=config.repeat_training,
+                    cv_repeat=config.cv_hpo,
+                    print_out=True,
+                    debug=debug,
+                    #remote=(config.multi_gpu >= len(initial_training_input.slices)),
+                    remote=(config.multi_gpu > 0),
+                    get_first_scores=True,
+                    gpu_share=gpu_share
+                )
             hpo.threeDimHyperOptimization(
                 config,
                 initial_training_input,
@@ -282,6 +320,8 @@ def learn(config: Config):
                 scores.printOut()
             if config.verbosity >= 1:
                 config.logger.info("Hyperparamter optimization skipped")
+            if config.hpo_random_start:
+                config.logger.info("--random_start ignored, since no hyperparameter optimization is performed")
 
         lopo_scores = {}
 
@@ -313,19 +353,20 @@ def learn(config: Config):
                 gpu_share = config.multi_gpu
             else:
                 gpu_share = None
-            booster_list, scores = trainForest.trainForest(
-                config,
-                cv_slice,
-                samples.feat_corr_matrix,
-                samples.feature_names,
-                raw_feature_matrix_store_id=raw_feature_matrix_store_id,
-                distance_map=distance_map,
-                repeat=config.repeat_training,
-                print_out=print_out,
-                debug=debug,
-                remote=False,
-                gpu_share=gpu_share
-            )
+            with log_timing(config, f'build_model: training on cv slice {cv_counter}'):
+                booster_list, scores = trainForest.trainForest(
+                    config,
+                    cv_slice,
+                    samples.feat_corr_matrix,
+                    samples.feature_names,
+                    raw_feature_matrix_store_id=raw_feature_matrix_store_id,
+                    distance_map=distance_map,
+                    repeat=config.repeat_training,
+                    print_out=print_out,
+                    debug=debug,
+                    remote=False,
+                    gpu_share=gpu_share
+                )
 
             if booster_list is None:
                 continue
@@ -335,7 +376,8 @@ def learn(config: Config):
             if config.crossValidation == "LOPO":
                 lopo_scores[tuple(cv_counter)] = scores
 
-            y_pred = trainForest.booster_list_process_and_predict(booster_list, cv_slice, samples)
+            with log_timing(config, f'build_model: predicting cv slice {cv_counter}'):
+                y_pred = trainForest.booster_list_process_and_predict(booster_list, cv_slice, samples)
 
             name_add = ""
             if config.random_split:
@@ -472,7 +514,7 @@ def learn(config: Config):
         filtered_features_file = "%s_filtered_features.tsv" % (base_name)
 
         if samples_store_id is None:
-            samples_store_id = ray.put(pack(samples))
+            samples_store_id = put_samples(samples)
 
         booster_list = buildFinalModel(
             samples,
@@ -488,6 +530,10 @@ def learn(config: Config):
         if not config.skip_cv:
             cv_file = "%s_full_cv_forests.dump" % (base_name)
             storeCV(forests, config, cross_val_obj, cv_file)
+
+    if config.log_feature_interactions:
+        with log_timing(config, 'build_model: ranking the feature interactions'):
+            aggregate_feature_interactions(config.outfolder, config)
 
     return out_value
 
@@ -599,15 +645,25 @@ def evaluate_dataset(config: Config, preloaded_model=None):
     else:
     """
     test_feat_mats: list[DMatrix] = []
-    for booster_index, (_, extern_feature_names_list) in enumerate(booster_list):
-        test_feature_matrix, test_targets, sample_id_list, feat_id_vec, cat_vec = booster_specific_data[booster_index]
-        dtest_feature_matrix = DMatrix(
-            numpy.array(test_feature_matrix),
-            feature_types=cat_vec,
-            enable_categorical=True,
-            feature_names = extern_feature_names_list)
-        test_feat_mats.append(dtest_feature_matrix)
-    y_pred, y_std = trainForest.booster_list_predict(booster_list, test_feat_mats, get_std_vec=True)
+    with log_timing(config, f'predict: building the DMatrices for {len(booster_list)} boosters'):
+        for booster_index, (_, extern_feature_names_list) in enumerate(booster_list):
+            test_feature_matrix, test_targets, sample_id_list, feat_id_vec, cat_vec = booster_specific_data[booster_index]
+            dtest_feature_matrix = DMatrix(
+                numpy.array(test_feature_matrix),
+                feature_types=cat_vec,
+                enable_categorical=True,
+                feature_names = extern_feature_names_list)
+            test_feat_mats.append(dtest_feature_matrix)
+
+    # The SHAP based STD is expensive (exact TreeSHAP for every sample), so it is only computed on request (--sd)
+    calc_sd = getattr(config, 'calc_sd', False)
+    progress_logger = config.logger if config.verbosity >= 1 else None
+    with log_timing(config, f'predict: predicting {len(test_feature_matrix)} samples ({calc_sd=})'):
+        if calc_sd:
+            y_pred, y_std = trainForest.booster_list_predict(booster_list, test_feat_mats, get_std_vec=True, logger=progress_logger)
+        else:
+            y_pred = trainForest.booster_list_predict(booster_list, test_feat_mats, logger=progress_logger)
+            y_std = None
 
     if config.path_to_multi_savs_table is not None:
         multi_savs = parse_multi_savs_table(config)
@@ -628,7 +684,7 @@ def evaluate_dataset(config: Config, preloaded_model=None):
             effect_dict[sample_id] = pred_value
             true_value = test_targets[pos]
 
-            pred_std = y_std[pos]
+            pred_std = y_std[pos] if y_std is not None else None
 
             if true_value is not None:
                 combined_test_targets.append(true_value)
@@ -668,6 +724,7 @@ def evaluate_dataset(config: Config, preloaded_model=None):
     else:
         mm_y_pred = None
 
+    t_metrics = time.time()
     protein_info = {}
     protein_wise_results = {}
     for pos, sample_id in enumerate(sample_id_list):
@@ -758,7 +815,11 @@ def evaluate_dataset(config: Config, preloaded_model=None):
         config.logger.info(f"Spearman correlation and p-value: {corr} {p_value}")
 
     if config.target_values is not None:
-        prot_wise_spearmans, mean_spearman, _, err_corrs = calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.spearmanr, y_std=y_std)
+        if y_std is not None:
+            prot_wise_spearmans, mean_spearman, _, err_corrs = calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.spearmanr, y_std=y_std)
+        else:
+            prot_wise_spearmans, mean_spearman, _ = calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.spearmanr)
+            err_corrs = None
         prot_wise_pearsons, mean_pearson, _ = calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.pearsonr)
     else:
         prot_wise_spearmans = None
@@ -773,7 +834,7 @@ def evaluate_dataset(config: Config, preloaded_model=None):
         config.logger.info(f"Prot-wise mean pearson: {mean_pearson}")
         config.logger.info(f"Prot-wise mean spearman: {mean_spearman}")
 
-    if mm_y_pred is not None:
+    if mm_y_pred is not None and config.target_values is not None:
         prot_wise_spearmans, mean_mm_spearman, _ = calc_protein_wise_corr(mm_test_targets, mm_y_pred, mm_sample_id_list, stats.spearmanr)
         prot_wise_pearsons, mean_pearson, _ = calc_protein_wise_corr(mm_test_targets, mm_y_pred, mm_sample_id_list, stats.pearsonr)
 
@@ -802,12 +863,13 @@ def evaluate_dataset(config: Config, preloaded_model=None):
             config.logger.info(f"Prot-wise mean pearson for all variants: {mean_pearson}")
             config.logger.info(f"Prot-wise mean spearman for all variants: {mean_comb_spearman}")
 
-    write_protein_wise_performances(
-        f"{config.outfolder}/protein_wise_results.tsv",
-        prot_wise_spearmans,
-        protein_info,
-        err_corrs
-    )
+    if prot_wise_spearmans is not None:
+        write_protein_wise_performances(
+            f"{config.outfolder}/protein_wise_results.tsv",
+            prot_wise_spearmans,
+            protein_info,
+            err_corrs
+        )
 
     if config.trace_decisions:
         for booster_index, (booster, extern_feature_names_list) in enumerate(booster_list):
@@ -890,6 +952,10 @@ def evaluate_dataset(config: Config, preloaded_model=None):
     else:
         explanation = None
 
+    if config.verbosity >= 1:
+        config.logger.info(f'[timing] predict: metrics and explanations: {time.time() - t_metrics:.1f} s')
+    t_output = time.time()
+
     if mm_y_pred is None or config.trace_decisions:
         combined_sample_id_list = sample_id_list
         combined_y_pred = y_pred
@@ -931,7 +997,8 @@ def evaluate_dataset(config: Config, preloaded_model=None):
         pred_value = combined_y_pred[pos]
         prot_id, aac = sample_id
 
-        words = [prot_id, aac, str(pred_value), str(combined_y_std[pos])]
+        std_value = combined_y_std[pos] if combined_y_std is not None else None
+        words = [prot_id, aac, str(pred_value), str(std_value) if std_value is not None else 'NA']
 
         if config.target_values is not None:
             eval_words = words[:]
@@ -1039,6 +1106,9 @@ def evaluate_dataset(config: Config, preloaded_model=None):
         if not os.path.isdir(scatter_folder):
             os.makedirs(scatter_folder)
         protein_wise_scatter_plot(test_targets, y_pred, combined_sample_id_list, scatter_folder, config.target_values)
+
+    if config.verbosity >= 1:
+        config.logger.info(f'[timing] predict: writing the output files: {time.time() - t_output:.1f} s')
 
     return mean_spearman, combined_test_targets, combined_y_pred, combined_sample_id_list
 

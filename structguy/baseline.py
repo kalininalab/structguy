@@ -146,6 +146,7 @@ def build_lasso(config: Config):
     t1 = time.time()
     config.logger.info(f"Time for loading dataset: {t1 - t0}")
 
+    samples.ensure_feat_corr_matrix(config)
     feats_to_filter = set(filterCorrelatedFeats(config, samples.feat_corr_matrix, samples.feature_names, custom_tresh=0.97))
     samples.transform_matrix_dict(exclude_feats=feats_to_filter)
 

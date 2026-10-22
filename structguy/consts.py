@@ -23,14 +23,31 @@ feature_categories = [
     'flexibility',
     'function type',
     'protein attributes',
-    'structural classification'
+    'structural classification',
+    # The positional features of a position's ranked interacting positions ('IP<k> <feature>'
+    # columns of StructMAn's expanded feature table, --local_features).
+    'interacting positions',
 ]
+INTERACTING_POSITIONS_CATEGORY = feature_categories.index('interacting positions')
 
 structural_feature_sub_categories = [
     'Tertiary',
     'Interaction',
     'Structural conservation',
     'Aggregation'
+]
+
+evolutionary_sub_categories = [
+    'statistical close',
+    'statistical distant',
+    'gemme close',
+    'gemme distant'
+]
+
+aa_sub_categories = [
+    'physico-chemical',
+    'AA ID',
+    'statistical'
 ]
 
 feat_name_category_dict = {
@@ -40,21 +57,21 @@ feat_name_category_dict = {
     'tco' : (7, 0),
     'kappa' : (7, 0),
     'alpha' : (7, 0),
-    'modres' : (11, None),
+    'modres' : (7, 3),
     'dna_dist' : (8, 1),
     'ion_dist' : (8, 1),
     'b_factor' : (9, 0),
     'metal_dist' : (8, 1),
     'oh_simple_class_Protein interaction' : (5, 3),
-    'Blosum62' : (4, None),
-    'Chemical distance' : (4, None),
-    'KD mean' : (4, None),
-    'Protein Size' : (11, None),
-    'Relative Sequence Position' : (4, None),
-    'Sequence Position Number' : (11, None),
-    'Volume mean' : (4, None),
-    'Mutant AA' : (4, None),
-    'Wildtype AA' : (4, None),
+    'Blosum62' : (4, 2),
+    'Chemical distance' : (4, 0),
+    'KD mean' : (4, 0),
+    'Protein Size' : (4, 1),
+    'Relative Sequence Position' : (4, 1),
+    'Sequence Position Number' : (4, 1),
+    'Volume mean' : (4, 0),
+    'Mutant AA' : (4, 1),
+    'Wildtype AA' : (4, 1),
     'simple_class' : (12, 3),
     'rin_class' : (12, 3),
     'rin_simple_class' : (12, 3),
@@ -62,5 +79,7 @@ feat_name_category_dict = {
     'ssa' : (7, 0),
     'intra_link' : (7, 0),
     'inter_link' : (7, 0),
-    'link_length': (7, 0)
+    'link_length': (7, 0),
+    'Degree': (3, 3),
+    'WeightSum': (3, 3)
 }
