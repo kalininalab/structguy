@@ -178,13 +178,36 @@ def abs_error_impacts(contributions: numpy.ndarray, pred: numpy.ndarray, y: nump
     return impacts
 
 
-def protein_wise_feature_impacts(metric: str, contributions, pred, y, prot_vec) -> tuple[numpy.ndarray, int]:
+def impact_z_scores(mean: numpy.ndarray, total_sq: numpy.ndarray, n_proteins: int) -> numpy.ndarray:
+    """How many standard errors each mean impact is away from 0.
+
+    The standard error comes from the spread of the per-protein impacts. Features the booster never used have a mean
+    of exactly 0 and get z = 0. With less than 2 proteins there is no spread across proteins; the impacts are then
+    scaled by the robust spread (scaled MAD) of the non-zero impacts across the features instead.
+    """
+    z = numpy.zeros_like(mean)
+    nonzero = mean != 0
+    if n_proteins >= 2:
+        var = numpy.maximum(total_sq / n_proteins - mean * mean, 0.) * n_proteins / (n_proteins - 1)
+        se = numpy.sqrt(var / n_proteins)
+        usable = nonzero & (se > 0)
+        z[usable] = mean[usable] / se[usable]
+    elif nonzero.any():
+        values = mean[nonzero]
+        scale = 1.4826 * float(numpy.median(numpy.abs(values - numpy.median(values))))
+        if scale > 0:
+            z[nonzero] = values / scale
+    return z
+
+
+def protein_wise_feature_impacts(metric: str, contributions, pred, y, prot_vec) -> tuple[numpy.ndarray, numpy.ndarray, int]:
     """Feature impacts averaged over the proteins (the unit of the out-of-distribution split), each protein weighted equally.
 
-    Returns the impacts and the number of proteins that contributed.
+    Returns the mean impacts, their z-scores (impact_z_scores) and the number of proteins that contributed.
     """
     n_feats = contributions.shape[1]
     total = numpy.zeros(n_feats, dtype=numpy.float64)
+    total_sq = numpy.zeros(n_feats, dtype=numpy.float64)
     n_proteins = 0
     order = numpy.argsort(prot_vec, kind='stable')
     sorted_prots = prot_vec[order]
@@ -195,13 +218,15 @@ def protein_wise_feature_impacts(metric: str, contributions, pred, y, prot_vec) 
             # A protein with less than 2 samples or a constant target has no ranking
             if len(rows) < 2 or numpy.all(y_q == y_q[0]):
                 continue
-            total += protein_spearman_impacts(contributions[rows], pred[rows], y_q)
+            impacts = protein_spearman_impacts(contributions[rows], pred[rows], y_q)
         else:
-            total += abs_error_impacts(contributions[rows], pred[rows], y_q)
+            impacts = abs_error_impacts(contributions[rows], pred[rows], y_q)
+        total += impacts
+        total_sq += impacts * impacts
         n_proteins += 1
     if n_proteins > 0:
         total /= n_proteins
-    return total, n_proteins
+    return total, impact_z_scores(total, total_sq, n_proteins), n_proteins
 
 
 #@profile
@@ -215,8 +240,9 @@ def ext_shap_analysis(
 
     metric 'protein_spearman': change of the Spearman correlation within each protein, averaged over the proteins
     (the objective of the early stopping and the HPO). 'abs_error': decrease of the absolute error, averaged per
-    protein. Positive impacts mark harmful features. Returns ([(feat_name, impact)] sorted by impact descending,
-    number of proteins, times).
+    protein. Positive impacts mark harmful features. Returns ([(feat_name, impact, z)] sorted by z descending, where
+    z is the impact in standard errors across the proteins (0 for features the booster never used), number of
+    proteins, times).
     """
 
     times = []
@@ -245,9 +271,9 @@ def ext_shap_analysis(
     if prot_vec is None or len(prot_vec) != len(y):
         # Without protein ids, all samples count as one protein
         prot_vec = numpy.zeros(len(y), dtype=numpy.int64)
-    impacts, n_proteins = protein_wise_feature_impacts(metric, contributions, pred, y, numpy.asarray(prot_vec))
+    impacts, z_scores, n_proteins = protein_wise_feature_impacts(metric, contributions, pred, y, numpy.asarray(prot_vec))
 
-    acc_feat_impacts = sorted(zip(feature_names, impacts.tolist()), key=lambda x:x[1], reverse=True)
+    acc_feat_impacts = sorted(zip(feature_names, impacts.tolist(), z_scores.tolist()), key=lambda x: x[2], reverse=True)
     ta = add_to_times(times, ta)
     return acc_feat_impacts, n_proteins, times
 
@@ -892,6 +918,36 @@ def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: fl
 
     return double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_features, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, retain_model, repeat_index, subslice_index)
 
+def select_impact_removals(config, acc_feat_impacts, impact_metric):
+    """The features the SHAP impact filter removes from a sub slice, and a description for the log.
+
+    acc_feat_impacts is [(feat_name, impact, z)] as returned by ext_shap_analysis, sorted by z descending.
+    """
+    if getattr(config, 'feat_impact_filter', 'z') == 'raw':
+        # Strictly greater: a feature that the first booster never used has an impact of exactly 0 and stays
+        impact_hits = [name for name, impact, _ in acc_feat_impacts if impact > config.feat_impact_thresh]
+        filter_description = f'{len(impact_hits)} features with {impact_metric} impact > {config.feat_impact_thresh=}'
+    else:
+        # Remove every feature whose impact lies more than feat_impact_z standard errors above 0. Above 0 only
+        # harmful features go (the higher, the more certain they must be); below 0 also the features the booster
+        # never used (z = 0) and helpful ones that are not certain enough, down to keeping only reliably helpful ones.
+        theta = float(getattr(config, 'feat_impact_z', 2.0))
+        impact_hits = [name for name, _, z in acc_feat_impacts if z > theta]
+        min_keep = int(getattr(config, 'feat_impact_min_keep', 10))
+        if len(acc_feat_impacts) - len(impact_hits) < min_keep:
+            # The most helpful features (lowest z, the list is sorted by z descending) always stay
+            protected = {name for name, _, _ in acc_feat_impacts[::-1][:min_keep]}
+            impact_hits = [name for name in impact_hits if name not in protected]
+        z_of = {name: z for name, _, z in acc_feat_impacts}
+        n_harmful = sum(z_of[name] > 0 for name in impact_hits)
+        n_unused = sum(z_of[name] == 0 for name in impact_hits)
+        filter_description = (
+            f'z > feat_impact_z={theta:+.2f}: {n_harmful} harmful, {n_unused} unused, '
+            f'{len(impact_hits) - n_harmful - n_unused} helpful but uncertain; at least {min_keep} kept'
+        )
+    return impact_hits, filter_description
+
+
 #@profile
 def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_features, cv_slice, skip_scoring, score_train, raw_feature_matrix_store_id, retain_model, repeat_index=0, subslice_index=0):
     times = []
@@ -988,7 +1044,7 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
         slice_slice.feature_names, booster, test_data_refs, prot_vec=test_prot_vec, metric=impact_metric)
     if config.verbosity >= 3 and acc_feat_impacts:
         def format_impacts(entries):
-            return ', '.join(f'{name}: {impact:+.4g}' for name, impact in entries)
+            return ', '.join(f'{name}: {impact:+.4g} (z {z:+.2f})' for name, impact, z in entries)
         config.logger.info(
             f'Feature impacts ({impact_metric}, {n_impact_proteins} held-out proteins) in {proc_id}, '
             f'most harmful: {format_impacts(acc_feat_impacts[:10])}; most helpful: {format_impacts(acc_feat_impacts[::-1][:10])}'
@@ -1043,11 +1099,8 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
         
         return p_id
     
-    # Strictly greater: a feature that the first booster never used has an impact of exactly 0 and stays
-    feats_to_remove = filtered_features[:]
-    for feat_name, feat_impact in acc_feat_impacts:
-        if feat_impact > config.feat_impact_thresh:
-            feats_to_remove.append(feat_name)
+    impact_hits, filter_description = select_impact_removals(config, acc_feat_impacts, impact_metric)
+    feats_to_remove = filtered_features[:] + impact_hits
 
     if len(feats_to_remove) >= (len(cv_slice.feature_names)+ len(filtered_features)):
         if config.verbosity >= 4:
@@ -1057,17 +1110,16 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
     n_feats_before = len(slice_slice.feature_names)
     slice_slice.filterFeatures(feats_to_remove)
     if config.verbosity >= 2:
-        n_impact_hits = len(feats_to_remove) - len(filtered_features)
         config.logger.info(
             f'SHAP feature impact filter in {proc_id}: removed {n_feats_before - len(slice_slice.feature_names)} '
             f'of {n_feats_before} features, {len(slice_slice.feature_names)} left for the second booster '
-            f'({n_impact_hits} features with {impact_metric} impact > {config.feat_impact_thresh=})'
+            f'({filter_description})'
         )
     # The check above compares against the parent slice and counts names that this sub
     # slice may not have, so it does not catch every case where nothing is left.
     if len(slice_slice.feature_names) == 0:
         if config.verbosity >= 2:
-            config.logger.info(f'No features left in {proc_id} after the feature impact filter ({config.feat_impact_thresh=}), no model trained')
+            config.logger.info(f'No features left in {proc_id} after the feature impact filter ({filter_description}), no model trained')
         return p_id
     ta = add_to_times(times, ta) #8
 
@@ -1699,8 +1751,9 @@ def trainForest(
 
     t0 = time.time()
 
-    #identify the highly correlated features
-    feats_to_filter = featureSelection.filterCorrelatedFeats(config, feat_corr_matrix, feature_names)
+    #remove the features of the farther interacting positions, then identify the highly correlated features among the rest
+    local_feats_to_filter = featureSelection.filterLocalFeatures(config, feature_names)
+    feats_to_filter = featureSelection.filterCorrelatedFeats(config, feat_corr_matrix, feature_names, excluded=local_feats_to_filter)
 
     scores_list = []
     worst_scores = None

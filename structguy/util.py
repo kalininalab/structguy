@@ -357,6 +357,15 @@ class Config:
         self.max_cat_threshold_1 = 50
 
         self.feat_impact_thresh = 0.
+        # Number of interacting positions whose features (IP<k> ..., k <= local_features_N) are used, 0-20, 20 = all
+        self.local_features_N = 20
+        # SHAP impact filter between the boosters. 'z': remove features whose impact is more than feat_impact_z
+        # standard errors (across the held-out proteins) above 0; positive values remove only harmful features,
+        # negative values also the unused ones, down to keeping only reliably helpful ones. At least
+        # feat_impact_min_keep features (the most helpful) always stay. 'raw': the old rule, impact > feat_impact_thresh.
+        self.feat_impact_filter = 'z'
+        self.feat_impact_z = 2.0
+        self.feat_impact_min_keep = 10
         # 'protein_spearman': change of the protein-wise Spearman without a feature's SHAP contribution,
         # 'abs_error': change of the absolute error; both averaged over the held-out proteins
         self.feat_impact_metric = 'protein_spearman'
@@ -383,7 +392,8 @@ class Config:
         self.class_weights = ['balanced','balanced_subsample',None]
         self.bootstrap_parameters = [True,False]
         self.max_feature_parameters = ['auto','log2','sqrt']
-        self.max_feature_cont_parameter_bounds = [0.,1.]
+        # Lower bounds above 0: the trainers reject 0 (Return Zero), and the gp proposed it
+        self.max_feature_cont_parameter_bounds = [0.05,1.]
         self.min_sample_split_half_step = [2,2000]
         self.min_sample_leaf_half_step = [1,500]
         self.tree_depth_half_step = [1,400]
@@ -391,7 +401,7 @@ class Config:
         self.min_impurity_decrease_exp_half_step = [1.0,20.0]
         self.oob_scores = [True,False]
         self.ccp_alpha_exp_half_step = [1.,30.]
-        self.max_sample_half_step = [0.,1.]
+        self.max_sample_half_step = [0.05,1.]
         self.geometric_exponent_bounds = [0.,4.]
         self.reg_alpha_exp_half_step = [0.,20.]
         self.reg_c_exp_half_step = [-1.,20.]
@@ -468,6 +478,10 @@ class Config:
 
             elif opt == 'feat_impact_metric':
                 self.feat_impact_metric = arg
+            elif opt == 'feat_impact_filter':
+                self.feat_impact_filter = arg
+            elif opt == 'feat_impact_min_keep':
+                self.feat_impact_min_keep = int(arg)
             elif opt == 'log_feature_interactions':
                 self.log_feature_interactions = arg == 'True'
             elif opt == 'interaction_max_rows':
@@ -821,6 +835,8 @@ class Config:
             'colsample_bynode',
             'max_delta_step',
             'feat_impact_thresh',
+            'feat_impact_z',
+            'local_features_N',
             "max_sample_parameter",
             "number_of_bins",
             "p_val_thresh",
@@ -1021,6 +1037,12 @@ class Config:
                     continue
                 if opt == 'feat_impact_thresh':
                     self.feat_impact_thresh = float(arg)
+                    continue
+                if opt == 'local_features_N':
+                    self.local_features_N = int(round(float(arg)))
+                    continue
+                if opt == 'feat_impact_z':
+                    self.feat_impact_z = float(arg)
                     continue
                 if opt == 'feat_impact_metric':
                     self.feat_impact_metric = arg

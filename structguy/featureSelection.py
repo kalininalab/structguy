@@ -1,3 +1,4 @@
+import re
 import sys
 import traceback
 import random
@@ -653,18 +654,55 @@ def regu_fs(config, cv_slice, samples, print_out=False, pre_filter=None, debug=F
     return True
 
 
+# 'IP<k> <feature>' and 'oh_IP<k> <feature>...': the features of the k-th interacting position
+_INTERACTING_POSITION_RANK = re.compile(r'^(oh_)?IP(\d+) ')
+
+
+def _interacting_position_rank(feat_name):
+    # Combination features (comb||<op>||<feature a>||<feature b>) count with the higher rank of their parts
+    if feat_name.startswith('comb||'):
+        parts = feat_name.split('||')
+        if len(parts) == 4:
+            ranks = [r for r in (_interacting_position_rank(parts[2]), _interacting_position_rank(parts[3])) if r is not None]
+            return max(ranks) if ranks else None
+    match = _INTERACTING_POSITION_RANK.match(feat_name)
+    if match is None:
+        return None
+    return int(match.group(2))
+
+
+def filterLocalFeatures(
+    config: Config,
+    feature_names
+):
+    # Removes the features of the interacting positions beyond the local_features_N nearest (IP<k> with k > N)
+    n_local = int(round(config.local_features_N))
+    feats_to_filter = []
+    for feat_name in feature_names:
+        rank = _interacting_position_rank(feat_name)
+        if rank is not None and rank > n_local:
+            feats_to_filter.append(feat_name)
+
+    if config.verbosity >= 1:
+        config.logger.info(f'Filtering local features {n_local=}: {len(feats_to_filter)} of {len(feature_names)} features filtered')
+
+    return feats_to_filter
+
+
 def filterCorrelatedFeats(
     config: Config,
     feat_corr_matrix,
     feature_names,
-    custom_tresh = None
+    custom_tresh = None,
+    excluded = None
 ):
+    # excluded: features already removed, they are part of the result and cannot cause the filtering of others
 
     if custom_tresh is None:
         thresh = config.corr_thresh
     else:
         thresh = custom_tresh
-    feats_to_filter = set()
+    feats_to_filter = set(excluded) if excluded is not None else set()
 
     # Only the pairs that pass the correlation criterion can filter a feature, so the loop below visits only those
     try:
@@ -706,7 +744,8 @@ def filterCorrelatedFeats(
                         config.logger.info(f'Filtering {feat_name_a} due its {corr=} to {feat_name_b}')
 
     if config.verbosity >= 1:
-        config.logger.info(f'Filtering correlated features {thresh=}: {len(feats_to_filter)} of {len(feature_names)} features filtered')
+        n_excluded = len(set(excluded)) if excluded is not None else 0
+        config.logger.info(f'Filtering correlated features {thresh=}: {len(feats_to_filter) - n_excluded} of {len(feature_names) - n_excluded} features filtered')
 
     return list(feats_to_filter)
 

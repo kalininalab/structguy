@@ -1,4 +1,5 @@
 import math
+import os
 import random
 import time
 import sys
@@ -123,6 +124,7 @@ class HpoTrace:
         self.gp_history_at_accept = 0 # len(gp_history) at the last accepted improvement
         self.stop_reason = None       # set once should_stop() decided to stop
         self.n_failed = 0             # evaluations with folds that produced no model
+        self.identified_noise = []    # every noise level the gp could identify in this subspace
         self.length_scales = None     # last fitted Matern length scale per parameter
 
     @staticmethod
@@ -323,6 +325,14 @@ class HpoTrace:
         if self.gp_noise is not None and self.gp_noise > 0:
             return self.gp_noise
 
+        # The noise the gps identified in earlier subspaces of this run. The objective is the
+        # same everywhere, so it carries over; without it the gate either had no estimate
+        # (and accepted +0.00003) or fell back to the gp's prediction errors (0.0105, which
+        # rejected real improvements of +0.0013) whenever this subspace's fit sat at its bound.
+        memory = getattr(self.config, "hpo_noise_memory", None)
+        if memory:
+            return float(np.median(memory))
+
         residual_scale = self.gp_residual_scale()
         if residual_scale is not None:
             return residual_scale
@@ -428,6 +438,9 @@ class HpoTrace:
             return f"repeated trainings (n={len(self.repeat_stds)}, repeat={self.repeat})"
         if self.gp_noise is not None and self.gp_noise > 0:
             return "gaussian process WhiteKernel"
+        memory = getattr(self.config, "hpo_noise_memory", None)
+        if memory:
+            return f"noise identified in {len(memory)} earlier subspaces of this run"
         if self.gp_residual_scale() is not None:
             return f"robust spread of the gp prediction errors (n={len(self.gp_history)})"
         if self.robust_scatter() is not None:
@@ -478,6 +491,7 @@ class HpoTrace:
         y_std = float(np.std(np.asarray(yp, dtype=float)))
         if y_std > 0 and noise_level > 0:
             self.gp_noise = math.sqrt(noise_level) * y_std
+            self.identified_noise.append(self.gp_noise)
 
     def summary(self, best_scores, new_optimimum):
         c = self.config
@@ -817,7 +831,10 @@ def bayes_random_init(
                 if dones[i]:
                     continue
                 if not out_queue.empty():
-                    (scores, params, first_scores) = out_queue.get(timeout=5)
+                    message = out_queue.get(timeout=5)
+                    if message[0] == "started":
+                        continue
+                    _, scores, params, first_scores = message
                 else:
                     continue
                 results.append((scores, first_scores, params))
@@ -1291,30 +1308,25 @@ def bayesian_optimisation(
         #    pg = ray.util.placement_group([{"CPU": config.proc_n // (config.multi_gpu), 'GPU':1}], name=f"pg_{i}")
         #    ray.get(pg.ready())
 
+        def launch_worker(p):
+            com_queue = Queue()
+            out_queue = Queue()
+            proc_id = remote_function.options(
+                    num_cpus=0.5,
+                    num_gpus=0,
+                ).remote(com_queue, out_queue, store, para_number, gpu_share, p, config_ref_container)
+            return (com_queue, out_queue, proc_id)
+
         dispatched = []
         for p in range(number_of_procs):
             next_sample, draw_kind = draw_random_sample(config, bounds, scaler, best_params)
             trace.record_dispatch(next_sample, f"init/{draw_kind}")
 
-            com_queue = Queue()
-            out_queue = Queue()
-            com_queue.put(next_sample)
+            worker = launch_worker(p)
+            worker[0].put(next_sample)
             n_of_sent_hpo_sets += 1
-            
-            #gpu_id = p//config.threads_per_gpu
-            #pg = ray.util.get_placement_group(f"pg_{gpu_id}")
 
-            proc_id = remote_function.options(
-                    num_cpus=0.5,
-                    num_gpus=0,
-                    #scheduling_strategy=ray.util.scheduling_strategies.PlacementGroupSchedulingStrategy(
-                    #    placement_group=pg, placement_group_capture_child_tasks=True
-                    #)
-                ).remote(com_queue, out_queue, store, para_number, gpu_share, p, config_ref_container)
-            
-            #proc_id = remote_function.remote(com_queue, out_queue, store, para_number, gpu_share, p, config_ref_container)
-            
-            remote_processes.append((com_queue, out_queue, proc_id))
+            remote_processes.append(worker)
             dispatched.append(next_sample)
 
         if config.verbosity >= 1:
@@ -1328,6 +1340,12 @@ def bayesian_optimisation(
         # The candidate every worker is evaluating (None: no candidate)
         in_flight = list(dispatched)
         all_done = False
+        # Lost workers: starts seen per worker (a second one is a restart), candidates lost
+        # with a dead or restarted worker (scored as failed evaluations), replacements made
+        worker_starts = [0] * len(remote_processes)
+        lost_candidates = {}
+        n_worker_replacements = 0
+        max_worker_replacements = int(getattr(config, "hpo_max_worker_restarts", 3))
         
         append_counter = 0
         overall_timeout_start = time.time()
@@ -1339,19 +1357,71 @@ def bayesian_optimisation(
         while not all_done:
             # A para_eval task only ends by itself after its None stop signal. Ending earlier means it died
             # (exception, killed): without this check the loop waited for its answer until the timeouts.
-            check_dead_para_eval_workers(config, remote_processes, dones, in_flight)
+            for i, lost in check_dead_para_eval_workers(config, remote_processes, dones, in_flight):
+                if n_worker_replacements >= max_worker_replacements:
+                    config.logger.error(f"para_eval worker {i} is not replaced, hpo_max_worker_restarts={max_worker_replacements} reached; the subspace continues without it")
+                    dones[i] = True
+                    in_flight[i] = None
+                    continue
+                n_worker_replacements += 1
+                for old_queue in remote_processes[i][:2]:
+                    try:
+                        old_queue.shutdown()
+                    except Exception:
+                        pass
+                remote_processes[i] = launch_worker(i)
+                worker_starts[i] = 0
+                config.logger.error(f"para_eval worker {i} replaced ({n_worker_replacements}/{max_worker_replacements}); its candidate is scored as a failed evaluation")
+                if lost is not None:
+                    lost_candidates[i] = lost
+                else:
+                    next_sample, draw_kind = draw_random_sample(config, bounds, scaler, best_params)
+                    trace.record_dispatch(next_sample, f"restart/{draw_kind}")
+                    remote_processes[i][0].put(next_sample)
+                    in_flight[i] = next_sample
             n_of_sent_hpo_sets = sum(sample is not None for sample in in_flight)
             if all(dones):
                 break
 
             for i, (com_queue, out_queue, proc_id) in enumerate(remote_processes):
+                if dones[i] and i not in lost_candidates:
+                    continue
 
-                if not out_queue.empty():
-                    (scores, next_sample, first_scores) = out_queue.get(timeout=0.5)
-                    n_of_sent_hpo_sets -= 1
-                    in_flight[i] = None
+                if i in lost_candidates:
+                    # The worker was lost with this candidate: judge it as a failed evaluation
+                    next_sample = lost_candidates.pop(i)
+                    scores = util.Scores(zero=True)
+                    first_scores = util.Scores(zero=True)
+                elif not out_queue.empty():
+                    message = out_queue.get(timeout=0.5)
+                    if message[0] == "started":
+                        _, worker_pid, queue_was_empty = message
+                        worker_starts[i] += 1
+                        if worker_starts[i] == 1:
+                            continue
+                        # Ray re-executed the task despite max_retries=0 (e.g. after an out of
+                        # memory kill). If the queue was empty, the dead attempt had taken the
+                        # candidate in flight and the new one would wait for work forever.
+                        if not queue_was_empty or in_flight[i] is None:
+                            config.logger.error(f"para_eval worker {i} restarted (pid {worker_pid}), its candidate was still queued and is evaluated by the new attempt")
+                            continue
+                        if n_worker_replacements >= max_worker_replacements:
+                            config.logger.error(f"para_eval worker {i} restarted again (pid {worker_pid}), hpo_max_worker_restarts={max_worker_replacements} reached; stopping it")
+                            com_queue.put(None)
+                            dones[i] = True
+                            in_flight[i] = None
+                            continue
+                        n_worker_replacements += 1
+                        config.logger.error(f"para_eval worker {i} restarted (pid {worker_pid}) and lost its candidate, which is scored as a failed evaluation")
+                        next_sample = in_flight[i]
+                        scores = util.Scores(zero=True)
+                        first_scores = util.Scores(zero=True)
+                    else:
+                        _, scores, next_sample, first_scores = message
                 else:
                     continue
+                n_of_sent_hpo_sets -= 1
+                in_flight[i] = None
                 """
                 elif current_params_id >= n_iters:
                     if not dones[i]:
@@ -1434,7 +1504,12 @@ def bayesian_optimisation(
                     com_queue.put(None)
                     dones[i] = True
                 else:
-                    if append_counter >= 2:
+                    # Refit and propose after every result when one worker runs (with two, every
+                    # second evaluation used to be a random fill draw), after 2 results when
+                    # several run, and only once the gp has n_params + 2 points; before that the
+                    # local / uniform draws below are the warm-up.
+                    gp_ready = append_counter >= min(2, len(remote_processes)) and len(y_list) >= n_params + 2
+                    if gp_ready:
                         try:
                             fit_gp(model, scaled_xp, yp)
                         except:
@@ -1568,6 +1643,11 @@ def bayesian_optimisation(
         )
 
     trace.summary(best_scores, new_optimimum)
+
+    # This subspace's identified noise, for the gates of the following subspaces
+    noise_memory = getattr(config, "hpo_noise_memory", None)
+    if noise_memory is not None and trace.identified_noise:
+        noise_memory.append(float(np.median(trace.identified_noise)))
 
     # Relevance of the parameters as the gp saw them, for the weighting of the tree
     if relevance_log is not None and trace.length_scales:
@@ -1865,10 +1945,15 @@ def get_scores(
 
 
 def check_dead_para_eval_workers(config, remote_processes, dones, in_flight):
-    """Marks para_eval workers whose task ended without having been stopped as done, and logs why they ended."""
+    """Find para_eval workers whose task ended without having been stopped, and log why.
+
+    Returns [(worker index, candidate it was evaluating or None)]; the caller decides
+    whether to replace them.
+    """
+    dead = []
     running = [(i, proc_id) for i, (_, _, proc_id) in enumerate(remote_processes) if not dones[i]]
     if not running:
-        return
+        return dead
     ready, _ = ray.wait([proc_id for _, proc_id in running], num_returns=len(running), timeout=0)
     ready = set(ready)
     for i, proc_id in running:
@@ -1880,19 +1965,26 @@ def check_dead_para_eval_workers(config, remote_processes, dones, in_flight):
         except Exception as e:
             reason = f'it failed:\n{e}'
         candidate = None if in_flight[i] is None else [float(v) for v in in_flight[i]]
-        config.logger.error(f'para_eval worker {i} ended, the HPO continues without it (candidate in evaluation: {candidate}): {reason}')
-        dones[i] = True
-        in_flight[i] = None
+        config.logger.error(f'para_eval worker {i} ended (candidate in evaluation: {candidate}): {reason}')
+        dead.append((i, in_flight[i]))
+    return dead
 
 
-@ray.remote
+# max_retries=0: a retried para_eval found its candidate already taken by the dead attempt
+# and waited on an empty queue, while the driver waited for its answer (10 h lost on the HPC)
+@ray.remote(max_retries=0)
 def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_share, proc_id, config_ref_container):
+    # Announced before anything else, so the driver can tell a restarted worker from a new
+    # one. Whether the queue was empty decides if a restart lost the candidate in flight.
+    queue_was_empty = com_queue.empty()
+    out_queue.put(("started", os.getpid(), queue_was_empty))
+
     (cv_obj, parameters, raw_feature_matrix_store_id, best_first_scores, feat_corr_matrix, feature_names) = store
     config = ray.get(config_ref_container[0])
 
     util.reset_logger_for_remotes(config)
     if config.verbosity >= 2:
-        config.logger.info(f"Call of para_eval: {com_queue.empty()=} {proc_id=}")
+        config.logger.info(f"Call of para_eval: com_queue.empty()={queue_was_empty} {proc_id=}")
       
     if config.verbosity >= 4:
         for name, size in sorted(((name, deep_get_size_of(value)) for name, value in locals().items()), key=lambda x: -x[1])[:10]:
@@ -1950,7 +2042,7 @@ def para_eval(com_queue: Queue, out_queue: Queue, store, para_number, gpu_share,
             scores = util.Scores(zero=True)
             first_scores = util.Scores(zero=True)
 
-        out_queue.put((scores, params, first_scores))
+        out_queue.put(("result", scores, params, first_scores))
     return
 
 
@@ -2048,6 +2140,10 @@ def initParameters(
     if not split_fs_parameters:
         parameters = fs_parameters
 
+    if config.hpo_do_feat_selection and do_feat_selection:
+        # Evaluated by trainForest itself (featureSelection.filterLocalFeatures), like corr_thresh
+        parameters["local_features_N"] = Parameter("local_features_N", "integer", half_step_limits=[0, 20])
+
     if config.hpo_do_forest_param:
         if config.hpo_do_feat_selection and do_feat_selection:
             parameters["max_sample_parameter"] = Parameter("max_sample_parameter", "real", half_step_limits=config.max_sample_half_step)
@@ -2085,11 +2181,17 @@ def initParameters(
                 parameters["colsample_bylevel"] = Parameter("colsample_bylevel", "real", half_step_limits=[0.01,1.])
                 parameters["colsample_bynode"] = Parameter("colsample_bynode", "real", half_step_limits=[0.01,1.])
                 parameters["max_delta_step"] = Parameter("max_delta_step", "real", half_step_limits=[0.,50.], log_scale=True, log_offset=1.0)
-                # Lower bound 0: negative thresholds removed every feature of some sub slices,
-                # zeroing whole folds (94 such events in the goldstandard_strict run)
-                # In units of the impact metric: protein-wise Spearman changes, or absolute errors of the target
-                impact_upper = 0.05 if getattr(config, 'feat_impact_metric', 'protein_spearman') == 'protein_spearman' else 0.01
-                parameters["feat_impact_thresh"] = Parameter("feat_impact_thresh", "real", half_step_limits=[0.,impact_upper])
+                if getattr(config, 'feat_impact_filter', 'z') == 'raw':
+                    # Lower bound 0: negative thresholds removed every feature of some sub slices,
+                    # zeroing whole folds (94 such events in the goldstandard_strict run)
+                    # In units of the impact metric: protein-wise Spearman changes, or absolute errors of the target
+                    impact_upper = 0.05 if getattr(config, 'feat_impact_metric', 'protein_spearman') == 'protein_spearman' else 0.01
+                    parameters["feat_impact_thresh"] = Parameter("feat_impact_thresh", "real", half_step_limits=[0.,impact_upper])
+                else:
+                    # In standard errors of the impacts: +3 removes only clearly harmful features, below 0 also the
+                    # unused ones, -3 keeps only clearly helpful ones (trainForest.double_booster). The raw threshold
+                    # searched [0, 0.05] against impacts of ~0.002, so 90% of its range removed nothing.
+                    parameters["feat_impact_z"] = Parameter("feat_impact_z", "real", half_step_limits=[-3., 3.])
                 parameters["tree_depth"] = Parameter("tree_depth", "integer", half_step_limits=[1,31])
                 parameters["num_of_trees"] = Parameter("num_of_trees", "integer", half_step_limits=[10,10_000], log_scale=True)
                 parameters["max_cat_to_onehot"] = Parameter("max_cat_to_onehot", "integer", half_step_limits=[1,500], log_scale=True)
@@ -2459,6 +2561,8 @@ def threeDimHyperOptimization(
     # GP length scales of every subspace optimization of this run, the evidence the
     # weighted tree blends into its prior weights
     relevance_log = {}
+    # Noise level identified per subspace, the acceptance gate's fallback (HpoTrace.noise_hint)
+    config.hpo_noise_memory = []
 
     # The starting configuration and its measured score. Nothing may leave the
     # optimization in a state worse than this without it being noticed.
@@ -2781,6 +2885,8 @@ PARAMETER_PRIOR_WEIGHTS = {
     "learning_rate": 1.0,
     "corr_thresh": 1.0,
     "feat_impact_thresh": 1.0,
+    "feat_impact_z": 1.0,
+    "local_features_N": 1.0,
     "tree_depth": 0.6,
     "num_of_trees": 0.6,
     "early_stopping": 0.6,
@@ -2798,7 +2904,7 @@ PARAMETER_PRIOR_WEIGHTS = {
     "max_cat_threshold": 0.1,
 }
 DEFAULT_PRIOR_WEIGHT = 0.4
-FEATURE_SELECTION_PARAMETERS = {"corr_thresh", "feat_impact_thresh"}
+FEATURE_SELECTION_PARAMETERS = {"corr_thresh", "feat_impact_thresh", "feat_impact_z", "local_features_N"}
 SECOND_BOOSTER_SUFFIX = "_1"
 # Parameters that trade off against each other and are optimized together in at least one
 # leaf: a smaller learning rate needs more trees and a later early stop.

@@ -1037,7 +1037,8 @@ def parse_structman_alignment(path: str) -> tuple[list[str], str, list[tuple[str
 
     The file is a query anchored matrix (see structman/lib/output/alignments.py): one
     column per sequence position, a <query> row with AA:SimpleClass cells and one row per
-    structure with AA:ResNr:SimpleClass:Recommended cells or '-'.
+    structure with AA:ResNr:SimpleClass:Recommended cells or '-'. The non-redundant
+    variant (.nr.tsv) has an extra Cluster_Size column before the positions.
 
     Returns (candidate input ids, query sequence, rows), where rows are (label, aligned sequence)
     with one character per query position. Rows without any aligned residue are dropped
@@ -1050,6 +1051,8 @@ def parse_structman_alignment(path: str) -> tuple[list[str], str, list[tuple[str
     rows: list[tuple[str, str]] = []
     seen_seqs = set()
     seen_labels: dict[str, int] = {}
+    # Structure, Seq_Id, Coverage (+ Cluster_Size); set from the header row
+    n_meta_columns = 3
 
     with open(path, 'r') as f:
         for line in f:
@@ -1074,9 +1077,11 @@ def parse_structman_alignment(path: str) -> tuple[list[str], str, list[tuple[str
             fields = line.split('\t')
             label = fields[0]
             if label == 'Structure':
+                # The position columns are numbered from 1
+                n_meta_columns = fields.index('1') if '1' in fields else len(fields)
                 continue
 
-            aligned = ''.join('-' if cell == '-' else cell.split(':')[0] for cell in fields[3:])
+            aligned = ''.join('-' if cell == '-' else cell.split(':')[0] for cell in fields[n_meta_columns:])
 
             if label == '<query>':
                 query_seq = aligned
@@ -1099,6 +1104,8 @@ def parse_structman_alignment(path: str) -> tuple[list[str], str, list[tuple[str
 def structural_alignment_pipeline(config, samples: SampleSpace) -> dict[str, dict[str, str]]:
     """Turn StructMAn's structure alignments into the 'structural' stacked alignment.
 
+    Takes the non-redundant matrix (<protein>.nr.tsv, one row per redundancy cluster) of
+    every protein and falls back to the full one (<protein>.tsv) for proteins without one.
     Writes one query anchored fasta per protein into the msa folder, with the same
     layout as the gpw alignments (<msa_folder>/<prot>/structural/<prot>_structural.fasta),
     and computes its PSIC profile and GEMME predictions, so calcSeqFeat can featurize it
@@ -1117,9 +1124,16 @@ def structural_alignment_pipeline(config, samples: SampleSpace) -> dict[str, dic
     current_chunk = 0
     n_skipped = 0
 
-    for fn in sorted(os.listdir(alignment_folder)):
-        if not fn.endswith('.tsv'):
-            continue
+    alignment_files = set(os.listdir(alignment_folder))
+    full_files = sorted(fn for fn in alignment_files if fn.endswith('.tsv') and not fn.endswith('.nr.tsv'))
+    n_nr = 0
+
+    for full_fn in full_files:
+        fn = f'{full_fn[:-len(".tsv")]}.nr.tsv'
+        if fn in alignment_files:
+            n_nr += 1
+        else:
+            fn = full_fn
         input_ids, query_seq, rows = parse_structman_alignment(f'{alignment_folder}/{fn}')
 
         if query_seq is None or len(rows) == 0:
@@ -1144,13 +1158,22 @@ def structural_alignment_pipeline(config, samples: SampleSpace) -> dict[str, dic
             target_file = f'{sub_folder}/{cl_prot_id}_{seq_list_id}.fasta'
             psic_file = f'{sub_folder}/{cl_prot_id}_{seq_list_id}.psic'
 
+            # The query goes first, parseMsaFasta takes the first entry as the seed
+            lines = [f'>{cl_prot_id}\n{query_seq}\n']
+            for label, aligned in rows:
+                lines.append(f'>{label}\n{aligned}\n')
+            fasta = ''.join(lines)
+
+            if os.path.exists(target_file) and not config.overwrite:
+                with open(target_file, 'r') as f:
+                    if f.read() != fasta:
+                        # Written from another alignment (e.g. the full instead of the
+                        # non-redundant one): everything in the folder is derived from it.
+                        shutil.rmtree(sub_folder)
+                        os.makedirs(sub_folder)
             if not os.path.exists(target_file) or config.overwrite:
-                # The query goes first, parseMsaFasta takes the first entry as the seed
-                lines = [f'>{cl_prot_id}\n{query_seq}\n']
-                for label, aligned in rows:
-                    lines.append(f'>{label}\n{aligned}\n')
                 with open(target_file, 'w') as f:
-                    f.write(''.join(lines))
+                    f.write(fasta)
 
             check_psic_file(psic_file)
             if not os.path.isfile(psic_file) or config.overwrite:
@@ -1173,7 +1196,8 @@ def structural_alignment_pipeline(config, samples: SampleSpace) -> dict[str, dic
             struct_map[cl_prot_id] = {seq_list_id: target_file}
 
     config.logger.info(
-        f'Structural alignments: {len(struct_map)} proteins, {n_skipped} skipped, '
+        f'Structural alignments: {len(struct_map)} proteins ({n_nr} non-redundant, '
+        f'{len(full_files) - n_nr} full alignments without a non-redundant one), {n_skipped} skipped, '
         f'{sum(len(j) for j in psic_jobs)} PSIC and {sum(len(c) for c in gemme_chunks)} GEMME jobs'
     )
 
