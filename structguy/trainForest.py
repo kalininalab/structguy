@@ -11,6 +11,7 @@ from sklearn.metrics import matthews_corrcoef
 
 #from memory_profiler import profile
 
+import gc
 import math
 import time
 import sys
@@ -633,8 +634,6 @@ def xgb_train_wrapper(
     if seed is None:
         seed = int(time.time())
 
-    es_list = []
-    evals: list[tuple[xgb.DMatrix, str]] = []
     eval_label = 'eval'
     
     #if config.use_external_memory_qdm:
@@ -651,7 +650,12 @@ def xgb_train_wrapper(
     else:
         max_bin = config.extMem_max_bin
 
-    with mem_context:
+    grow_policy = {}
+
+    def train(params_override: dict) -> xgb.Booster:
+        # EarlyStopping keeps state, so every call gets fresh callbacks
+        es_list = []
+        evals: list[tuple[xgb.DMatrix, str]] = []
         if not second_round:
             es = xgb.callback.EarlyStopping(
                 rounds=config.early_stopping,
@@ -688,7 +692,9 @@ def xgb_train_wrapper(
                 'random_state' : seed
                 }
             xgb_params.update(gpu_tree_params(config, dtrain, max_bin, xgb_params['max_depth']))
-            booster: xgb.Booster = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees), early_stopping_rounds= config.early_stopping, evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
+            xgb_params.update(params_override)
+            grow_policy['used'] = xgb_params.get('grow_policy', 'depthwise')
+            return xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees), early_stopping_rounds= config.early_stopping, evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
         else:
             es = xgb.callback.EarlyStopping(
                 rounds=config.early_stopping_1,
@@ -725,13 +731,46 @@ def xgb_train_wrapper(
                 'random_state' : seed
                 }
             xgb_params.update(gpu_tree_params(config, dtrain, max_bin, xgb_params['max_depth']))
-            booster: xgb.Booster = xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees_1), early_stopping_rounds=int(config.early_stopping_1), evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
+            xgb_params.update(params_override)
+            grow_policy['used'] = xgb_params.get('grow_policy', 'depthwise')
+            return xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees_1), early_stopping_rounds=int(config.early_stopping_1), evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
+
+    with mem_context:
+        oom_message = None
+        try:
+            booster = train({})
+        except xgb.core.XGBoostError as err:
+            # The histogram estimate of gpu_tree_params is a model, the pool can still run out (fragmentation,
+            # the sampled page of gradient based sampling). Lossguide grows one node at a time and needs far less.
+            if 'out_of_memory' not in str(err) or grow_policy.get('used') == 'lossguide':
+                raise
+            oom_message = str(err).splitlines()[0][:300]
+        # Retried outside the except block: its traceback still references the failed booster and its GPU memory
+        if oom_message is not None:
+            depth = config.tree_depth_1 if second_round else config.tree_depth
+            config.logger.warning(
+                f'GPU out of memory in xgb.train ({second_round=}, max_depth={depth}), retrying with grow_policy=lossguide: '
+                f'{oom_message}'
+            )
+            gc.collect()
+            booster = train({'grow_policy': 'lossguide', 'max_leaves': 0})
 
     return booster
 
 HIST_BYTES_PER_BIN = 16  # one gradient pair of the GPU histogram
-# Candidate nodes of one tree level that xgboost's GPU depthwise growth expands in one batch
-GPU_NODE_BATCH = 256
+
+
+def gpu_node_batch() -> int:
+    """Candidate nodes of one tree level that xgboost's GPU depthwise growth expands in one batch.
+
+    kMaxNodeBatchSize in src/tree/updater_gpu_hist.cuh: 1024 since xgboost 3.1 ([EM] Optimization for deep
+    trees, #11387), a fixed 32 before.
+    """
+    try:
+        major, minor = (int(part) for part in xgb.__version__.split('.')[:2])
+    except ValueError:
+        return 1024
+    return 1024 if (major, minor) >= (3, 1) else 32
 
 
 def gpu_pool_size(config: util.Config) -> float:
@@ -744,24 +783,29 @@ def gpu_pool_size(config: util.Config) -> float:
 def gpu_tree_params(config: util.Config, dtrain, max_bin: int, max_depth) -> dict:
     """xgboost parameters that keep the histogram memory of the GPU hist method within the pool.
 
-    Depthwise growth builds the histograms of up to GPU_NODE_BATCH nodes of a level and of their siblings in one
-    allocation, outside the cache bounded by max_cached_hist_node. For deep trees on many features that allocation
-    alone can exceed the pool; lossguide growth expands one node at a time instead. Without a leaf limit
-    (max_leaves=0) and with the same max_depth, the splits follow the same gain and depth rules.
+    Depthwise growth allocates the histograms of up to gpu_node_batch() nodes of a level and of their siblings in
+    one go (the level batch). Below the max_cached_hist_node cap the cache buffer grows to cache + level batch, above
+    it a separate overflow buffer holds a whole level batch, neither shrinks, and the old buffer lives on while it is
+    copied: about cache + 2.5 level batches at the worst. For deep trees on many features that exceeds the pool;
+    lossguide growth expands one node at a time instead. Without a leaf limit (max_leaves=0) and with the same
+    max_depth, the splits follow the same gain and depth rules.
     """
     params = {'max_cached_hist_node': histogram_cache_nodes(config, dtrain, max_bin)}
     pool_bytes = gpu_pool_size(config)
     bytes_per_node = max(1, dtrain.num_col()) * max_bin * HIST_BYTES_PER_BIN
     depth = max(1, int(max_depth))
-    level_batch = 2 * min(GPU_NODE_BATCH, 2 ** min(depth - 1, 30)) * bytes_per_node
-    budget = pool_bytes * getattr(config, 'hist_level_vram_share', 0.15)
-    if level_batch > budget:
+    node_batch = gpu_node_batch()
+    level_batch = 2 * min(node_batch, 2 ** min(depth - 1, 30)) * bytes_per_node
+    hist_peak = params['max_cached_hist_node'] * bytes_per_node + 2.5 * level_batch
+    budget = pool_bytes * getattr(config, 'hist_level_vram_share', 0.25)
+    if hist_peak > budget:
         params['grow_policy'] = 'lossguide'
         params['max_leaves'] = 0
     if config.verbosity >= 1:
         config.logger.info(
-            f"xgboost grow_policy={params.get('grow_policy', 'depthwise')}: max_depth={depth}, "
-            f"worst-case depthwise histogram batch {level_batch / 2**30:.2f} GiB, budget {budget / 2**30:.2f} GiB of a {pool_bytes / 2**30:.2f} GiB pool"
+            f"xgboost grow_policy={params.get('grow_policy', 'depthwise')}: max_depth={depth}, {node_batch} nodes per batch, "
+            f"worst-case depthwise histogram batch {level_batch / 2**30:.2f} GiB, histogram peak {hist_peak / 2**30:.2f} GiB, "
+            f"budget {budget / 2**30:.2f} GiB of a {pool_bytes / 2**30:.2f} GiB pool"
         )
     return params
 

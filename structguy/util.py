@@ -85,8 +85,9 @@ class Config:
         self.vram_limit = 1.0
         # Largest single allocation of xgboost's histogram cache, as share of a process' GPU pool (sets max_cached_hist_node)
         self.hist_cache_vram_share = 0.1
-        # Largest per-level histogram batch of depthwise tree growth, as share of the GPU pool; beyond it xgboost grows lossguide
-        self.hist_level_vram_share = 0.15
+        # Worst-case histogram memory of depthwise tree growth (cache plus level batches), as share of the GPU pool;
+        # beyond it xgboost grows lossguide
+        self.hist_level_vram_share = 0.25
         self.setup_cuda_mem = False
         # MiB of VRAM kept free per co-resident worker process on a GPU. Every process
         # that touches a GPU needs its own CUDA context on top of whatever RMM pool it
