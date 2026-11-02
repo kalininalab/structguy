@@ -53,7 +53,7 @@ def parse_arguments(argument_start = 2, manual_args = None):
                 'sd',
                 'repeat=',
                 'select_samples',
-                'tpgpu=',
+                'tpgpu=', # Models trained at the same time on one GPU, an integer >= 1 (default 1)
                 'nCV=',
                 'extmem',
                 'vram=',
@@ -106,7 +106,7 @@ def parse_arguments(argument_start = 2, manual_args = None):
     skip_fshpo = False
 
     multi_gpu = 0
-    threads_per_gpu = 4
+    threads_per_gpu = 1
     repeat = None
     n_cv = None
     use_external_memory_qdm = False
@@ -201,7 +201,12 @@ def parse_arguments(argument_start = 2, manual_args = None):
             multi_gpu = int(arg)
 
         if opt == '--tpgpu':
-            threads_per_gpu = float(arg)
+            try:
+                threads_per_gpu = int(arg)
+            except ValueError:
+                threads_per_gpu = 0
+            if threads_per_gpu < 1:
+                sys.exit(f'Error: --tpgpu takes the number of models trained at the same time on one GPU, an integer >= 1, not {arg}')
 
         if opt == '--repeat':
             repeat = int(arg)

@@ -82,6 +82,11 @@ class Iterator(xgb.DataIter):
         self._row = 0
         self._chunk = None
         self._ext_dat = None
+        # Host side time per step, to tell it apart from the time xgboost spends itself (log_times)
+        self.t_get = 0.0
+        self.t_gather = 0.0
+        self.t_to_device = 0.0
+        self.n_batches = 0
         # XGBoost will generate some cache files under the current directory with the
         # prefix "cache"
         super().__init__(cache_prefix=os.path.join(".", "cache"))
@@ -89,6 +94,7 @@ class Iterator(xgb.DataIter):
     def load_chunk(self) -> tuple[numpy.ndarray, numpy.ndarray]:
         """Load the stored chunk the iterator is currently in (host memory)."""
         if self._chunk is None:
+            t0 = time.time()
             X_path, y_path, _ = self._file_paths[self._it]
             if self.device == "cpu":
                 X = numpy.load(X_path)
@@ -98,6 +104,7 @@ class Iterator(xgb.DataIter):
                 y = numpy.asarray(ray.get(y_path))
             assert X.shape[0] == y.shape[0]
             self._chunk = X, y
+            self.t_get += time.time() - t0
         return self._chunk
 
     def load_batch(self) -> tuple[numpy.ndarray, numpy.ndarray, list[str], list[str]]:
@@ -115,9 +122,11 @@ class Iterator(xgb.DataIter):
             n_rows = max(1, self._max_batch_bytes // row_bytes)
 
         end = min(self._row + n_rows, X.shape[0])
+        t0 = time.time()
         #trim down to selected features, only the rows of this batch are copied
         X_batch = X[self._row:end][:, feat_id_vec]
         y_batch = y[self._row:end]
+        self.t_gather += time.time() - t0
 
         self._row = end
         if self._row >= X.shape[0]:
@@ -128,8 +137,11 @@ class Iterator(xgb.DataIter):
         # When the `ExtMemQuantileDMatrix` is used, the device must match. GPU cannot
         # consume CPU input data and vice-versa.
         if self.device != "cpu":
+            t0 = time.time()
             X_batch = cp.array(X_batch)
             y_batch = cp.array(y_batch)
+            self.t_to_device += time.time() - t0
+        self.n_batches += 1
 
         return X_batch, y_batch, feat_names, cat_vec
 
@@ -162,6 +174,15 @@ class Iterator(xgb.DataIter):
         self._it = 0
         self._row = 0
         self._chunk = None
+
+    def log_times(self, config: Config, label: str, t_total: float) -> None:
+        """Log how much of building a DMatrix from this iterator was host side data preparation."""
+        t_host = self.t_get + self.t_gather + self.t_to_device
+        config.logger.info(
+            f'{label}: {t_total:.1f} s, of that host side {t_host:.1f} s (ray.get {self.t_get:.1f} s, '
+            f'column gather {self.t_gather:.1f} s, to device {self.t_to_device:.1f} s) over {self.n_batches} batches, '
+            f'xgboost {t_total - t_host:.1f} s; OMP_NUM_THREADS={os.environ.get("OMP_NUM_THREADS")}'
+        )
 
 class CrossValidationSlice(Slotted_obj):
     __slots__ = [
@@ -1206,6 +1227,7 @@ class CrossValidationSlice(Slotted_obj):
             if config.verbosity >= 5:
                 config.logger.info('Iterator is setup in get_extmem_dtrain')
 
+            t0 = time.time()
             ext_dtest = xgb.ExtMemQuantileDMatrix(
                 it,
                 ref=dtrain,
@@ -1213,6 +1235,8 @@ class CrossValidationSlice(Slotted_obj):
                 max_bin=config.extMem_max_bin,
                 max_quantile_batches = MAX_QUANTILE_BATCHES,
                 cache_host_ratio = CACHE_HOST_RATIO)
+            if config.verbosity >= 3:
+                it.log_times(config, 'External memory dtest', time.time() - t0)
         
             ext_dtest.encoded_prot_vec = encoded_prot_vec
 
@@ -1328,12 +1352,15 @@ class CrossValidationSlice(Slotted_obj):
             if config.verbosity >= 5:
                 config.logger.info('Iterator is setup in get_extmem_dtrain')
 
+            t0 = time.time()
             ext_dtrain = xgb.ExtMemQuantileDMatrix(
                 it,
                 enable_categorical=True,
                 max_bin=config.extMem_max_bin,
                 max_quantile_batches = MAX_QUANTILE_BATCHES,
                 cache_host_ratio = CACHE_HOST_RATIO)
+            if config.verbosity >= 3:
+                it.log_times(config, 'External memory dtrain', time.time() - t0)
             ext_dtrain.encoded_prot_vec = prot_id_vec
 
         return ext_dtrain, file_paths

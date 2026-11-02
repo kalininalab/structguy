@@ -1746,7 +1746,8 @@ def put_data_to_tmp_storage(cv_slice: CrossValidationSlice, samples: SampleSpace
     # are cut from them by support_classes.Iterator, sized to the pool of the training
     # process and the selected features (see extmem_batch_bytes).
     gmem = get_gpu_memory()[0]*config.vram_limit
-    sub_share = 1 / (config.threads_per_gpu * config.crossValidation_fold * (config.crossValidation_fold-1))
+    # The share of a GPU one training process gets, --tpgpu models share a card
+    sub_share = 1 / config.threads_per_gpu
     num_of_batches = max([1, int(1 * (len(feat_matrix)/ (600 * gmem*sub_share)))])
 
     batch_size = len(feat_matrix) // num_of_batches

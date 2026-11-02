@@ -1290,16 +1290,26 @@ def bayesian_optimisation(
 
     else:
         remote_processes = []
-        threads_per_gpu = config.threads_per_gpu
-        number_of_procs = max([1,round(config.multi_gpu * threads_per_gpu)])
-        threads_per_gpu = number_of_procs / config.multi_gpu
-        
-        para_number = min([config.proc_n , max([1,config.proc_n // (config.multi_gpu * threads_per_gpu)])])
-        
+        # --tpgpu is the number of models trained at the same time on one GPU, so there are
+        # multi_gpu * threads_per_gpu model slots. One candidate trains a model per sub-slice of
+        # every CV fold; as many candidates run in parallel as it takes to fill the slots.
+        model_slots = config.multi_gpu * int(config.threads_per_gpu)
+        if config.cv_counters is not None:
+            n_cv_folds = len(config.cv_counters)
+        elif config.cv_hpo_limiter is not None:
+            n_cv_folds = min(config.cv_hpo_limiter, config.crossValidation_fold)
+        else:
+            n_cv_folds = config.crossValidation_fold
+        models_per_candidate = max(1, n_cv_folds * (config.crossValidation_fold - 1))
+        number_of_procs = max(1, math.ceil(model_slots / models_per_candidate))
+
+        para_number = max(1, config.proc_n // number_of_procs)
+
         current_params_id = 0
         n_of_sent_hpo_sets = 0
 
-        gpu_share = 1/threads_per_gpu
+        # The GPUs each candidate hands out to its CV folds
+        gpu_share = config.multi_gpu / number_of_procs
         remote_function = para_eval #.options(num_gpus = gpu_share)
         
         store, config_ref_container = stores
@@ -1330,7 +1340,7 @@ def bayesian_optimisation(
             dispatched.append(next_sample)
 
         if config.verbosity >= 1:
-            config.logger.info(f'Started {len(remote_processes)} para_eval processes: {para_number=} {gpu_share=}')
+            config.logger.info(f'Started {len(remote_processes)} para_eval processes for {model_slots} model slots ({config.threads_per_gpu} per GPU, {models_per_candidate} models per candidate): {para_number=} {gpu_share=}')
 
         dones = []
         counts = []

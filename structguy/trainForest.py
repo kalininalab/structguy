@@ -11,6 +11,7 @@ from sklearn.metrics import matthews_corrcoef
 
 #from memory_profiler import profile
 
+import math
 import time
 import sys
 import os
@@ -77,7 +78,10 @@ def para_prediction(forest_dump_file, feat_matrix):
     pred = forest.predict(feat_matrix)
     return pred
 
-@ray.remote
+# max_retries=0: ray's memory monitor kills retriable tasks first. A killed wrapper takes its
+# double_booster_remote children with it and was retried from scratch, so the whole CV fold
+# restarted on every kill (2026-11-02: the same initial model 12 times in 8 hours).
+@ray.remote(max_retries=0)
 def trainRegressionForestWrapper(
     store: tuple[list[list[tuple]], list[str], ray.ObjectRef, dict | None],
     cv_slice: CrossValidationSlice,
@@ -276,6 +280,29 @@ def ext_shap_analysis(
     acc_feat_impacts = sorted(zip(feature_names, impacts.tolist(), z_scores.tolist()), key=lambda x: x[2], reverse=True)
     ta = add_to_times(times, ta)
     return acc_feat_impacts, n_proteins, times
+
+def predict_from_refs(
+        booster: xgb.Booster,
+        data_refs: list[tuple[ray.ObjectRef, ray.ObjectRef, ray.ObjectRef]]) -> tuple[numpy.ndarray, numpy.ndarray]:
+    """Predictions and labels for the stored chunks in data_refs, in their order.
+
+    A plain DMatrix per chunk instead of an ExtMemQuantileDMatrix over all of them: predicting
+    needs no quantile sketch, building one for the whole cv_slice took ~8 minutes per sub-slice.
+    The raw values also predict exactly, the quantised ones of a DMatrix without ref=dtrain did not.
+    """
+    feat_names, cat_vec, feat_id_vec = ray.get(data_refs[0][2])
+
+    preds, labels = [], []
+    for X_ref, y_ref, _ in data_refs:
+        X: numpy.ndarray = ray.get(X_ref)
+        if X.shape[0] == 0:
+            continue
+        dmatrix = xgb.DMatrix(X[:, feat_id_vec], feature_names=feat_names, feature_types=cat_vec, enable_categorical=True)
+        preds.append(booster.predict(dmatrix))
+        labels.append(numpy.asarray(ray.get(y_ref)))
+        del dmatrix
+
+    return numpy.concatenate(preds), numpy.concatenate(labels)
 
 def shap_analysis(config, forest, d_feat_vecs: xgb.DMatrix, feature_names, prediction_vector, target_vector):
     if config.verbosity >= 3:
@@ -905,7 +932,9 @@ def retrieve_dmatrix(
 
     return dtrain, dtest_feature_matrix, t_file_paths, test_data_refs, times
 
-@ray.remote(max_retries=0, max_calls=1)
+# Retriable, so that the memory monitor picks a single sub-slice over its wrapper. The result is
+# a deterministic function of the inputs (seeds from derive_crn_seed), a retry is safe.
+@ray.remote(max_retries=2, max_calls=1)
 #@profile
 def double_booster_remote(packed_slice_slice, store, proc_id: str, sub_share: float, config_ref_container: list[ray.ObjectRef], subslice_index: int = 0):
     config: util.Config
@@ -1169,20 +1198,15 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
     if config.verbosity >= 3:
         config.logger.info(f'Reached after cv_slice feat filter in double_booster_remote {proc_id} {cv_slice.train_slice_ids=} {score_train=}')
 
+    del dtrain
+    del dtest_feature_matrix
+
+    # Scored on the parent slice, with the filters of this sub-slice applied above
+    feat_pos_dict, features = ray.get(raw_feature_matrix_store_id)
     if score_train:
-        dtrain, dtest_feature_matrix, _, _, ret_times = retrieve_dmatrix(
-        config,
-        raw_feature_matrix_store_id,
-        cv_slice,
-        ext_mem=config.use_external_memory_qdm
-        )
-        times.append(ret_times) #13
-
-        x_pred = booster_2.predict(dtrain)
-        x_true = dtrain.get_label()
-        x_prot_vec = cp.asnumpy(dtrain.encoded_prot_vec)
-
-        del dtrain
+        train_refs, x_prot_vec = cv_slice.prepare_ext_mem_qdmatrix(config, feat_pos_dict, features)
+        x_pred, x_true = predict_from_refs(booster_2, train_refs)
+        x_prot_vec = numpy.asarray(x_prot_vec)
 
         if config.verbosity >= 5:
             train_scores_obj = calc_scores_obj(x_true, x_pred, x_prot_vec, cv_slice.train_class_weight_vector, cv_slice.feature_names)
@@ -1190,22 +1214,15 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
             train_scores_obj.printOut(config = config)
 
     else:
-        del dtrain
-        _, dtest_feature_matrix, _, _, ret_times = retrieve_dmatrix(
-        config,
-        raw_feature_matrix_store_id,
-        cv_slice,
-        ext_mem=config.use_external_memory_qdm
-        )
-        times.append(ret_times) #13
-        
         x_pred = None
         x_true = None
         x_prot_vec = None
 
-    y_pred = booster_2.predict(dtest_feature_matrix)
-    y_true = dtest_feature_matrix.get_label()
-    y_prot_vec = cp.asnumpy(dtest_feature_matrix.encoded_prot_vec)
+    test_refs, y_prot_vec = cv_slice.prepare_test_ext_mem_qdmatrix(config, feat_pos_dict, features)
+    y_pred, y_true = predict_from_refs(booster_2, test_refs)
+    y_prot_vec = numpy.asarray(y_prot_vec)
+    del feat_pos_dict
+    del features
 
     ta = add_to_times(times, ta) #14
 
@@ -1214,8 +1231,6 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
 
     if config.verbosity >= 4:
         print_times(times, label = 'double booster 6', logger=config.logger)
-
-    del dtest_feature_matrix
 
     if retain_model:
         del booster_2
@@ -1428,16 +1443,11 @@ def trainRegressionForest(
     if config.forest_type == "xgboost" and not skip_feature_selection:
         
         if sub_gpu_share is not None:
-            if config.slice_by_slice:
-                # Only one process on the card at a time, and it takes the card fully.
-                # Requesting the whole GPU makes ray queue the sub-boosters of all CV folds
-                # and of all parallel HPO evaluations behind each other, whatever share of
-                # the GPU the caller was handed. The callers above request no GPU themselves.
-                sub_share = 1.0
-            else:
-                sub_share = sub_gpu_share/len(cv_slice.slice_slices)
-            if sub_share < 1.0 and sub_share > 0.5:
-                sub_share = 0.5
+            # Every sub-booster requests 1/threads_per_gpu of a GPU (--tpgpu), so ray trains at
+            # most threads_per_gpu of them on one card at a time, whatever share of the GPUs the
+            # caller was handed. The callers above request no GPU themselves.
+            models_per_gpu = int(config.threads_per_gpu)
+            sub_share = 1.0 / models_per_gpu
             if config.verbosity >= 3:
                 config.logger.info(f'call of double_booster_remotes: {sub_share=} {len(cv_slice.slice_slices)=}')
 
@@ -1456,9 +1466,17 @@ def trainRegressionForest(
                 if config.verbosity >= 4:
                     config.logger.info(f'Could not find a placement group {proc_id=}: {e=}')
 
+            # Ray sets OMP_NUM_THREADS to num_cpus, which bounds the host side work of xgboost
+            # (building the DMatrices) in these tasks. With num_cpus=1 it ran single threaded while
+            # most cores were idle. Half of the cores are shared out over the GPUs, the rest stays
+            # for the wrappers and HPO workers, which request CPUs themselves.
+            gpu_task_cpus = getattr(config, 'gpu_task_cpus', None)
+            if not gpu_task_cpus:
+                gpu_task_cpus = max(1, int(ray.cluster_resources().get('CPU', 1)) // (2 * max(1, config.multi_gpu) * models_per_gpu))
+
             if grouped:
                 remote_function = double_booster_remote.options(
-                    num_cpus=1,
+                    num_cpus=gpu_task_cpus,
                     num_gpus=sub_share,
                     scheduling_strategy=ray.util.scheduling_strategies.PlacementGroupSchedulingStrategy(
                         placement_group=pg , placement_group_capture_child_tasks=True
@@ -1469,30 +1487,45 @@ def trainRegressionForest(
                     config.logger.info(f'double booster remote configured: {proc_id=}')
                 
             else:
-                remote_function = double_booster_remote.options(num_gpus=sub_share)
-                
-            remote_proc_ids = []
+                remote_function = double_booster_remote.options(num_cpus=gpu_task_cpus, num_gpus=sub_share)
+
             if config_ref_container is None:
                 config_ref_container = [ray.put(config)]
             store = ray.put((feats_to_filter, pack(cv_slice), skip_scoring, score_train, raw_feature_matrix_store_id, remote, repeat_index))
-            
-            for nested_proc_id, packed_slice_slice in enumerate(cv_slice.slice_slices):
 
-                remote_proc_ids.append(remote_function.remote(packed_slice_slice, store, f'{proc_id}_{nested_proc_id}', sub_share, config_ref_container, nested_proc_id))
-                if config.slice_by_slice:
-                    current_slice = 1
-                    break
+            # slice_by_slice keeps as many sub-slices in flight as this CV fold has model slots:
+            # its share of the GPUs (sub_gpu_share) times the models per GPU. One at a time left
+            # half of the cards idle with 8 GPUs and 4 folds.
+            n_sub_slices = len(cv_slice.slice_slices)
+            if config.slice_by_slice:
+                max_in_flight = min(n_sub_slices, max(1, math.ceil(sub_gpu_share * models_per_gpu)))
+            else:
+                max_in_flight = n_sub_slices
+            if config.verbosity >= 3:
+                config.logger.info(f'Double booster dispatch of {proc_id}: {n_sub_slices} sub-slices, {max_in_flight} at a time, {gpu_task_cpus} CPUs each')
 
+            remote_proc_ids = []
+            next_slice = 0
 
-            done = False
+            def submit_next_sub_slices():
+                nonlocal next_slice
+                while next_slice < n_sub_slices and len(remote_proc_ids) < max_in_flight:
+                    remote_proc_ids.append(remote_function.remote(
+                        cv_slice.slice_slices[next_slice], store, f'{proc_id}_{next_slice}', sub_share, config_ref_container, next_slice))
+                    next_slice += 1
+
+            submit_next_sub_slices()
+
             y_preds = []
             x_preds = []
             booster_2_list: list[tuple[xgb.Booster, list[str]]] = []
 
             ray_dumped = False
 
-            while not done:
-                ready, not_ready = ray.wait(remote_proc_ids, timeout = 1)
+            while len(remote_proc_ids) > 0:
+                # The refs that are ready leave remote_proc_ids here. Keeping them in the list
+                # handed the same result back on the next wait, and it was counted again.
+                ready, remote_proc_ids = ray.wait(remote_proc_ids, timeout = 1)
 
                 if len(ready) > 0:
                     if config.verbosity >= 3:
@@ -1503,19 +1536,22 @@ def trainRegressionForest(
                     try:
                         results = ray.get(ready, timeout=60)
                     except ray.exceptions.GetTimeoutError:
-                        remote_proc_ids = not_ready
-                        if len(remote_proc_ids) == 0:
-                            done = True
                         util.dump_ray_logs_snapshot(f'{config.outfolder}/ray_dump_snapshot_2.log')
                         config.logger.info('double_booster_remote ray.get timed out')
+                        submit_next_sub_slices()
                         continue
                     except ray.exceptions.WorkerCrashedError:
-                        remote_proc_ids = not_ready
-                        if len(remote_proc_ids) == 0:
-                            done = True
                         util.dump_ray_logs_snapshot(f'{config.outfolder}/ray_dump_snapshot_2.log')
                         config.logger.info('double_booster_remote ray.get crashed')
+                        submit_next_sub_slices()
                         continue
+                    except ray.exceptions.RayError as err:
+                        # E.g. killed by the memory monitor more often than max_retries allows.
+                        # Raised on, it would end the whole run; score this fold as failed instead.
+                        config.logger.error(f'double_booster_remote of {proc_id} failed, the fold is scored as failed: {type(err).__name__}: {err}')
+                        for ref in remote_proc_ids:
+                            ray.cancel(ref, force=True)
+                        return zero_return
 
                     if config.verbosity >= 4:
                         config.logger.info(f'Double booster returned with {type(results[0])=}')
@@ -1523,7 +1559,8 @@ def trainRegressionForest(
                         if isinstance(res, int):
                             if config.verbosity >= 1:
                                 config.logger.info('double_booster_remote returned None')
-
+                            for ref in remote_proc_ids:
+                                ray.cancel(ref, force=True)
                             return zero_return
                         if skip_scoring:
                             booster, sl_sl_feat_names, db_p_id = res
@@ -1538,16 +1575,7 @@ def trainRegressionForest(
                             y_preds.append(y_pred)
                             x_preds.append(x_pred)
 
-                    if config.slice_by_slice and current_slice < len(cv_slice.slice_slices):
-                        nested_proc_id = current_slice
-                        packed_slice_slice = cv_slice.slice_slices[current_slice]
-                        remote_proc_ids.append(remote_function.remote(packed_slice_slice, store, f'{proc_id}_{nested_proc_id}', sub_share, config_ref_container, nested_proc_id))
-                        not_ready = remote_proc_ids
-                        current_slice += 1
-
-                remote_proc_ids = not_ready
-                if len(remote_proc_ids) == 0:
-                    done = True
+                    submit_next_sub_slices()
 
             #for packed_slice_slice in cv_slice.slice_slices:
             #    ray._private.internal_api.free(packed_slice_slice)
