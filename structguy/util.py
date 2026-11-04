@@ -99,6 +99,15 @@ class Config:
         # this multiple of the estimated evaluation noise before it is adopted. 0 or None
         # restores the old behaviour of accepting any improvement, however small.
         self.hpo_noise_gate = 1.0
+        # Hang guards of the parallel HPO loop, in hours: no result for this long, or no proposal of the gaussian
+        # process for this long, ends the subspace. Lower limits: both grow with the measured candidate durations.
+        self.hpo_result_timeout_h = 10.0
+        self.hpo_subspace_timeout_h = 20.0
+        # HPO candidates evaluated beyond those that fill the GPU slots; they wait in ray's queue and take
+        # the GPUs the running candidates leave idle in their last sub-slices. 0: one candidate at a time
+        self.hpo_queued_candidates = 1
+        # Select the features of the stored chunks on the GPU (support_classes.select_columns_on_device)
+        self.gpu_column_select = True
         # Early stopping of an HPO subspace: stop once none of the last hpo_stop_window
         # GP proposals beat the incumbent by the acceptance threshold, and the GP, after
         # subtracting its observed optimism, does not expect its next proposal to either.
@@ -359,7 +368,7 @@ class Config:
 
         self.feat_impact_thresh = 0.
         # Number of interacting positions whose features (IP<k> ..., k <= local_features_N) are used, 0-20, 20 = all
-        self.local_features_N = 20
+        self.local_features_N = 5
         # SHAP impact filter between the boosters. 'z': remove features whose impact is more than feat_impact_z
         # standard errors (across the held-out proteins) above 0; positive values remove only harmful features,
         # negative values also the unused ones, down to keeping only reliably helpful ones. At least

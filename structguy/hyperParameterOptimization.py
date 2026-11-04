@@ -123,6 +123,7 @@ class HpoTrace:
         self.gp_since_accept = 0      # gp results since the last accepted improvement
         self.gp_history_at_accept = 0 # len(gp_history) at the last accepted improvement
         self.stop_reason = None       # set once should_stop() decided to stop
+        self.guard_note = None        # set when a timeout guard of the parallel loop ended the subspace
         self.n_failed = 0             # evaluations with folds that produced no model
         self.identified_noise = []    # every noise level the gp could identify in this subspace
         self.length_scales = None     # last fitted Matern length scale per parameter
@@ -498,6 +499,8 @@ class HpoTrace:
         c.logger.info("================ HPO subspace summary ================")
         c.logger.info(f"Parameters ({len(self.param_names)}): {self.param_names}")
         c.logger.info(f"Wall time: {(time.time() - self.t0) / 3600.0:.2f} h, evaluations: {len(self.scores)}, n_iters budget: {self.n_iters}")
+        if self.guard_note is not None:
+            c.logger.info(self.guard_note)
         for source in sorted(self.by_source):
             vals = self.by_source[source]
             c.logger.info(
@@ -607,6 +610,22 @@ def fit_gp(model, scaled_xp, yp):
 
 
 # Taken from https://github.com/thuijskens/bayesian-optimization
+def hpo_guard_limits(config, n_params: int, durations: list[float]) -> tuple[float, float]:
+    """Seconds after which the parallel HPO loop stops waiting: (result limit, subspace limit).
+
+    The result guard counts from the last result, the subspace guard from the last proposal of the gaussian
+    process, which needs n_params + 2 results before it proposes. Fixed at 10 h and 20 h they cut every subspace of
+    a big dataset, where a candidate takes 1-8 h, before the gaussian process ever ran (2026-11-03: 20.00 h,
+    4 evaluations). So they scale with the measured candidate durations, the configured hours are the lower limits.
+    """
+    result_limit = float(getattr(config, 'hpo_result_timeout_h', 10)) * 3600.0
+    subspace_limit = float(getattr(config, 'hpo_subspace_timeout_h', 20)) * 3600.0
+    if durations:
+        result_limit = max(result_limit, 2.5 * max(durations))
+        subspace_limit = max(subspace_limit, (n_params + 4) * float(np.median(durations)))
+    return result_limit, subspace_limit
+
+
 def expected_improvement(x, gaussian_process, evaluated_loss, greater_is_better=False, n_params=1):
     """expected_improvement
     Expected improvement acquisition function.
@@ -1301,15 +1320,21 @@ def bayesian_optimisation(
         else:
             n_cv_folds = config.crossValidation_fold
         models_per_candidate = max(1, n_cv_folds * (config.crossValidation_fold - 1))
-        number_of_procs = max(1, math.ceil(model_slots / models_per_candidate))
+        filling_procs = max(1, math.ceil(model_slots / models_per_candidate))
+        # Candidates beyond those that fill the slots wait in ray's queue and take the GPUs the
+        # running ones leave idle: with 12 models on 8 slots, the second half wave of every
+        # candidate kept 4 GPUs idle for hours (trainRegressionForest submits all sub-slices then).
+        n_queued = max(0, int(getattr(config, 'hpo_queued_candidates', 0) or 0))
+        number_of_procs = filling_procs + n_queued
 
         para_number = max(1, config.proc_n // number_of_procs)
 
         current_params_id = 0
         n_of_sent_hpo_sets = 0
 
-        # The GPUs each candidate hands out to its CV folds
-        gpu_share = config.multi_gpu / number_of_procs
+        # The GPUs each candidate hands out to its CV folds; the queued candidates do not count,
+        # every candidate may use the GPUs of the slot filling ones
+        gpu_share = config.multi_gpu / filling_procs
         remote_function = para_eval #.options(num_gpus = gpu_share)
         
         store, config_ref_container = stores
@@ -1328,19 +1353,23 @@ def bayesian_optimisation(
             return (com_queue, out_queue, proc_id)
 
         dispatched = []
+        # When every worker got its candidate, and how long the successful candidates took (scales the guards)
+        dispatch_times = []
+        durations = []
         for p in range(number_of_procs):
             next_sample, draw_kind = draw_random_sample(config, bounds, scaler, best_params)
             trace.record_dispatch(next_sample, f"init/{draw_kind}")
 
             worker = launch_worker(p)
             worker[0].put(next_sample)
+            dispatch_times.append(time.time())
             n_of_sent_hpo_sets += 1
 
             remote_processes.append(worker)
             dispatched.append(next_sample)
 
         if config.verbosity >= 1:
-            config.logger.info(f'Started {len(remote_processes)} para_eval processes for {model_slots} model slots ({config.threads_per_gpu} per GPU, {models_per_candidate} models per candidate): {para_number=} {gpu_share=}')
+            config.logger.info(f'Started {len(remote_processes)} para_eval processes ({n_queued} of them queued behind) for {model_slots} model slots ({config.threads_per_gpu} per GPU, {models_per_candidate} models per candidate): {para_number=} {gpu_share=}')
 
         dones = []
         counts = []
@@ -1388,6 +1417,7 @@ def bayesian_optimisation(
                     next_sample, draw_kind = draw_random_sample(config, bounds, scaler, best_params)
                     trace.record_dispatch(next_sample, f"restart/{draw_kind}")
                     remote_processes[i][0].put(next_sample)
+                    dispatch_times[i] = time.time()
                     in_flight[i] = next_sample
             n_of_sent_hpo_sets = sum(sample is not None for sample in in_flight)
             if all(dones):
@@ -1432,6 +1462,7 @@ def bayesian_optimisation(
                     continue
                 n_of_sent_hpo_sets -= 1
                 in_flight[i] = None
+                candidate_time = time.time() - dispatch_times[i]
                 """
                 elif current_params_id >= n_iters:
                     if not dones[i]:
@@ -1454,6 +1485,9 @@ def bayesian_optimisation(
 
                 failed = getattr(scores, 'failed_folds', 0) > 0
                 trace.record_result(next_sample, cv_score, interrupted=interrupted, scores=scores, failed=failed)
+                # Failed and interrupted candidates end early, they would shrink the guards
+                if not failed and not interrupted:
+                    durations.append(candidate_time)
 
                 previous_best = util.get_objective_score(config, best_scores, feature_penalty=config.feature_penalty)
                 if isinstance(previous_best, bool):
@@ -1555,6 +1589,7 @@ def bayesian_optimisation(
                         next_sample, draw_kind = draw_random_sample(config, bounds, scaler, best_params)
                         trace.record_dispatch(next_sample, f"fill/{draw_kind}")
                     com_queue.put(next_sample)
+                    dispatch_times[i] = time.time()
                     n_of_sent_hpo_sets += 1
                     in_flight[i] = next_sample
 
@@ -1562,19 +1597,22 @@ def bayesian_optimisation(
             for done in dones:
                 if not done:
                     all_done = False
+            result_limit, subspace_limit = hpo_guard_limits(config, n_params, durations)
             if n_of_sent_hpo_sets > 0 and not all_done:
-                if timeout_start is not None:
-                    timeout = time.time() - timeout_start
-                    if timeout > 10*3600:
-                        all_done = True
-                    else:
-                        all_done = False
-                if overall_timeout_start is not None and not all_done:
-                    overall_timeout = time.time() - overall_timeout_start
-                    if overall_timeout > 2*36_000:
-                        all_done = True
-                    else:
-                        all_done = False
+                # Hang guards: no result for result_limit, or no gaussian process proposal for subspace_limit
+                fired = None
+                if timeout_start is not None and time.time() - timeout_start > result_limit:
+                    fired = f"no result for {(time.time() - timeout_start) / 3600:.2f} h (result limit {result_limit / 3600:.2f} h)"
+                elif overall_timeout_start is not None and time.time() - overall_timeout_start > subspace_limit:
+                    fired = f"no gaussian process proposal for {(time.time() - overall_timeout_start) / 3600:.2f} h (subspace limit {subspace_limit / 3600:.2f} h)"
+                if fired is not None:
+                    all_done = True
+                    running = [f"{(time.time() - dispatch_times[j]) / 3600:.2f} h" for j, sample in enumerate(in_flight) if sample is not None]
+                    trace.guard_note = (
+                        f"HPO guard ended the subspace: {fired}, after {len(durations)} completed evaluations; "
+                        f"cancelled {len(running)} candidate(s) in flight, running for {', '.join(running) or '-'}"
+                    )
+                    config.logger.warning(trace.guard_note)
 
             if not all_done:
                 if message_counter < 10000:
@@ -1582,15 +1620,15 @@ def bayesian_optimisation(
                 else:
                     message_counter = 0
                     count_var += 1
-                    if timeout_start is not None:
-                        timeout = time.time() - timeout_start
-                    else:
-                        timeout = None
-                    if overall_timeout_start is not None and not all_done:
-                        overall_timeout = time.time() - overall_timeout_start
-                    else:
-                        overall_timeout = None
-                    config.logger.info(f"Not all done {count_var}: {timeout=} {timeout_start=} {overall_timeout=} {overall_timeout_start=} {dones=}")
+                    running = [time.time() - dispatch_times[j] for j, sample in enumerate(in_flight) if sample is not None]
+                    result_left = f"{(result_limit - (time.time() - timeout_start)) / 3600:.2f} h" if timeout_start is not None else "not armed"
+                    subspace_left = f"{(subspace_limit - (time.time() - overall_timeout_start)) / 3600:.2f} h" if overall_timeout_start is not None else "not armed"
+                    median = f"{float(np.median(durations)) / 3600:.2f} h" if durations else "-"
+                    config.logger.info(
+                        f"HPO heartbeat {count_var}: {len(running)} candidate(s) in flight for "
+                        f"{', '.join(f'{t / 3600:.2f} h' for t in running) or '-'}; result guard in {result_left}, "
+                        f"subspace guard in {subspace_left} (median candidate {median}, {len(durations)} completed)"
+                    )
 
                 time.sleep(0.5)
 

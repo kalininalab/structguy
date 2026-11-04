@@ -80,7 +80,12 @@ def ext_shap_interactions(feature_names, booster, data_refs, prot_vec, config, s
     import xgboost as xgb
 
     feat_names, cat_vec, feat_id_vec = ray.get(data_refs[0][2])
-    X = np.concatenate([ray.get(X_ref)[:, feat_id_vec] for X_ref, _, _ in data_refs], axis=0)
+    if getattr(config, 'gpu_column_select', True):
+        from structguy.support_classes import select_columns_on_device
+        # The columns selected on the GPU, on the host they took ~100 s per stored chunk
+        X = np.concatenate([select_columns_on_device(ray.get(X_ref), feat_id_vec).get() for X_ref, _, _ in data_refs], axis=0)
+    else:
+        X = np.concatenate([ray.get(X_ref)[:, feat_id_vec] for X_ref, _, _ in data_refs], axis=0)
     if prot_vec is None or len(prot_vec) != len(X):
         prot_vec = np.zeros(len(X), dtype=np.int64)
 

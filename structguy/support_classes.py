@@ -63,6 +63,30 @@ def extmem_batch_bytes(config: Config) -> int:
     return max(1, int(pool_bytes * getattr(config, 'extmem_batch_vram_share', 0.1)))
 
 
+# Full width rows copied to the GPU at once by select_columns_on_device
+COLUMN_SELECT_BLOCK_BYTES = 256 * 2**20
+
+
+def select_columns_on_device(X: numpy.ndarray, feat_id_vec, block_bytes: int = COLUMN_SELECT_BLOCK_BYTES) -> cp.ndarray:
+    """X[:, feat_id_vec] as a float32 cupy array, the columns selected on the GPU.
+
+    On the host the selection walks a row major array of ~12,600 columns column by column, single threaded:
+    ~55 MB/s with 8 training processes on the HPC (2026-11-02), about 200 s per external memory dtrain. Copying
+    contiguous full width row blocks to the GPU reads twice the bytes, but sequentially, and the GPU selects the
+    columns at once. Only one block of block_bytes is on the GPU besides the result.
+    """
+    ids = cp.asarray(numpy.asarray(feat_id_vec, dtype=numpy.int64))
+    n_rows = X.shape[0]
+    out = cp.empty((n_rows, len(ids)), dtype=cp.float32)
+    rows_per_block = max(1, block_bytes // max(1, X.shape[1] * X.itemsize))
+    for r0 in range(0, n_rows, rows_per_block):
+        r1 = min(r0 + rows_per_block, n_rows)
+        block = cp.asarray(X[r0:r1])
+        out[r0:r1] = block[:, ids]
+        del block
+    return out
+
+
 class Iterator(xgb.DataIter):
     """A custom iterator for loading files in batches.
 
@@ -72,9 +96,11 @@ class Iterator(xgb.DataIter):
     """
 
     def __init__(
-        self, file_paths: list[tuple[str, str, str]], device: str = 'cuda', max_batch_bytes: int | None = None
+        self, file_paths: list[tuple[str, str, str]], device: str = 'cuda', max_batch_bytes: int | None = None,
+        gpu_column_select: bool = True
     ) -> None:
         self.device = device
+        self._gpu_column_select = gpu_column_select
 
         self._file_paths = file_paths
         self._max_batch_bytes = max_batch_bytes
@@ -124,7 +150,11 @@ class Iterator(xgb.DataIter):
         end = min(self._row + n_rows, X.shape[0])
         t0 = time.time()
         #trim down to selected features, only the rows of this batch are copied
-        X_batch = X[self._row:end][:, feat_id_vec]
+        if self.device != "cpu" and self._gpu_column_select:
+            # Already on the device, the copy is part of t_gather
+            X_batch = select_columns_on_device(X[self._row:end], feat_id_vec)
+        else:
+            X_batch = X[self._row:end][:, feat_id_vec]
         y_batch = y[self._row:end]
         self.t_gather += time.time() - t0
 
@@ -138,7 +168,7 @@ class Iterator(xgb.DataIter):
         # consume CPU input data and vice-versa.
         if self.device != "cpu":
             t0 = time.time()
-            X_batch = cp.array(X_batch)
+            X_batch = cp.asarray(X_batch)
             y_batch = cp.array(y_batch)
             self.t_to_device += time.time() - t0
         self.n_batches += 1
@@ -1222,7 +1252,8 @@ class CrossValidationSlice(Slotted_obj):
             max_batch_bytes = extmem_batch_bytes(config)
             if config.verbosity >= 3:
                 config.logger.info(f'External memory batches limited to {max_batch_bytes / 2**20:.1f} MiB of feature data ({len(file_paths)} stored chunks)')
-            it = Iterator(device="cuda", file_paths=file_paths, max_batch_bytes=max_batch_bytes)
+            it = Iterator(device="cuda", file_paths=file_paths, max_batch_bytes=max_batch_bytes,
+                          gpu_column_select=getattr(config, 'gpu_column_select', True))
 
             if config.verbosity >= 5:
                 config.logger.info('Iterator is setup in get_extmem_dtrain')
@@ -1347,7 +1378,8 @@ class CrossValidationSlice(Slotted_obj):
             max_batch_bytes = extmem_batch_bytes(config)
             if config.verbosity >= 3:
                 config.logger.info(f'External memory batches limited to {max_batch_bytes / 2**20:.1f} MiB of feature data ({len(file_paths)} stored chunks)')
-            it = Iterator(device="cuda", file_paths=file_paths, max_batch_bytes=max_batch_bytes)
+            it = Iterator(device="cuda", file_paths=file_paths, max_batch_bytes=max_batch_bytes,
+                          gpu_column_select=getattr(config, 'gpu_column_select', True))
 
             if config.verbosity >= 5:
                 config.logger.info('Iterator is setup in get_extmem_dtrain')

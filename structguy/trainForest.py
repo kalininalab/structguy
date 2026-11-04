@@ -37,7 +37,7 @@ from rmm.mr import PoolMemoryResource, CudaAsyncMemoryResource, set_current_devi
 #from filelock import FileLock, Timeout
 from structguy import featureSelection, util
 from structman.base_utils.base_utils import pack, unpack, add_to_times, print_times, aggregate_times, deep_get_size_of, sizeof_fmt
-from structguy.support_classes import CrossValidationSlice
+from structguy.support_classes import CrossValidationSlice, extmem_batch_bytes, select_columns_on_device
 from structguy.sampleSpace import DataSAIL_cv
 from structguy.feature_correlation import average_ranks, standardized
 from structguy.feature_interactions import ext_shap_interactions, interaction_pairs, write_interaction_file, interaction_folder
@@ -235,12 +235,34 @@ def protein_wise_feature_impacts(metric: str, contributions, pred, y, prot_vec) 
 
 
 #@profile
+def chunk_dmatrices(X: numpy.ndarray, feat_names, cat_vec, feat_id_vec, batch_bytes: int | None = None, gpu_column_select: bool = True):
+    """DMatrices of the selected features of a stored chunk, in row batches of at most batch_bytes of selected data.
+
+    With gpu_column_select the columns are selected on the GPU (select_columns_on_device), on the host they took
+    ~100 s per 10 GB chunk. Without batch_bytes the chunk is one batch.
+    """
+    if batch_bytes is None:
+        rows_per_batch = max(1, X.shape[0])
+    else:
+        rows_per_batch = max(1, batch_bytes // max(1, len(feat_id_vec) * 4))
+    for r0 in range(0, X.shape[0], rows_per_batch):
+        r1 = min(r0 + rows_per_batch, X.shape[0])
+        if gpu_column_select:
+            X_sel = select_columns_on_device(X[r0:r1], feat_id_vec)
+        else:
+            X_sel = X[r0:r1][:, feat_id_vec]
+        yield xgb.DMatrix(X_sel, feature_names=feat_names, feature_types=cat_vec, enable_categorical=True)
+        del X_sel
+
+
 def ext_shap_analysis(
         feature_names: list[str],
         booster: xgb.Booster,
         data_refs: list[tuple[ray.ObjectRef, ray.ObjectRef, ray.ObjectRef]],
         prot_vec=None,
-        metric: str = 'protein_spearman'):
+        metric: str = 'protein_spearman',
+        batch_bytes: int | None = None,
+        gpu_column_select: bool = True):
     """Impact of every feature on the held-out samples: how much better the predictions get without its SHAP contribution.
 
     metric 'protein_spearman': change of the Spearman correlation within each protein, averaged over the proteins
@@ -259,13 +281,11 @@ def ext_shap_analysis(
     for X_ref, y_ref, _ in data_refs:
 
         X: numpy.ndarray = ray.get(X_ref)
-        X = X[:, feat_id_vec]
-
-        dmatrix: xgb.DMatrix = xgb.DMatrix(X, feature_names=feat_names, feature_types=cat_vec, enable_categorical=True)
-
-        # The last column is the bias
-        contributions.append(booster.predict(dmatrix, pred_contribs=True)[:, :len(feature_names)])
-        preds.append(booster.predict(dmatrix))
+        for dmatrix in chunk_dmatrices(X, feat_names, cat_vec, feat_id_vec, batch_bytes, gpu_column_select):
+            # The last column is the bias
+            contributions.append(booster.predict(dmatrix, pred_contribs=True)[:, :len(feature_names)])
+            preds.append(booster.predict(dmatrix))
+            del dmatrix
         targets.append(numpy.asarray(ray.get(y_ref), dtype=numpy.float64))
 
     contributions = numpy.concatenate(contributions, axis=0)
@@ -284,7 +304,9 @@ def ext_shap_analysis(
 
 def predict_from_refs(
         booster: xgb.Booster,
-        data_refs: list[tuple[ray.ObjectRef, ray.ObjectRef, ray.ObjectRef]]) -> tuple[numpy.ndarray, numpy.ndarray]:
+        data_refs: list[tuple[ray.ObjectRef, ray.ObjectRef, ray.ObjectRef]],
+        batch_bytes: int | None = None,
+        gpu_column_select: bool = True) -> tuple[numpy.ndarray, numpy.ndarray]:
     """Predictions and labels for the stored chunks in data_refs, in their order.
 
     A plain DMatrix per chunk instead of an ExtMemQuantileDMatrix over all of them: predicting
@@ -298,10 +320,10 @@ def predict_from_refs(
         X: numpy.ndarray = ray.get(X_ref)
         if X.shape[0] == 0:
             continue
-        dmatrix = xgb.DMatrix(X[:, feat_id_vec], feature_names=feat_names, feature_types=cat_vec, enable_categorical=True)
-        preds.append(booster.predict(dmatrix))
+        for dmatrix in chunk_dmatrices(X, feat_names, cat_vec, feat_id_vec, batch_bytes, gpu_column_select):
+            preds.append(booster.predict(dmatrix))
+            del dmatrix
         labels.append(numpy.asarray(ray.get(y_ref)))
-        del dmatrix
 
     return numpy.concatenate(preds), numpy.concatenate(labels)
 
@@ -694,6 +716,7 @@ def xgb_train_wrapper(
             xgb_params.update(gpu_tree_params(config, dtrain, max_bin, xgb_params['max_depth']))
             xgb_params.update(params_override)
             grow_policy['used'] = xgb_params.get('grow_policy', 'depthwise')
+            grow_policy['cached_nodes'] = xgb_params['max_cached_hist_node']
             return xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees), early_stopping_rounds= config.early_stopping, evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
         else:
             es = xgb.callback.EarlyStopping(
@@ -733,27 +756,35 @@ def xgb_train_wrapper(
             xgb_params.update(gpu_tree_params(config, dtrain, max_bin, xgb_params['max_depth']))
             xgb_params.update(params_override)
             grow_policy['used'] = xgb_params.get('grow_policy', 'depthwise')
+            grow_policy['cached_nodes'] = xgb_params['max_cached_hist_node']
             return xgb.train(xgb_params, dtrain, num_boost_round=int(config.num_of_trees_1), early_stopping_rounds=int(config.early_stopping_1), evals=evals, maximize=False, custom_metric=rho_eval_for_xgboost_cb, callbacks=es_list)
 
     with mem_context:
-        oom_message = None
-        try:
-            booster = train({})
-        except xgb.core.XGBoostError as err:
-            # The histogram estimate of gpu_tree_params is a model, the pool can still run out (fragmentation,
-            # the sampled page of gradient based sampling). Lossguide grows one node at a time and needs far less.
-            if 'out_of_memory' not in str(err) or grow_policy.get('used') == 'lossguide':
-                raise
-            oom_message = str(err).splitlines()[0][:300]
-        # Retried outside the except block: its traceback still references the failed booster and its GPU memory
-        if oom_message is not None:
+        # The histogram estimate of gpu_tree_params is a model, the pool can still run out (fragmentation,
+        # the sampled page of gradient based sampling). Lossguide grows one node at a time and needs far less,
+        # a smaller histogram cache less again.
+        override = {}
+        while True:
+            oom_message = None
+            try:
+                booster = train(override)
+                break
+            except xgb.core.XGBoostError as err:
+                if 'out_of_memory' not in str(err) or override.get('max_cached_hist_node') is not None:
+                    raise
+                oom_message = str(err).splitlines()[0][:300]
+            # Retried outside the except block: its traceback still references the failed booster and its GPU memory
+            if grow_policy.get('used') != 'lossguide':
+                override = {'grow_policy': 'lossguide', 'max_leaves': 0}
+            else:
+                override = {'grow_policy': 'lossguide', 'max_leaves': 0,
+                            'max_cached_hist_node': max(8, grow_policy['cached_nodes'] // 4)}
             depth = config.tree_depth_1 if second_round else config.tree_depth
             config.logger.warning(
-                f'GPU out of memory in xgb.train ({second_round=}, max_depth={depth}), retrying with grow_policy=lossguide: '
-                f'{oom_message}'
+                f'GPU out of memory in xgb.train ({second_round=}, max_depth={depth}, grow_policy={grow_policy.get("used")}, '
+                f'max_cached_hist_node={grow_policy.get("cached_nodes")}), retrying with {override}: {oom_message}'
             )
             gc.collect()
-            booster = train({'grow_policy': 'lossguide', 'max_leaves': 0})
 
     return booster
 
@@ -790,9 +821,9 @@ def gpu_tree_params(config: util.Config, dtrain, max_bin: int, max_depth) -> dic
     lossguide growth expands one node at a time instead. Without a leaf limit (max_leaves=0) and with the same
     max_depth, the splits follow the same gain and depth rules.
     """
-    params = {'max_cached_hist_node': histogram_cache_nodes(config, dtrain, max_bin)}
+    bytes_per_node = histogram_bytes_per_node(config, dtrain, max_bin)
+    params = {'max_cached_hist_node': histogram_cache_nodes(config, bytes_per_node)}
     pool_bytes = gpu_pool_size(config)
-    bytes_per_node = max(1, dtrain.num_col()) * max_bin * HIST_BYTES_PER_BIN
     depth = max(1, int(max_depth))
     node_batch = gpu_node_batch()
     level_batch = 2 * min(node_batch, 2 ** min(depth - 1, 30)) * bytes_per_node
@@ -810,10 +841,39 @@ def gpu_tree_params(config: util.Config, dtrain, max_bin: int, max_depth) -> dic
     return params
 
 
-def histogram_cache_nodes(config: util.Config, dtrain, max_bin: int) -> int:
+def histogram_bytes_per_node(config: util.Config, dtrain, max_bin: int) -> int:
+    """Bytes of one node histogram of the GPU hist method: one gradient pair per bin of the training cuts.
+
+    xgboost sizes it by the total bins of the cuts (cuts.TotalBins() in updater_gpu_hist.cu), not by features x
+    max_bin: a categorical feature has one bin per category, whatever max_bin is. On the 2026-11-02 run that made
+    the histograms about 2.7x bigger than features x max_bin. Read from the cuts once per DMatrix, features x max_bin
+    is the fallback when they are not available.
+    """
+    estimate = max(1, dtrain.num_col()) * max_bin
+    n_bins = getattr(dtrain, 'structguy_total_bins', None)
+    if n_bins is None:
+        try:
+            indptr, _ = dtrain.get_quantile_cut()
+            n_bins = max(1, int(indptr[-1]))
+        except Exception as err:
+            config.logger.warning(f'Could not read the bins of the training cuts, assuming {dtrain.num_col()} features x {max_bin} bins: {err}')
+            n_bins = estimate
+        try:
+            dtrain.structguy_total_bins = n_bins
+        except AttributeError:
+            pass
+        if config.verbosity >= 3:
+            config.logger.info(
+                f'Training cuts: {n_bins} bins for {dtrain.num_col()} features ({n_bins / max(1, dtrain.num_col()):.1f} per feature), '
+                f'{n_bins / estimate:.2f}x the {dtrain.num_col()} features x {max_bin} bins'
+            )
+    return n_bins * HIST_BYTES_PER_BIN
+
+
+def histogram_cache_nodes(config: util.Config, bytes_per_node: int) -> int:
     """Value of xgboost's max_cached_hist_node that keeps the histogram allocations within a share of the GPU pool.
 
-    The GPU hist method caches one histogram (features x bins gradient pairs) per tree node. Its buffer grows by
+    The GPU hist method caches one histogram (bins gradient pairs) per tree node. Its buffer grows by
     doubling, and the cap is only checked before growing: a cache just below the cap still doubles. So the largest
     single allocation is up to twice the cap (and the old buffer lives on during the copy). hist_cache_vram_share is
     that largest allocation as share of the pool, the cap is half of it.
@@ -821,11 +881,10 @@ def histogram_cache_nodes(config: util.Config, dtrain, max_bin: int) -> int:
     pool_bytes = gpu_pool_size(config)
     largest_allocation = pool_bytes * getattr(config, 'hist_cache_vram_share', 0.1)
     cache_cap = largest_allocation / 2
-    bytes_per_node = max(1, dtrain.num_col()) * max_bin * HIST_BYTES_PER_BIN
     n_nodes = max(8, int(cache_cap // bytes_per_node))
     if config.verbosity >= 3:
         config.logger.info(
-            f'max_cached_hist_node={n_nodes}: {dtrain.num_col()} features x {max_bin} bins = '
+            f'max_cached_hist_node={n_nodes}: '
             f'{bytes_per_node / 2**20:.1f} MiB per node histogram, cache cap {n_nodes * bytes_per_node / 2**30:.2f} GiB, '
             f'largest histogram allocation about {2 * n_nodes * bytes_per_node / 2**30:.2f} GiB of a {pool_bytes / 2**30:.2f} GiB pool'
         )
@@ -1114,7 +1173,8 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
     
     impact_metric = getattr(config, 'feat_impact_metric', 'protein_spearman')
     acc_feat_impacts, n_impact_proteins, shap_times = ext_shap_analysis(
-        slice_slice.feature_names, booster, test_data_refs, prot_vec=test_prot_vec, metric=impact_metric)
+        slice_slice.feature_names, booster, test_data_refs, prot_vec=test_prot_vec, metric=impact_metric,
+        batch_bytes=extmem_batch_bytes(config), gpu_column_select=getattr(config, 'gpu_column_select', True))
     if config.verbosity >= 3 and acc_feat_impacts:
         def format_impacts(entries):
             return ', '.join(f'{name}: {impact:+.4g} (z {z:+.2f})' for name, impact, z in entries)
@@ -1249,7 +1309,7 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
     feat_pos_dict, features = ray.get(raw_feature_matrix_store_id)
     if score_train:
         train_refs, x_prot_vec = cv_slice.prepare_ext_mem_qdmatrix(config, feat_pos_dict, features)
-        x_pred, x_true = predict_from_refs(booster_2, train_refs)
+        x_pred, x_true = predict_from_refs(booster_2, train_refs, extmem_batch_bytes(config), getattr(config, 'gpu_column_select', True))
         x_prot_vec = numpy.asarray(x_prot_vec)
 
         if config.verbosity >= 5:
@@ -1263,7 +1323,7 @@ def double_booster(packed_slice_slice, proc_id, sub_share, config, filtered_feat
         x_prot_vec = None
 
     test_refs, y_prot_vec = cv_slice.prepare_test_ext_mem_qdmatrix(config, feat_pos_dict, features)
-    y_pred, y_true = predict_from_refs(booster_2, test_refs)
+    y_pred, y_true = predict_from_refs(booster_2, test_refs, extmem_batch_bytes(config), getattr(config, 'gpu_column_select', True))
     y_prot_vec = numpy.asarray(y_prot_vec)
     del feat_pos_dict
     del features
@@ -1510,18 +1570,22 @@ def trainRegressionForest(
                 if config.verbosity >= 4:
                     config.logger.info(f'Could not find a placement group {proc_id=}: {e=}')
 
-            # Ray sets OMP_NUM_THREADS to num_cpus, which bounds the host side work of xgboost
-            # (building the DMatrices) in these tasks. With num_cpus=1 it ran single threaded while
-            # most cores were idle. Half of the cores are shared out over the GPUs, the rest stays
-            # for the wrappers and HPO workers, which request CPUs themselves.
+            # num_cpus bounds the host side work of xgboost (building the DMatrices) in these tasks.
+            # Half of the cores are shared out over the GPUs, the rest stays for the wrappers and
+            # HPO workers, which request CPUs themselves.
             gpu_task_cpus = getattr(config, 'gpu_task_cpus', None)
             if not gpu_task_cpus:
                 gpu_task_cpus = max(1, int(ray.cluster_resources().get('CPU', 1)) // (2 * max(1, config.multi_gpu) * models_per_gpu))
+            # Ray only sets OMP_NUM_THREADS to num_cpus when it is unset, and HTCondor sets it to the
+            # whole slot (64): 8 tasks with 64 OpenMP threads each on 48 CPUs. Every task gets a
+            # fresh worker anyway (max_calls=1), so a runtime env of its own costs nothing.
+            omp_env = {'env_vars': {'OMP_NUM_THREADS': str(gpu_task_cpus)}}
 
             if grouped:
                 remote_function = double_booster_remote.options(
                     num_cpus=gpu_task_cpus,
                     num_gpus=sub_share,
+                    runtime_env=omp_env,
                     scheduling_strategy=ray.util.scheduling_strategies.PlacementGroupSchedulingStrategy(
                         placement_group=pg , placement_group_capture_child_tasks=True
                         )
@@ -1531,7 +1595,7 @@ def trainRegressionForest(
                     config.logger.info(f'double booster remote configured: {proc_id=}')
                 
             else:
-                remote_function = double_booster_remote.options(num_cpus=gpu_task_cpus, num_gpus=sub_share)
+                remote_function = double_booster_remote.options(num_cpus=gpu_task_cpus, num_gpus=sub_share, runtime_env=omp_env)
 
             if config_ref_container is None:
                 config_ref_container = [ray.put(config)]
@@ -1540,8 +1604,13 @@ def trainRegressionForest(
             # slice_by_slice keeps as many sub-slices in flight as this CV fold has model slots:
             # its share of the GPUs (sub_gpu_share) times the models per GPU. One at a time left
             # half of the cards idle with 8 GPUs and 4 folds.
+            # With queued HPO candidates every sub-slice is submitted at once instead: the GPU
+            # resources already limit how many train, and ray grants tasks of the same shape in the
+            # order they were submitted. So this candidate's sub-slices run before those of the
+            # candidate queued behind it, which only fills the GPUs this one leaves idle. Held back
+            # here, the last sub-slices would queue behind the next candidate's.
             n_sub_slices = len(cv_slice.slice_slices)
-            if config.slice_by_slice:
+            if config.slice_by_slice and not getattr(config, 'hpo_queued_candidates', 0):
                 max_in_flight = min(n_sub_slices, max(1, math.ceil(sub_gpu_share * models_per_gpu)))
             else:
                 max_in_flight = n_sub_slices
@@ -1783,6 +1852,32 @@ def calc_scores_obj(target_vector, prediction_vector, prot_id_vec, weight_vector
     )
     return scores_obj
 
+def gather_fold_results(config: util.Config, result_ids: list, cv_counters: list) -> list:
+    """Results of the remote CV folds, in the order they finish. Once a fold fails, the others are cancelled.
+
+    A candidate with a failed fold is judged as failed as a whole (failed_folds > 0 in the HPO), so the remaining
+    folds would only keep GPUs busy, for hours on big datasets. Every cancelled fold is returned as a failed one.
+    """
+    counter_of = dict(zip(result_ids, cv_counters))
+    pending = list(result_ids)
+    results = []
+    while pending:
+        ready, pending = ray.wait(pending, num_returns=1)
+        res = ray.get(ready[0])
+        results.append(res)
+        scores_obj, cv_counter = res[0], res[1]
+        if getattr(scores_obj, 'failed_folds', 0) > 0 and pending:
+            config.logger.error(f'CV fold {cv_counter} failed, the {len(pending)} remaining fold(s) are cancelled and count as failed')
+            for ref in pending:
+                try:
+                    ray.cancel(ref, force=True, recursive=True)
+                except (TypeError, ValueError, ray.exceptions.RayError) as err:
+                    config.logger.warning(f'Could not cancel CV fold {counter_of[ref]}: {err}')
+                results.append((util.Scores(zero=True), counter_of[ref], None))
+            pending = []
+    return results
+
+
 def trainForest(
     config: util.Config,
     cross_val_object: CrossValidationSlice | DataSAIL_cv | dict[int, ray.ObjectRef],
@@ -2012,7 +2107,7 @@ def trainForest(
                     
 
             if remote:
-                results = ray.get(slice_result_ids)
+                results = gather_fold_results(config, slice_result_ids, list(cv_counters))
             else:
                 results = slice_result_ids
 

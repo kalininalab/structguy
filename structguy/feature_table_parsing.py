@@ -10,6 +10,8 @@ from operator import itemgetter
 import numpy as np
 import ray
 
+from structman.lib.sdsc.consts import residues as residue_consts
+
 from structguy import consts
 from structguy.base_classes import possible_na_values
 from structguy.consts import feature_categories
@@ -22,6 +24,13 @@ SUB_BLOCK_ROWS = 128
 CHUNKS_PER_PROCESS = 4
 N_TYPE_SAMPLE_LINES = 2000
 MAX_MESSAGES = 10
+STANDARD_AAS = 'ACDEFGHIKLMNPQRSTVWY'
+# The mutation specific columns of StructMAn's feature table, recomputed for every substitution of a position-only table
+SUBSTITUTION_FEATURES = (
+    'KD mean', 'Volume mean', 'Chemical distance', 'Blosum62',
+    'Aliphatic change', 'Hydrophobic change', 'Aromatic change', 'Positive charged change', 'Polar change',
+    'Negative charge change', 'Charged change', 'Small change', 'Tiny change', 'Total change',
+)
 
 
 def tuple_getter(cols):
@@ -135,6 +144,122 @@ def parse_line_meta(config, words, primary_protein_id_col, amount_of_struct_col,
     return sample_id, target_value, amount_of_structures, tags
 
 
+def substitution_values(wt_aa: str, mut_aa: str) -> dict[str, object]:
+    """The values of SUBSTITUTION_FEATURES as StructMAn writes them (structman lib/output/classification.py).
+
+    Kept identical to StructMAn, including its 'Charged change' (new AA tested against the negative AAs),
+    so the substitutions get the values the models saw for real mutations.
+    """
+    try:
+        kd_mean = abs(residue_consts.HYDROPATHY[wt_aa] - residue_consts.HYDROPATHY[mut_aa])
+    except KeyError:
+        kd_mean = 0
+    try:
+        d_vol = abs(residue_consts.VOLUME[wt_aa] - residue_consts.VOLUME[mut_aa])
+    except KeyError:
+        d_vol = 0
+    try:
+        chemical_distance = residue_consts.CHEM_DIST_MATRIX[wt_aa][mut_aa]
+    except KeyError:
+        chemical_distance = None
+    blosum_value = residue_consts.BLOSUM62.get((wt_aa, mut_aa), residue_consts.BLOSUM62.get((mut_aa, wt_aa), 0.0))
+
+    def change(aa_map, mut_map=None):
+        return int((wt_aa in aa_map) != (mut_aa in (aa_map if mut_map is None else mut_map)))
+
+    changes = {
+        'Aliphatic change': change(residue_consts.AA_MAP_ALIPHATIC),
+        'Hydrophobic change': change(residue_consts.AA_MAP_HYDROPHOBIC),
+        'Aromatic change': change(residue_consts.AA_MAP_AROMATIC),
+        'Positive charged change': change(residue_consts.AA_MAP_POSITIVE),
+        'Polar change': change(residue_consts.AA_MAP_POLAR),
+        'Negative charge change': change(residue_consts.AA_MAP_NEGATIVE),
+        'Charged change': change(residue_consts.AA_MAP_CHARGED, residue_consts.AA_MAP_NEGATIVE),
+        'Small change': change(residue_consts.AA_MAP_SMALL),
+        'Tiny change': change(residue_consts.AA_MAP_TINY),
+    }
+    return {
+        'KD mean': kd_mean,
+        'Volume mean': d_vol,
+        'Chemical distance': chemical_distance,
+        'Blosum62': blosum_value,
+        **changes,
+        'Total change': sum(changes.values()),
+    }
+
+
+def build_expansion(header_words, wt_col, mut_col) -> dict:
+    """The cells to overwrite when a position row of a position-only table becomes its 19 substitutions."""
+    cols = [mut_col]
+    names = [None]
+    if 'AA change' in header_words:
+        cols.append(header_words.index('AA change'))
+        names.append('AA change')
+    for feat_name in SUBSTITUTION_FEATURES:
+        if feat_name in header_words:
+            cols.append(header_words.index(feat_name))
+            names.append(feat_name)
+
+    values = {}
+    for wt_aa in STANDARD_AAS:
+        for mut_aa in STANDARD_AAS:
+            if mut_aa == wt_aa:
+                continue
+            feat_values = substitution_values(wt_aa, mut_aa)
+            feat_values['AA change'] = f'{wt_aa}{mut_aa}'
+            values[(wt_aa, mut_aa)] = [mut_aa] + [PAD_STRING if feat_values[name] is None else str(feat_values[name]) for name in names[1:]]
+    return {'wt_col': wt_col, 'mut_col': mut_col, 'cols': cols, 'values': values}
+
+
+def expand_position_row(words, expansion, messages) -> list[list[str]]:
+    """The 19 substitution rows of a position row (WT AA == mutant AA), or [words] for any other row."""
+    if expansion is None:
+        return [words]
+    wt_aa = words[expansion['wt_col']]
+    if wt_aa != words[expansion['mut_col']]:
+        return [words]
+    if wt_aa not in STANDARD_AAS:
+        if len(messages) < MAX_MESSAGES:
+            messages.append(f'Position row with non-standard wildtype AA {wt_aa} is not expanded: {words[:expansion["mut_col"] + 1]}')
+        return [words]
+    cols = expansion['cols']
+    rows = []
+    for mut_aa in STANDARD_AAS:
+        if mut_aa == wt_aa:
+            continue
+        row = words.copy()
+        for col, value in zip(cols, expansion['values'][(wt_aa, mut_aa)]):
+            row[col] = value
+        rows.append(row)
+    return rows
+
+
+def chunk_has_mutations(file_path, start, end, wt_col, mut_col) -> bool:
+    """True at the first line of the byte range [start, end) whose wildtype AA differs from its mutant AA."""
+    with open(file_path, 'rb') as f:
+        f.seek(start)
+        while f.tell() < end:
+            line = decode_lines(f.readline())[0]
+            if line == '':
+                continue
+            words = line.split('\t', mut_col + 1)
+            if len(words) > mut_col and words[wt_col] != words[mut_col]:
+                return True
+    return False
+
+
+@ray.remote
+def remote_chunk_has_mutations(file_path, start, end, wt_col, mut_col):
+    return chunk_has_mutations(file_path, start, end, wt_col, mut_col)
+
+
+def table_has_mutations(file_path, chunks, wt_col, mut_col) -> bool:
+    """False for a position-only StructMAn table, where every line has the wildtype AA as mutant AA."""
+    if not ray.is_initialized():
+        return any(chunk_has_mutations(file_path, a, b, wt_col, mut_col) for a, b in chunks)
+    return any(ray.get([remote_chunk_has_mutations.remote(file_path, a, b, wt_col, mut_col) for a, b in chunks]))
+
+
 def cells_to_floats(cells: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Converts a 2D object array of strings: returns the floats (NaN for missing), the NA mask and the per column count of unparsable strings.
 
@@ -173,12 +298,12 @@ def cells_to_floats(cells: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarr
     return values, na, n_fail
 
 
-def parse_feature_chunk(config, file_path, start, end, meta_args, num_cols, str_cols, special_cols, width, filter_none_tv, first_feature_col):
+def parse_feature_chunk(config, file_path, start, end, meta_args, num_cols, str_cols, special_cols, width, filter_none_tv, first_feature_col, expansion=None):
     """Parses the lines in the byte range [start, end) of the feature table.
 
     num_cols / str_cols are the table columns returned as floats / strings. special_cols maps positions in num_cols
     to their Feature, for values that need Feature.value_from_string (Blosum62). Columns from first_feature_col on
-    are feature columns only.
+    are feature columns only. With expansion (build_expansion), every position row becomes its 19 substitutions.
     """
     with open(file_path, 'rb') as f:
         f.seek(start)
@@ -187,7 +312,7 @@ def parse_feature_chunk(config, file_path, start, end, meta_args, num_cols, str_
     get_num = tuple_getter(num_cols)
     get_str = tuple_getter(str_cols)
 
-    n_max = len(lines)
+    n_max = len(lines) if expansion is None else len(lines) * (len(STANDARD_AAS) - 1)
     num_block = np.empty((n_max, len(num_cols)), dtype=np.float64)
     str_block = np.empty((n_max, len(str_cols)), dtype=object)
     non_na = np.zeros(len(num_cols), dtype=np.int64)
@@ -223,15 +348,16 @@ def parse_feature_chunk(config, file_path, start, end, meta_args, num_cols, str_
         words = split_feature_line(line, first_feature_col)
         if len(words) < width:
             words += [PAD_STRING] * (width - len(words))
-        sample_meta = parse_line_meta(config, words, *meta_args, messages)
-        if sample_meta is None:
-            continue
-        if filter_none_tv and sample_meta[1] is None:
-            continue
-        meta.append(sample_meta)
-        pending.append(words)
-        if len(pending) >= SUB_BLOCK_ROWS:
-            flush()
+        for row in expand_position_row(words, expansion, messages):
+            sample_meta = parse_line_meta(config, row, *meta_args, messages)
+            if sample_meta is None:
+                continue
+            if filter_none_tv and sample_meta[1] is None:
+                continue
+            meta.append(sample_meta)
+            pending.append(row)
+            if len(pending) >= SUB_BLOCK_ROWS:
+                flush()
     if len(pending) > 0:
         flush()
 
@@ -249,16 +375,16 @@ def parse_feature_chunk(config, file_path, start, end, meta_args, num_cols, str_
 
 @ray.remote
 def remote_parse_feature_chunk(store, file_path, start, end):
-    config, meta_args, num_cols, str_cols, special_cols, (width, first_feature_col), filter_none_tv = store
-    return parse_feature_chunk(config, file_path, start, end, meta_args, num_cols, str_cols, special_cols, width, filter_none_tv, first_feature_col)
+    config, meta_args, num_cols, str_cols, special_cols, (width, first_feature_col), filter_none_tv, expansion = store
+    return parse_feature_chunk(config, file_path, start, end, meta_args, num_cols, str_cols, special_cols, width, filter_none_tv, first_feature_col, expansion)
 
 
-def run_chunks(config, file_path, chunks, meta_args, num_cols, str_cols, special_cols, line_layout, filter_none_tv) -> list[dict]:
+def run_chunks(config, file_path, chunks, meta_args, num_cols, str_cols, special_cols, line_layout, filter_none_tv, expansion=None) -> list[dict]:
     """Parses all chunks, as ray tasks if ray is running; line_layout is (width, first_feature_col)."""
     if not ray.is_initialized():
         width, first_feature_col = line_layout
-        return [parse_feature_chunk(config, file_path, a, b, meta_args, num_cols, str_cols, special_cols, width, filter_none_tv, first_feature_col) for a, b in chunks]
-    store = ray.put((config, meta_args, num_cols, str_cols, special_cols, line_layout, filter_none_tv))
+        return [parse_feature_chunk(config, file_path, a, b, meta_args, num_cols, str_cols, special_cols, width, filter_none_tv, first_feature_col, expansion) for a, b in chunks]
+    store = ray.put((config, meta_args, num_cols, str_cols, special_cols, line_layout, filter_none_tv, expansion))
     return ray.get([remote_parse_feature_chunk.remote(store, file_path, a, b) for a, b in chunks])
 
 
@@ -403,6 +529,16 @@ def parse_feature_table_to_matrix(
         # The NA replacement of split_feature_line must not touch the non-feature columns (ids, tags, ...)
         line_layout = (width, max(non_feature_cols | set(meta_cols)) + 1)
 
+    # A StructMAn table of positions only (every mutant AA is the wildtype AA): each position becomes its 19 substitutions
+    expansion = None
+    if len(aac_col_s) == 3:
+        wt_col, mut_col = aac_col_s[0], aac_col_s[2]
+        with log_timing(config, 'parse_feature_table: checking for a position-only table'):
+            if not table_has_mutations(file_path, chunks, wt_col, mut_col):
+                expansion = build_expansion(header_words, wt_col, mut_col)
+        if expansion is not None and config.verbosity >= 1:
+            config.logger.info(f'{file_path} lists positions without mutations: expanding each position to its 19 substitutions')
+
     with log_timing(config, 'parse_feature_table: guessing the feature types from a sample of lines'):
         sample_lines = read_sample_lines(file_path, chunks, N_TYPE_SAMPLE_LINES)
         unknown_plan = [(feat_name, col) for feat_name, col in plan if samples.features[feat_name].f_type == 'unknown']
@@ -417,7 +553,7 @@ def parse_feature_table_to_matrix(
     meta_args = (primary_protein_id_col, amount_of_struct_col, effect_col, aac_col_s, tags_col)
 
     with log_timing(config, f'parse_feature_table: parsing {len(chunks)} chunks ({len(num_plan)} numeric, {len(str_plan)} string columns)'):
-        results = run_chunks(config, file_path, chunks, meta_args, [col for _, col in num_plan], [col for _, col in str_plan], special_cols, line_layout, filter_none_tv)
+        results = run_chunks(config, file_path, chunks, meta_args, [col for _, col in num_plan], [col for _, col in str_plan], special_cols, line_layout, filter_none_tv, expansion)
 
     if num_plan:
         non_na = np.sum([r['non_na'] for r in results], axis=0)
@@ -433,7 +569,7 @@ def parse_feature_table_to_matrix(
     reparsed_results = None
     if reparse_plan:
         with log_timing(config, f'parse_feature_table: parsing {len(reparse_plan)} categorical columns again'):
-            reparsed_results = run_chunks(config, file_path, chunks, meta_args, [], [col for _, col in reparse_plan], [], line_layout, filter_none_tv)
+            reparsed_results = run_chunks(config, file_path, chunks, meta_args, [], [col for _, col in reparse_plan], [], line_layout, filter_none_tv, expansion)
 
     for r in results:
         for message in r['messages']:
