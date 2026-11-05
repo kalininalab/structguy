@@ -5,6 +5,7 @@ from structguy import sequence_feature_generation as seqfg
 from structguy.util import Config, log_timing
 from structguy.feature_table_parsing import parse_feature_table_to_matrix
 from structguy.feature_interactions import combination_names_from_config, parse_combination_name
+from structguy.measurements import DatasetMeasurements
 
 
 def expand_structural_feature_table(config):
@@ -64,8 +65,7 @@ def parse_structural_features(
         amount_of_struct_col=amount_of_struct_col,
         effect_col=effect_col
     )
-    # The sequence features get added value-wise afterwards (seqfg.getSequenceFeatures)
-    samples.matrix_to_dict()
+    # The sequence features get added to the feature matrix afterwards (seqfg.getSequenceFeatures)
 
 
 def parse_feature_table(
@@ -158,7 +158,18 @@ def createTrainingSet(
     no_evo_structural_feature_filter = config.no_evo
 
     if (config.path_to_processed_features_file is None and config.path_to_imputed_features_file is None and other_features_path is None) or config.overwrite:
+        # StructMAn writes the project file anew, dropping the entries of earlier StructGuy steps
+        if config.path_to_features_file is None:
+            raise ValueError(f'No path_to_features_file in {config.path_to_project_file}: run "structguy generate_features" on this project file first')
         parse_feature_table(config.path_to_features_file, samples, config, filter_none_tv, ablation_structural_feature_filter=ablation_structural_feature_filter, no_evo_structural_feature_filter=no_evo_structural_feature_filter)
+
+        # The feature table has a row per SAV of a protein, with the measurements of all its input entries mixed:
+        # a sample per function type, each with the mean of its measurements. Before the target transformation
+        # and the outlier detection, which work on these values.
+        if config.regression:
+            dataset_measurements = DatasetMeasurements.load(config)
+            if dataset_measurements is not None:
+                dataset_measurements.apply_to_samples(samples, config)
 
         for additonal_infile in config.add_more_sample_files:
             parse_feature_table(additonal_infile, samples, config, filter_none_tv, ablation_structural_feature_filter=ablation_structural_feature_filter, no_evo_structural_feature_filter=no_evo_structural_feature_filter)

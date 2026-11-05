@@ -164,6 +164,10 @@ class Config:
         self.path_to_features_file = None
         self.path_to_processed_features_file = None
         self.path_to_imputed_features_file = None
+        # variant_features: sequences (one per line) of substitution variants of a protein in path_to_features_file,
+        # and optionally that protein's id (otherwise the most identical wildtype sequence)
+        self.path_to_variants_file = None
+        self.variant_protein = None
         self.path_structural_feature_table = None
         # StructMAn's <session>.expanded_features_<N>.tsv (--local_features N): the rows of the
         # features table plus the features of each position's interacting positions. When

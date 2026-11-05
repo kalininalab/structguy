@@ -8,7 +8,7 @@ from datetime import datetime
 
 import numpy as np
 
-from structguy import featureGenerator, util, learn, featureAnalysis, baseline
+from structguy import featureGenerator, util, learn, featureAnalysis, baseline, variant_features
 from structguy.sequence_feature_generation import prepare_gemme
 from ray.train import ScalingConfig
 
@@ -21,6 +21,7 @@ structguy_main.py build_model [-i -o --verbosity]\n
 structguy_main.py build_lasso [-i -o --verbosity]\n
 structguy_main.py predict_lasso [-i -m --verbosity]\n
 structguy_main.py predict [-i -m --verbosity --sd (SHAP based STD of the predictions, slow)]\n
+structguy_main.py variant_features -i --variants=<file> [-m (only the columns of the model) --variant_protein=<id>]\n
 MORE TODO\n
 """
 
@@ -63,6 +64,8 @@ def parse_arguments(argument_start = 2, manual_args = None):
                 'cuda_async_pool',
                 'random_start', # Start the HPO with random hyperparameter rounds instead of the given/default ones
                 'log_interactions', # SHAP interaction values of the first boosters, ranked in feature_interactions_ranked.tsv
+                'variants=', # variant_features: file with one sequence per line, substitution variants of a protein
+                'variant_protein=', # variant_features: id of that protein, by default the one with the most identical sequence
             ]
             opts, args = getopt.getopt(argv, "i:n:m:d", long_paras)
 
@@ -117,6 +120,8 @@ def parse_arguments(argument_start = 2, manual_args = None):
     cuda_async_pool = False
     random_start = False
     log_interactions = False
+    path_to_variants_file = None
+    variant_protein = None
 
     for opt, arg in opts:
         if opt == '-i':
@@ -241,6 +246,15 @@ def parse_arguments(argument_start = 2, manual_args = None):
         if opt == '--log_interactions':
             log_interactions = True
 
+        if opt == '--variants':
+            path_to_variants_file = arg
+            if not os.path.isfile(path_to_variants_file):
+                print(f'Error: {path_to_variants_file} is not a valid file path')
+                return
+
+        if opt == '--variant_protein':
+            variant_protein = arg
+
     if path_to_model is not None:
         if path_to_model.count('/') > 0:
             model_name = path_to_model.rsplit("/",1)[1].rsplit('.',1)[0]
@@ -268,6 +282,10 @@ def parse_arguments(argument_start = 2, manual_args = None):
     config.ablation = ablation
     config.no_evo = no_evo
     config.path_to_model = path_to_model
+    if path_to_variants_file is not None:
+        config.path_to_variants_file = path_to_variants_file
+    if variant_protein is not None:
+        config.variant_protein = variant_protein
     config.model_name = model_name
     config.overwrite = overwrite
     config.random_split = random_split
@@ -370,7 +388,19 @@ def feature_generator_main():
 
     if (config.path_structural_feature_table is not None or config.path_expanded_feature_table is not None
             or config.overwrite):
+        logging_level = 0
+        if config.verbosity >= 4:
+            logging_level = 20
+        # Before the parsing: without a running cluster the feature table gets parsed serially
+        ray_utils.ray_init(config, overwrite_logging_level = logging_level)
         featureGenerator.expand_structural_feature_table(config)
+
+def variant_features_main():
+    config, _ = parse_arguments()
+    if config.path_to_variants_file is None:
+        print('Error: variant_features needs the variant sequences: --variants=<file>')
+        return
+    variant_features.write_variant_table(config, config.path_to_model)
 
 #@profile
 def build_model_main(manual_args = None):
@@ -488,7 +518,8 @@ def main():
         'violins',
         'prep_gemme',
         'bench_msas',
-        'check_data'
+        'check_data',
+        'variant_features'
         ])
 
     if len(sys.argv) < 2:
@@ -530,6 +561,9 @@ def main():
 
     if key_word == 'check_data':
         check_data()
+
+    if key_word == 'variant_features':
+        variant_features_main()
 
     print("--- %s seconds ---" % (time.time() - start_time))
 

@@ -8,6 +8,9 @@ import time
 import pickle
 import copy
 import contextlib
+import subprocess
+import tempfile
+from collections import deque
 import zstd
 
 
@@ -15,7 +18,7 @@ from scipy import stats
 
 from datasail.sail import datasail
 
-from structguy.sequence_util import parseFromFasta
+from structguy.sequence_util import parseFromFasta, parseFasta
 from structguy.base_classes import Feature, possible_na_values
 from structguy.support_classes import CrossValidationSlice
 from structguy.util import get_gpu_memory, Config
@@ -23,6 +26,7 @@ from structguy.prefiltering import detectBiasedFeaturesByMeanCorrelation
 from structguy.class_utils import get_feat_matrix_from_ids, get_feat_matrix, get_raw_feat_matrix_from_sample_ids
 from structguy.feature_correlation import compute_feature_correlations
 from structguy.feature_interactions import parse_combination_name, combine
+from structguy.measurements import base_protein_id
 
 from structman.base_utils.base_utils import pack, unpack, Slotted_obj
 
@@ -52,6 +56,50 @@ class Sample(Slotted_obj):
 
     def addTargetValue(self,value):
         self.targetValue = value
+
+
+def format_feature_rows(block: np.ndarray, metas: list[tuple], spec: tuple) -> tuple[str, dict[str, str]]:
+    """The lines of SampleSpace.write for a block of feature matrix rows (in the column order of the file).
+
+    metas holds (u_ac, aac, target value string, tags, amount of structures string) per row, spec is
+    (int_cols, {col: category_backmap} of the categorical columns, class_col). Returns the text of the
+    feature table and the texts of the per class tables.
+    """
+    int_cols, cat_backmaps, class_col = spec
+    # Python floats and ints, so str() formats them like the values of the old dict based writer
+    values = block.astype(object)
+    if int_cols:
+        sub = block[:, int_cols]
+        with np.errstate(invalid='ignore'):
+            integral = ~np.isnan(sub) & (sub == np.floor(sub))
+        int_values = values[:, int_cols]
+        int_values[integral] = np.where(integral, sub, 0).astype(np.int64).astype(object)[integral]
+        values[:, int_cols] = int_values
+    for j, backmap in cat_backmaps.items():
+        values[:, j] = ['None' if v != v else str(backmap[int(v)]) for v in block[:, j].tolist()]
+
+    lines = []
+    class_lines: dict[str, list[str]] = {}
+    for (u_ac, aac, target_value_str, tags, amount_str), row in zip(metas, values.tolist()):
+        feature_str = '\t'.join(map(str, row))
+        if 'nan' in feature_str:
+            # Missing values are written as None; twice, as adjacent cells share their tab
+            feature_str = f'\t{feature_str}\t'.replace('\tnan\t', '\tNone\t').replace('\tnan\t', '\tNone\t')[1:-1]
+        lines.append('\n%s\t%s\t%s\t%s\t%s\t%s' % (u_ac, aac, target_value_str, tags, amount_str, feature_str))
+
+        if class_col is None:
+            continue
+        class_name = row[class_col]
+        if class_name == 'None':
+            continue
+        class_lines.setdefault(class_name, []).append('\n%s\t%s\t%s\t%s' % (u_ac, aac, target_value_str, feature_str))
+    return ''.join(lines), {class_name: ''.join(c_lines) for class_name, c_lines in class_lines.items()}
+
+
+@ray.remote
+def remote_format_feature_rows(block, metas, spec):
+    return format_feature_rows(block, metas, spec)
+
 
 @ray.remote(max_calls = 1)
 def calc_gdm_submatrix(store,i):
@@ -99,12 +147,14 @@ def splitDataSet(config, sample_id_list: list[tuple[str, str]], specific_id=None
         if debug >= 1:
             config.logger.info(f'Train size: {train_size}, Test size: {test_size}')
     else:
-        # Protein-nested split
+        # Protein-nested split. The function type samples of a protein (measurements.function_type_protein_id) are
+        # the same protein: they always end up on the same side.
         test_proteins = set()
         test_set_sum = 0
         if specific_id is None:
             protein_sizes = {}
             for u_ac,aac in sample_id_list:
+                u_ac = base_protein_id(u_ac)
                 if u_ac not in protein_sizes:
                     protein_sizes[u_ac] = 1
                 else:
@@ -116,15 +166,17 @@ def splitDataSet(config, sample_id_list: list[tuple[str, str]], specific_id=None
                     test_set_sum += protein_sizes[random_protein]
 
         else:
-            test_proteins = specific_id
+            test_proteins = set(base_protein_id(prot_id) for prot_id in specific_id)
+        if skip_protein is not None:
+            skip_protein = base_protein_id(skip_protein)
 
         for (u_ac,aac) in sample_id_list:
-            if skip_protein is not None and u_ac == skip_protein:
+            if skip_protein is not None and base_protein_id(u_ac) == skip_protein:
                 continue
             if ignore_samples is not None and (u_ac, aac) in ignore_samples:
                 continue
 
-            if u_ac in test_proteins:
+            if base_protein_id(u_ac) in test_proteins:
                 test_ids.append((u_ac,aac))
             else:
                 train_ids.append((u_ac,aac))
@@ -635,7 +687,40 @@ class SampleSpace(Slotted_obj):
         self.feature_names = list(self.features.keys())
         return
 
+    def set_feature_values(self, sample_ids: list[tuple], feat_name: str, values: list, config=None):
+        """Sets values of one feature in the feature matrix, as addValue does value-wise for feature_matrix_dict.
+
+        Samples that are not in the sample space are skipped: the matrix has no row for them.
+        """
+        if self.feature_matrix_dict is not None:
+            for sample_id, value in zip(sample_ids, values):
+                self.addValue(sample_id, value, feat_name, config=config)
+            return
+        if feat_name not in self.feat_pos_dict:
+            self.ensure_feature_columns()
+        feat = self.features[feat_name]
+        rows = []
+        kept_values = []
+        n_unknown = 0
+        for sample_id, value in zip(sample_ids, values):
+            pos = self.sample_pos_dict.get(sample_id)
+            if pos is None:
+                n_unknown += 1
+                continue
+            rows.append(pos)
+            kept_values.append(value)
+        if n_unknown > 0 and config is not None:
+            config.logger.info(f'set_feature_values: {n_unknown} values of {feat_name} for samples without a matrix row were skipped')
+        if feat.f_type == 'categorical':
+            column = [feat.encode(value) for value in kept_values]
+        else:
+            column = [np.nan if value is None else value for value in kept_values]
+        self.raw_feature_matrix[np.array(rows, dtype=np.int64), self.feat_pos_dict[feat_name]] = np.array(column, dtype=np.float64)
+
     def addValue(self,sample_id,value,feat_name, config = None):
+        if self.feature_matrix_dict is None:
+            self.set_feature_values([sample_id], feat_name, [value], config=config)
+            return
         if sample_id not in self.samples:
             self.samples[sample_id] = Sample(sample_id,self.sample_nr)
             self.sample_nr += 1
@@ -711,45 +796,46 @@ class SampleSpace(Slotted_obj):
             if not os.path.isdir(base_name):
                 os.mkdir(base_name)
 
+        spec = (int_cols, {j: self.features[feature_names[j]].category_backmap for j in cat_cols}, class_col)
+        parallel = ray.is_initialized()
+        if parallel:
+            # Small blocks, so the blocks in flight stay small next to the feature matrix
+            block_size = min(block_size, 250)
+            window = max(1, int(ray.cluster_resources().get('CPU', 1)))
+            spec_store = ray.put(spec)
+
+        def block_args(start):
+            block_ids = sample_ids[start:start + block_size]
+            block = self.raw_feature_matrix[[self.sample_pos_dict[sample_id] for sample_id in block_ids]][:, cols]
+            metas = []
+            for sample_id in block_ids:
+                sample = self.samples[sample_id]
+                metas.append((*sample_id, str(sample.targetValue), sample.tags, str(sample.amount_of_structures)))
+            return block, metas
+
         with open(outfile, 'w') as f:
             f.write(header)
-            for start in range(0, len(sample_ids), block_size):
-                block_ids = sample_ids[start:start + block_size]
-                block = self.raw_feature_matrix[[self.sample_pos_dict[sample_id] for sample_id in block_ids]][:, cols]
-                # Python floats and ints, so str() formats them like the values of the old dict based writer
-                values = block.astype(object)
-                if int_cols:
-                    sub = block[:, int_cols]
-                    with np.errstate(invalid='ignore'):
-                        integral = ~np.isnan(sub) & (sub == np.floor(sub))
-                    int_values = values[:, int_cols]
-                    int_values[integral] = np.where(integral, sub, 0).astype(np.int64).astype(object)[integral]
-                    values[:, int_cols] = int_values
-                for j in cat_cols:
-                    backmap = self.features[feature_names[j]].category_backmap
-                    values[:, j] = ['None' if v != v else str(backmap[int(v)]) for v in block[:, j].tolist()]
 
-                lines = []
-                for sample_id, row in zip(block_ids, values.tolist()):
-                    u_ac, aac = sample_id
-                    sample = self.samples[sample_id]
-                    feature_str = '\t'.join(map(str, row))
-                    if 'nan' in feature_str:
-                        # Missing values are written as None; twice, as adjacent cells share their tab
-                        feature_str = f'\t{feature_str}\t'.replace('\tnan\t', '\tNone\t').replace('\tnan\t', '\tNone\t')[1:-1]
-                    target_value_str = str(sample.targetValue)
-                    lines.append('\n%s\t%s\t%s\t%s\t%s\t%s' % (u_ac, aac, target_value_str, sample.tags, str(sample.amount_of_structures), feature_str))
-
-                    if class_col is None:
-                        continue
-                    class_name = row[class_col]
-                    if class_name == 'None':
-                        continue
+            def write_formatted(text, class_texts):
+                f.write(text)
+                for class_name, class_text in class_texts.items():
                     if class_name not in class_files:
                         class_files[class_name] = open('%s_%s.%s' % (base_name, class_name, file_type), 'w')
                         class_files[class_name].write(header)
-                    class_files[class_name].write('\n%s\t%s\t%s\t%s' % (u_ac, aac, target_value_str, feature_str))
-                f.write(''.join(lines))
+                    class_files[class_name].write(class_text)
+
+            in_flight = deque()
+            for start in range(0, len(sample_ids), block_size):
+                block, metas = block_args(start)
+                if not parallel:
+                    write_formatted(*format_feature_rows(block, metas, spec))
+                    continue
+                # In file order: the oldest block is written first
+                if len(in_flight) >= window:
+                    write_formatted(*ray.get(in_flight.popleft()))
+                in_flight.append(remote_format_feature_rows.remote(block, metas, spec_store))
+            while in_flight:
+                write_formatted(*ray.get(in_flight.popleft()))
 
         for class_file in class_files.values():
             class_file.close()
@@ -1339,8 +1425,10 @@ class FullSlice(CrossValidation):
 class X_fold_cv(CrossValidation):
     def __init__(self, sampleSpace, config):
         super().__init__()
+        # Per protein: its function type samples go into the same slice
         prot_map = {}
         for (u_ac,aac) in sampleSpace.samples:
+            u_ac = base_protein_id(u_ac)
             if u_ac not in prot_map:
                 prot_map[u_ac] = 0
             prot_map[u_ac] += 1
@@ -1421,9 +1509,10 @@ class LOPO(CrossValidation):
         t0 = time.time()
         config.logger.info('-- LOPO initialization --')
         super().__init__()
+        # Per protein: its function type samples are left out together
         prots = set([])
         for (u_ac,aac) in sampleSpace.samples:
-            prots.add(u_ac)
+            prots.add(base_protein_id(u_ac))
 
         self.prots = list(prots)
 
@@ -1505,10 +1594,117 @@ class Given_split(CrossValidation):
             cv_slice.slice_slices = slice_slices
             self.slice_slices[slice_id] = slice_slices
 
+# Proteins at least this similar (identity x coverage of the shorter sequence) always end up in the same fold,
+# like a domain and a longer construct that contains it
+DATASAIL_GROUP_SIMILARITY = 0.9
+# Similarities for which the fold similarity log counts the proteins and pairs that reach them
+FOLD_SIMILARITY_LEVELS = (0.35, 0.5, 0.9)
+
+
+def protein_similarities(config, seq_map: dict[str, str]) -> dict[tuple[str, str], float]:
+    """All against all MMseqs2 search of the proteins.
+
+    Returns (protein a, protein b) -> sequence identity x coverage of the shorter sequence of the best hit, for both orders.
+    A domain contained in a longer protein gets a similarity of 1, which the MMseqs2 clustering of DataSAIL misses,
+    since its coverage criterion holds for both sequences.
+    """
+    similarities = {}
+    tmp_parent = config.mmseqs_tmp_folder if config.mmseqs_tmp_folder and os.path.isdir(config.mmseqs_tmp_folder) else None
+    with tempfile.TemporaryDirectory(dir = tmp_parent) as tmp_folder:
+        fasta = f'{tmp_folder}/proteins.fasta'
+        hits_file = f'{tmp_folder}/hits.m8'
+        with open(fasta, 'w') as f:
+            f.write(''.join(f'>{prot_id}\n{seq}\n' for prot_id, seq in seq_map.items()))
+        subprocess.run([config.mmseqs_path or 'mmseqs', 'easy-search', fasta, fasta, hits_file, f'{tmp_folder}/tmp',
+                        '-s', '7.5', '-e', '1e-3', '--threads', str(config.proc_n),
+                        '--format-output', 'query,target,fident,qcov,tcov,qlen,tlen'],
+                       check = True, stdout = subprocess.DEVNULL, stderr = subprocess.DEVNULL)
+        with open(hits_file, 'r') as f:
+            lines = f.readlines()
+
+    for line in lines:
+        query, target, fident, qcov, tcov, qlen, tlen = line.rstrip('\n').split('\t')
+        if query == target:
+            continue
+        coverage = float(qcov) if int(qlen) <= int(tlen) else float(tcov)
+        similarity = float(fident) * coverage
+        for pair in ((query, target), (target, query)):
+            if similarity > similarities.get(pair, 0.):
+                similarities[pair] = similarity
+    return similarities
+
+
+def group_similar_proteins(prot_ids: list[str], similarities: dict[tuple[str, str], float], threshold: float) -> dict[str, list[str]]:
+    """Groups of proteins connected by similarities of at least threshold, keyed by their first member."""
+    parent = {prot_id: prot_id for prot_id in prot_ids}
+
+    def find(prot_id):
+        while parent[prot_id] != prot_id:
+            parent[prot_id] = parent[parent[prot_id]]
+            prot_id = parent[prot_id]
+        return prot_id
+
+    for (prot_a, prot_b), similarity in similarities.items():
+        if similarity >= threshold and prot_a in parent and prot_b in parent:
+            root_a, root_b = find(prot_a), find(prot_b)
+            if root_a != root_b:
+                parent[max(root_a, root_b)] = min(root_a, root_b)
+
+    groups = {}
+    for prot_id in sorted(prot_ids):
+        groups.setdefault(find(prot_id), []).append(prot_id)
+    return groups
+
+
+def log_fold_similarities(config, prot_fold: dict[str, int], similarities: dict[tuple[str, str], float]) -> None:
+    """Logs how similar the proteins of each fold are to the proteins of the other folds."""
+    n_folds = config.crossValidation_fold
+    best_other_fold = {prot_id: (0., None) for prot_id in prot_fold}
+    pair_counts = {}
+    pair_max = {}
+    cross_pairs = []
+    for (prot_a, prot_b), similarity in similarities.items():
+        if prot_a not in prot_fold or prot_b not in prot_fold or prot_fold[prot_a] == prot_fold[prot_b]:
+            continue
+        if similarity > best_other_fold[prot_a][0]:
+            best_other_fold[prot_a] = (similarity, prot_b)
+        # Each pair once, the similarity is symmetric
+        if prot_a > prot_b:
+            continue
+        fold_pair = tuple(sorted((prot_fold[prot_a], prot_fold[prot_b])))
+        pair_max[fold_pair] = max(pair_max.get(fold_pair, 0.), similarity)
+        for level in FOLD_SIMILARITY_LEVELS:
+            if similarity >= level:
+                pair_counts[(fold_pair, level)] = pair_counts.get((fold_pair, level), 0) + 1
+        if similarity >= FOLD_SIMILARITY_LEVELS[0]:
+            cross_pairs.append((similarity, prot_a, prot_b))
+
+    level_names = ', '.join(f'>= {level}' for level in FOLD_SIMILARITY_LEVELS)
+    lines = [f'Fold similarities (sequence identity x coverage of the shorter sequence, MMseqs2) of {len(prot_fold)} proteins in {n_folds} folds:',
+             f'  Per fold: proteins, of them with a protein of another fold at similarity {level_names}, max similarity to another fold']
+    for fold in range(n_folds):
+        members = [prot_id for prot_id in prot_fold if prot_fold[prot_id] == fold]
+        counts = '/'.join(str(sum(1 for prot_id in members if best_other_fold[prot_id][0] >= level)) for level in FOLD_SIMILARITY_LEVELS)
+        max_similarity = max((best_other_fold[prot_id][0] for prot_id in members), default = 0.)
+        lines.append(f'  Fold {fold}: {len(members)} proteins, {counts}, max {max_similarity:.2f}')
+    lines.append(f'  Per pair of folds: protein pairs at similarity {level_names}, max similarity')
+    for fold_a in range(n_folds):
+        for fold_b in range(fold_a + 1, n_folds):
+            counts = '/'.join(str(pair_counts.get(((fold_a, fold_b), level), 0)) for level in FOLD_SIMILARITY_LEVELS)
+            lines.append(f'  Folds {fold_a}-{fold_b}: {counts}, max {pair_max.get((fold_a, fold_b), 0.):.2f}')
+    if len(cross_pairs) > 0:
+        lines.append(f'  Protein pairs in different folds at similarity >= {FOLD_SIMILARITY_LEVELS[0]}:')
+        for similarity, prot_a, prot_b in sorted(cross_pairs, reverse = True):
+            lines.append(f'    {similarity:.2f} {prot_a} (fold {prot_fold[prot_a]}) ~ {prot_b} (fold {prot_fold[prot_b]})')
+    config.logger.info('\n'.join(lines))
+
+
 def get_datasail_protein_split_assignment(config) -> dict[str, int]:
     # Sequence-identity aware clustering of the proteins in config.path_to_sequence_fasta into
     # config.crossValidation_fold folds, so that similar/related proteins don't end up split
     # across folds (which DataSAIL_cv itself relies on for the xgboost cross validation).
+    # DataSAIL gets the similarities of protein_similarities, with groups of near identical proteins
+    # (DATASAIL_GROUP_SIMILARITY) as one weighted entity, whose fold all its members get.
     datasail_test_size = 100 // config.crossValidation_fold
     splits = [datasail_test_size] * config.crossValidation_fold
     names = [f'split_{x}' for x in range(config.crossValidation_fold)]
@@ -1519,11 +1715,37 @@ def get_datasail_protein_split_assignment(config) -> dict[str, int]:
     else:
         technique = ['C1e']
 
+    seq_map = {prot_id: seqs[0] for prot_id, seqs in parseFasta(config.path_to_sequence_fasta).items()}
+    similarities = protein_similarities(config, seq_map)
+
+    if config.random_split:
+        groups = {prot_id: [prot_id] for prot_id in seq_map}
+    else:
+        groups = group_similar_proteins(list(seq_map.keys()), similarities, DATASAIL_GROUP_SIMILARITY)
+    group_of = {member: rep for rep, members in groups.items() for member in members}
+
+    reps = list(groups.keys())
+    rep_index = {rep: i for i, rep in enumerate(reps)}
+    sim_matrix = np.identity(len(reps))
+    for (prot_a, prot_b), similarity in similarities.items():
+        i, j = rep_index[group_of[prot_a]], rep_index[group_of[prot_b]]
+        if i != j and similarity > sim_matrix[i, j]:
+            sim_matrix[i, j] = similarity
+            sim_matrix[j, i] = similarity
+
+    e_data = {rep: seq_map[rep] for rep in reps}
+    e_weights = {rep: len(groups[rep]) for rep in reps}
+    if config.verbosity >= 2:
+        merged = [members for members in groups.values() if len(members) > 1]
+        config.logger.info(f'DataSAIL input: {len(seq_map)} proteins as {len(reps)} entities, '
+                           f'groups of proteins with a similarity >= {DATASAIL_GROUP_SIMILARITY}: {merged}')
+
     try:
         if config.verbosity >= 4:
-            config.logger.info(f'Call of datasail with: e_data: {config.path_to_sequence_fasta}, splits: {splits}, names: {names}')
+            config.logger.info(f'Call of datasail with: e_data: {len(e_data)} entities of {config.path_to_sequence_fasta}, splits: {splits}, names: {names}')
             raw_datasail_splits = datasail(
-                e_data = config.path_to_sequence_fasta,
+                e_data = e_data,
+                e_weights = e_weights,
                 splits = splits,
                 techniques = technique,
                 names = names,
@@ -1531,12 +1753,13 @@ def get_datasail_protein_split_assignment(config) -> dict[str, int]:
                 solver = 'SCIP',
                 epsilon = eps,
                 overflow = 'assign',
-                e_sim = 'mmseqs',
+                e_sim = (reps, sim_matrix),
                 verbose = 'I')
         else:
             with contextlib.redirect_stdout(None):
                 raw_datasail_splits = datasail(
-                    e_data = config.path_to_sequence_fasta,
+                    e_data = e_data,
+                    e_weights = e_weights,
                     splits = splits,
                     techniques = technique,
                     names = names,
@@ -1544,10 +1767,12 @@ def get_datasail_protein_split_assignment(config) -> dict[str, int]:
                     solver = 'SCIP',
                     epsilon = eps,
                     overflow = 'assign',
-                    e_sim = 'mmseqs')
+                    e_sim = (reps, sim_matrix))
     except ValueError:
+        config.logger.info('DataSAIL failed with the precomputed similarities, falling back to its default similarity')
         raw_datasail_splits = datasail(
-                e_data = config.path_to_sequence_fasta,
+                e_data = e_data,
+                e_weights = e_weights,
                 splits = splits,
                 techniques = technique,
                 names = names,
@@ -1560,9 +1785,12 @@ def get_datasail_protein_split_assignment(config) -> dict[str, int]:
     datasail_splits = raw_datasail_splits[0][technique[0]][0]
 
     prot_fold = {}
-    for prot_id in datasail_splits:
-        split_name = datasail_splits[prot_id]
-        prot_fold[prot_id] = int(split_name.split('_')[1])
+    for rep in datasail_splits:
+        fold = int(datasail_splits[rep].split('_')[1])
+        for prot_id in groups[rep]:
+            prot_fold[prot_id] = fold
+
+    log_fold_similarities(config, prot_fold, similarities)
     return prot_fold
 
 
@@ -1582,7 +1810,7 @@ class DataSAIL_cv(CrossValidation):
         sample_list: list[tuple[str, str]] = list(sampleSpace.samples.keys())
 
         for (prot_id, aac) in sample_list:
-            prots.add(prot_id)
+            prots.add(base_protein_id(prot_id))
 
         self.prots = list(prots)
 

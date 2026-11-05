@@ -41,6 +41,7 @@ from structguy.util import (
 )
 from structguy.consts import feature_categories
 from structguy.feature_interactions import aggregate_feature_interactions, interaction_folder
+from structguy.measurements import DatasetMeasurements, base_protein_id
 import glob
 
 from xgboost import plot_tree, DMatrix, build_info, Booster
@@ -665,6 +666,10 @@ def evaluate_dataset(config: Config, preloaded_model=None):
             y_pred = trainForest.booster_list_predict(booster_list, test_feat_mats, logger=progress_logger)
             y_std = None
 
+    # Before the samples without a target get dropped below: the per entry evaluation looks up every prediction
+    all_predictions = dict(zip(sample_id_list, y_pred))
+    all_stds = dict(zip(sample_id_list, y_std)) if y_std is not None else None
+
     if config.path_to_multi_savs_table is not None:
         multi_savs = parse_multi_savs_table(config)
 
@@ -694,28 +699,46 @@ def evaluate_dataset(config: Config, preloaded_model=None):
                 new_test_targets.append(true_value)
                 new_sample_id_list.append(sample_id)
                 new_y_pred.append(pred_value)
+                combined_y_std.append(pred_std)
             elif config.target_values is None:
                 new_sample_id_list.append(sample_id)
                 new_y_pred.append(pred_value)
                 combined_sample_id_list.append(sample_id)
                 combined_y_pred.append(pred_value)
+                combined_y_std.append(pred_std)
 
-            combined_y_std.append(pred_std)
+        # A protein measured under several function types got one sample protein per function type
+        # (base_protein_id|function_type=...): the multi SAV table only knows the base protein id
+        sample_proteins_of_base: dict[str, list[str]] = {}
+        for sample_prot_id, _ in sample_id_list:
+            base_id = base_protein_id(sample_prot_id)
+            if sample_prot_id not in sample_proteins_of_base.setdefault(base_id, []):
+                sample_proteins_of_base[base_id].append(sample_prot_id)
 
+        n_skipped_multi_savs = 0
         for prot_id, aacs, effect in multi_savs:
-            individual_effect_preds = []
-            for aac in aacs:
-                individual_effect_preds.append(effect_dict[(prot_id, aac)])
-            combined_effect = combine_individual_effects(individual_effect_preds)
+            sample_prot_ids = sample_proteins_of_base.get(prot_id, [prot_id])
+            added = False
+            for sample_prot_id in sample_prot_ids:
+                individual_effect_preds = [effect_dict.get((sample_prot_id, aac)) for aac in aacs]
+                if None in individual_effect_preds:
+                    continue
+                combined_effect = combine_individual_effects(individual_effect_preds)
+                added = True
 
-            combined_test_targets.append(effect)
-            combined_sample_id_list.append((prot_id, ":".join(aacs)))
-            combined_y_pred.append(combined_effect)
-            combined_y_std.append(None)
+                combined_test_targets.append(effect)
+                combined_sample_id_list.append((sample_prot_id, ":".join(aacs)))
+                combined_y_pred.append(combined_effect)
+                combined_y_std.append(None)
 
-            mm_test_targets.append(effect)
-            mm_sample_id_list.append((prot_id, ":".join(aacs)))
-            mm_y_pred.append(combined_effect)
+                mm_test_targets.append(effect)
+                mm_sample_id_list.append((sample_prot_id, ":".join(aacs)))
+                mm_y_pred.append(combined_effect)
+            if not added:
+                n_skipped_multi_savs += 1
+
+        if n_skipped_multi_savs > 0 and config.verbosity >= 1:
+            config.logger.info(f'{n_skipped_multi_savs} of {len(multi_savs)} multi SAVs skipped, since not all of their SAVs were predicted')
 
         test_targets = new_test_targets
         y_pred = new_y_pred
@@ -724,12 +747,56 @@ def evaluate_dataset(config: Config, preloaded_model=None):
     else:
         mm_y_pred = None
 
+    # The metrics are computed per input entry of the dataset fasta when it is available: StructMAn fuses entries with
+    # identical sequences into one protein, and their measurements (e.g. MAVEs of different labs) must be evaluated
+    # separately. The prediction files further below stay per protein.
+    dataset_measurements = DatasetMeasurements.load(config) if config.target_values is not None else None
+    if dataset_measurements is not None:
+        single_records, multi_records = dataset_measurements.evaluation_records(all_predictions, combine_individual_effects)
+        metric_sample_ids = [(entry_id, variant) for entry_id, variant, _, _, _ in single_records]
+        metric_targets = [true_value for _, _, true_value, _, _ in single_records]
+        metric_preds = [pred_value for _, _, _, pred_value, _ in single_records]
+        metric_stds = [all_stds[(protein_id, variant)] for _, variant, _, _, protein_id in single_records] if all_stds is not None else None
+        metric_protein_ids = [protein_id for _, _, _, _, protein_id in single_records]
+        if len(multi_records) > 0:
+            metric_mm_sample_ids = [(entry_id, variant) for entry_id, variant, _, _, _ in multi_records]
+            metric_mm_targets = [true_value for _, _, true_value, _, _ in multi_records]
+            metric_mm_preds = [pred_value for _, _, _, pred_value, _ in multi_records]
+            metric_comb_sample_ids = metric_sample_ids + metric_mm_sample_ids
+            metric_comb_targets = metric_targets + metric_mm_targets
+            metric_comb_preds = metric_preds + metric_mm_preds
+        else:
+            metric_mm_preds = None
+
+        per_entry_file = f"{config.outfolder}/predictions_by_{model_name}_per_entry.tsv"
+        with open(per_entry_file, "w") as f:
+            f.write("Input entry\tVariant\tTrue value\tPredicted effect value\tProtein ID\n")
+            for entry_id, variant, true_value, pred_value, protein_id in single_records + multi_records:
+                f.write(f"{entry_id}\t{variant}\t{true_value}\t{pred_value}\t{protein_id}\n")
+        if config.verbosity >= 1:
+            config.logger.info(f"Wrote the per input entry evaluation records to {per_entry_file}")
+    else:
+        metric_sample_ids = sample_id_list
+        metric_targets = test_targets
+        metric_preds = y_pred
+        metric_stds = y_std
+        metric_protein_ids = [prot_id for prot_id, _ in sample_id_list]
+        if mm_y_pred is not None:
+            metric_mm_sample_ids = mm_sample_id_list
+            metric_mm_targets = mm_test_targets
+            metric_mm_preds = mm_y_pred
+            metric_comb_sample_ids = combined_sample_id_list
+            metric_comb_targets = combined_test_targets
+            metric_comb_preds = combined_y_pred
+        else:
+            metric_mm_preds = None
+
     t_metrics = time.time()
     protein_info = {}
     protein_wise_results = {}
-    for pos, sample_id in enumerate(sample_id_list):
+    for pos, sample_id in enumerate(metric_sample_ids):
         if config.target_values is not None:
-            true_value = test_targets[pos]
+            true_value = metric_targets[pos]
 
             if true_value is None:
                 config.logger.info(f"Ground truth is None for: {sample_id}")
@@ -737,7 +804,7 @@ def evaluate_dataset(config: Config, preloaded_model=None):
         else:
             true_value = None
 
-        pred_value = y_pred[pos]
+        pred_value = metric_preds[pos]
 
         if pred_value is None:
             config.logger.info(f"Predicted value is None for: {sample_id}")
@@ -746,7 +813,7 @@ def evaluate_dataset(config: Config, preloaded_model=None):
 
         if true_value is not None:
             if prot_id not in protein_info:
-                protein_size = samples.get_feature_value(sample_id, "Protein Size")
+                protein_size = samples.get_feature_value((metric_protein_ids[pos], aac), "Protein Size")
                 protein_info[prot_id] = [protein_size, 0]
             protein_info[prot_id][1] += 1
 
@@ -800,9 +867,9 @@ def evaluate_dataset(config: Config, preloaded_model=None):
     """
 
     if config.target_values is not None:
-        r2 = r2_score(test_targets, y_pred)
-        mse = mean_squared_error(test_targets, y_pred)
-        corr, p_value = stats.spearmanr(test_targets, y_pred)
+        r2 = r2_score(metric_targets, metric_preds)
+        mse = mean_squared_error(metric_targets, metric_preds)
+        corr, p_value = stats.spearmanr(metric_targets, metric_preds)
     else:
         r2 = None
         mse = None
@@ -815,58 +882,69 @@ def evaluate_dataset(config: Config, preloaded_model=None):
         config.logger.info(f"Spearman correlation and p-value: {corr} {p_value}")
 
     if config.target_values is not None:
-        if y_std is not None:
-            prot_wise_spearmans, mean_spearman, _, err_corrs = calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.spearmanr, y_std=y_std)
+        # calc_protein_wise_corr averages absolute correlations, the raw (signed) ones are reported additionally, since anti-correlated proteins are failures here
+        if metric_stds is not None:
+            prot_wise_spearmans, mean_spearman, prot_wise_raw_spearmans, err_corrs = calc_protein_wise_corr(metric_targets, metric_preds, metric_sample_ids, stats.spearmanr, y_std=metric_stds)
         else:
-            prot_wise_spearmans, mean_spearman, _ = calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.spearmanr)
+            prot_wise_spearmans, mean_spearman, prot_wise_raw_spearmans = calc_protein_wise_corr(metric_targets, metric_preds, metric_sample_ids, stats.spearmanr)
             err_corrs = None
-        prot_wise_pearsons, mean_pearson, _ = calc_protein_wise_corr(test_targets, y_pred, sample_id_list, stats.pearsonr)
+        prot_wise_pearsons, mean_pearson, _ = calc_protein_wise_corr(metric_targets, metric_preds, metric_sample_ids, stats.pearsonr)
+        raw_spearman_values = [raw_corr for _, raw_corr in prot_wise_raw_spearmans]
+        mean_signed_spearman = sum(raw_spearman_values) / len(raw_spearman_values) if len(raw_spearman_values) > 0 else 0
+        n_anticorrelated = sum(1 for raw_corr in raw_spearman_values if raw_corr < 0)
     else:
         prot_wise_spearmans = None
+        prot_wise_raw_spearmans = None
         mean_spearman = None
+        mean_signed_spearman = None
+        n_anticorrelated = None
         prot_wise_pearsons = None
         mean_pearson = None
         err_corrs = None
 
     if config.verbosity >= 1:
-        config.logger.info(f"Number of samples: {len(sample_id_list)} {len(test_targets)} {len(y_pred)}")
+        config.logger.info(f"Number of samples: {len(metric_sample_ids)} {len(metric_targets)} {len(metric_preds)}")
+        if dataset_measurements is not None:
+            config.logger.info(f"Prot-wise metrics are per input entry of the dataset fasta: {len(protein_info)} entries")
 
         config.logger.info(f"Prot-wise mean pearson: {mean_pearson}")
         config.logger.info(f"Prot-wise mean spearman: {mean_spearman}")
+        config.logger.info(f"Prot-wise mean signed spearman: {mean_signed_spearman} ({n_anticorrelated} anti-correlated proteins)")
 
-    if mm_y_pred is not None and config.target_values is not None:
-        prot_wise_spearmans, mean_mm_spearman, _ = calc_protein_wise_corr(mm_test_targets, mm_y_pred, mm_sample_id_list, stats.spearmanr)
-        prot_wise_pearsons, mean_pearson, _ = calc_protein_wise_corr(mm_test_targets, mm_y_pred, mm_sample_id_list, stats.pearsonr)
+    if metric_mm_preds is not None and config.target_values is not None:
+        _, mean_mm_spearman, _ = calc_protein_wise_corr(metric_mm_targets, metric_mm_preds, metric_mm_sample_ids, stats.spearmanr)
+        _, mean_pearson, _ = calc_protein_wise_corr(metric_mm_targets, metric_mm_preds, metric_mm_sample_ids, stats.pearsonr)
 
         if config.verbosity >= 1:
-            config.logger.info(f"Number of samples: {len(mm_sample_id_list)} {len(mm_test_targets)} {len(mm_y_pred)}")
+            config.logger.info(f"Number of samples: {len(metric_mm_sample_ids)} {len(metric_mm_targets)} {len(metric_mm_preds)}")
 
             config.logger.info(f"Prot-wise mean pearson for multi savs: {mean_pearson}")
             config.logger.info(f"Prot-wise mean spearman for multi savs: {mean_mm_spearman}")
 
-        prot_wise_spearmans, mean_comb_spearman, _ = calc_protein_wise_corr(
-            combined_test_targets,
-            combined_y_pred,
-            combined_sample_id_list,
+        _, mean_comb_spearman, _ = calc_protein_wise_corr(
+            metric_comb_targets,
+            metric_comb_preds,
+            metric_comb_sample_ids,
             stats.spearmanr,
         )
-        prot_wise_pearsons, mean_pearson, _ = calc_protein_wise_corr(
-            combined_test_targets,
-            combined_y_pred,
-            combined_sample_id_list,
+        _, mean_pearson, _ = calc_protein_wise_corr(
+            metric_comb_targets,
+            metric_comb_preds,
+            metric_comb_sample_ids,
             stats.pearsonr,
         )
 
         if config.verbosity >= 1:
-            config.logger.info(f"Number of samples: {len(combined_sample_id_list)} {len(combined_test_targets)} {len(combined_y_pred)}")
+            config.logger.info(f"Number of samples: {len(metric_comb_sample_ids)} {len(metric_comb_targets)} {len(metric_comb_preds)}")
 
             config.logger.info(f"Prot-wise mean pearson for all variants: {mean_pearson}")
             config.logger.info(f"Prot-wise mean spearman for all variants: {mean_comb_spearman}")
 
-    if prot_wise_spearmans is not None:
+    # Single SAV results with signed correlations, matching the "Prot-wise mean signed spearman" log line
+    if prot_wise_raw_spearmans is not None:
         write_protein_wise_performances(
             f"{config.outfolder}/protein_wise_results.tsv",
-            prot_wise_spearmans,
+            prot_wise_raw_spearmans,
             protein_info,
             err_corrs
         )
@@ -1001,7 +1079,8 @@ def evaluate_dataset(config: Config, preloaded_model=None):
         words = [prot_id, aac, str(pred_value), str(std_value) if std_value is not None else 'NA']
 
         if config.target_values is not None:
-            eval_words = words[:]
+            # The eval headers have the true value in place of the tree STD column
+            eval_words = words[:3]
             eval_words.append(str(combined_test_targets[pos]))
             full_eval_words = eval_words[:]
 

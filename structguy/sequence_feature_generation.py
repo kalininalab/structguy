@@ -853,8 +853,6 @@ def single_mafft(config, prot_id, tag, seq_list, target_file, seq=None):
 def gpw_pipeline(config, samples: SampleSpace):
     gpw_map = {}
     psic_jobs = []
-    current_job = 0
-    config_store = ray.put(config)
 
     prot_id_back_map = {}
     for prot_id in samples.sequence_map:
@@ -885,12 +883,7 @@ def gpw_pipeline(config, samples: SampleSpace):
                 if not os.path.isfile(psic_distant_file):
                     if config.verbosity >= 3:
                         config.logger.info(f"Calc psic profiles from gpw_pipeline {sfn}")
-                    if len(psic_jobs) == current_job:
-                        psic_jobs.append([])
-                    psic_jobs[current_job].append((gpw_distant_file, psic_distant_file))
-                    current_job += 1
-                    if current_job >= config.proc_n:
-                        current_job = 0
+                    psic_jobs.append((gpw_distant_file, psic_distant_file))
 
         close_folder = f'{subfolder}/gpw_close'
 
@@ -911,12 +904,7 @@ def gpw_pipeline(config, samples: SampleSpace):
                 if not os.path.isfile(psic_close_file):
                     if config.verbosity >= 3:
                         config.logger.info(f"Calc psic profiles from gpw_pipeline {sfn}")
-                    if len(psic_jobs) == current_job:
-                        psic_jobs.append([])
-                    psic_jobs[current_job].append((gpw_close_file, psic_close_file))
-                    current_job += 1
-                    if current_job >= config.proc_n:
-                        current_job = 0
+                    psic_jobs.append((gpw_close_file, psic_close_file))
 
     N = 0
     mmseq_searchs = []
@@ -964,8 +952,7 @@ def gpw_pipeline(config, samples: SampleSpace):
         slice_subset(seq_lists, seq_list, 0.85, 25., 80., prot_id, seq, db_id, seq_list_id='gpw_distant')
         slice_subset(seq_lists, seq_list, 1., 50., 100., prot_id, seq, db_id, seq_list_id='gpw_close')
 
-    chunks = []
-    current_chunk = 0
+    gemme_jobs = []
 
     for prot_id, seq_list_id, seq_list in seq_lists:
         target_folder = f'{config.msa_folder_path}/{clean_prot_id(prot_id)}'
@@ -987,12 +974,7 @@ def gpw_pipeline(config, samples: SampleSpace):
         if not os.path.isfile(psic_file) or config.overwrite:
             if config.verbosity >= 3:
                 config.logger.info(f"Calc psic profiles from gpw_pipeline {target_file=}")
-            if len(psic_jobs) == current_job:
-                psic_jobs.append([])
-            psic_jobs[current_job].append((target_file, psic_file))
-            current_job += 1
-            if current_job >= config.proc_n:
-                current_job = 0        
+            psic_jobs.append((target_file, psic_file))
 
         if prot_id not in gpw_map:
             gpw_map[prot_id] = {}
@@ -1009,27 +991,42 @@ def gpw_pipeline(config, samples: SampleSpace):
         if len(gemme_files) == 0:
             path_pieces = target_file.split('/')
             path_part = '/'.join(path_pieces[-3:])
+            gemme_jobs.append(path_part)
 
-            if len(chunks) == current_chunk:
-                chunks.append([])
-            chunks[current_chunk].append(path_part)
+    # Waited for by the caller, together with the jobs of the structural alignments
+    job_refs = submit_psic_and_gemme_jobs(config, psic_jobs, gemme_jobs, 'gpw')
 
-            current_chunk += 1
-            if current_chunk >= config.proc_n:
-                current_chunk = 0
-
-    process_ids = []
-    for proc_id, chunk in enumerate(chunks):
-        process_ids.append(para_gemme.remote(chunk, config.msa_folder_path, proc_id, config.overwrite, False, 2))
-
-    proc_ids = []
-    for package in psic_jobs:
-        proc_ids.append(para_psic.remote(package, config_store))
-    ray.get(proc_ids)
-
-    return gpw_map, prot_id_back_map
+    return gpw_map, prot_id_back_map, job_refs
 
 STRUCTURAL_ALIGNMENT_ID = 'structural'
+
+
+def submit_psic_and_gemme_jobs(config, psic_jobs: list[tuple[str, str]], gemme_jobs: list[str], tag: str) -> list:
+    """Starts a ray task per PSIC job (msa path, psic path) and GEMME job (msa path in the msa folder).
+
+    The largest alignments go first: their jobs take the longest and would otherwise run alone at the end.
+    Returns the ray refs of the tasks.
+    """
+    def size(path):
+        try:
+            return os.path.getsize(path)
+        except OSError:
+            return 0
+
+    jobs = [(size(msa_path), 'psic', (msa_path, psic_name)) for msa_path, psic_name in psic_jobs]
+    jobs += [(size(f'{config.msa_folder_path}/{msa_path}'), 'gemme', msa_path) for msa_path in gemme_jobs]
+    jobs.sort(key=lambda job: job[0], reverse=True)
+
+    config_store = ray.put(config)
+    refs = []
+    for job_nr, (_, kind, job) in enumerate(jobs):
+        if kind == 'psic':
+            refs.append(para_psic.remote([job], config_store))
+        else:
+            # The id names the GEMME script in the msa folder, unique over all jobs that run at the same time
+            refs.append(para_gemme.remote([job], config.msa_folder_path, f'{tag}_{job_nr}', config.overwrite, False, 2))
+    return refs
+
 
 
 def parse_structman_alignment(path: str) -> tuple[list[str], str, list[tuple[str, str]]]:
@@ -1101,7 +1098,7 @@ def parse_structman_alignment(path: str) -> tuple[list[str], str, list[tuple[str
     return input_ids, query_seq, rows
 
 
-def structural_alignment_pipeline(config, samples: SampleSpace) -> dict[str, dict[str, str]]:
+def structural_alignment_pipeline(config, samples: SampleSpace) -> tuple[dict[str, dict[str, str]], list]:
     """Turn StructMAn's structure alignments into the 'structural' stacked alignment.
 
     Takes the non-redundant matrix (<protein>.nr.tsv, one row per redundancy cluster) of
@@ -1109,19 +1106,18 @@ def structural_alignment_pipeline(config, samples: SampleSpace) -> dict[str, dic
     Writes one query anchored fasta per protein into the msa folder, with the same
     layout as the gpw alignments (<msa_folder>/<prot>/structural/<prot>_structural.fasta),
     and computes its PSIC profile and GEMME predictions, so calcSeqFeat can featurize it
-    like the other stacked alignments.
+    like the other stacked alignments. Returns the alignments and the ray refs of the
+    PSIC and GEMME jobs, which the caller has to wait for.
     """
     struct_map: dict[str, dict[str, str]] = {}
     alignment_folder = config.path_to_structman_alignments
     if alignment_folder is None or not os.path.isdir(alignment_folder):
         config.logger.info(f'No StructMAn alignments folder found: {alignment_folder}')
-        return struct_map
+        return struct_map, []
 
     seq_list_id = STRUCTURAL_ALIGNMENT_ID
     psic_jobs = []
-    current_job = 0
-    gemme_chunks = []
-    current_chunk = 0
+    gemme_jobs = []
     n_skipped = 0
 
     alignment_files = set(os.listdir(alignment_folder))
@@ -1177,38 +1173,23 @@ def structural_alignment_pipeline(config, samples: SampleSpace) -> dict[str, dic
 
             check_psic_file(psic_file)
             if not os.path.isfile(psic_file) or config.overwrite:
-                if len(psic_jobs) == current_job:
-                    psic_jobs.append([])
-                psic_jobs[current_job].append((target_file, psic_file))
-                current_job += 1
-                if current_job >= config.proc_n:
-                    current_job = 0
+                psic_jobs.append((target_file, psic_file))
 
             has_gemme = any(fi.endswith('.txt') and fi.count('normPred') > 0 for fi in os.listdir(sub_folder))
             if not has_gemme or config.overwrite:
-                if len(gemme_chunks) == current_chunk:
-                    gemme_chunks.append([])
-                gemme_chunks[current_chunk].append(f'{cl_prot_id}/{seq_list_id}/{cl_prot_id}_{seq_list_id}.fasta')
-                current_chunk += 1
-                if current_chunk >= config.proc_n:
-                    current_chunk = 0
+                gemme_jobs.append(f'{cl_prot_id}/{seq_list_id}/{cl_prot_id}_{seq_list_id}.fasta')
 
             struct_map[cl_prot_id] = {seq_list_id: target_file}
 
     config.logger.info(
         f'Structural alignments: {len(struct_map)} proteins ({n_nr} non-redundant, '
         f'{len(full_files) - n_nr} full alignments without a non-redundant one), {n_skipped} skipped, '
-        f'{sum(len(j) for j in psic_jobs)} PSIC and {sum(len(c) for c in gemme_chunks)} GEMME jobs'
+        f'{len(psic_jobs)} PSIC and {len(gemme_jobs)} GEMME jobs'
     )
 
-    config_store = ray.put(config)
-    proc_ids = [para_psic.remote(package, config_store) for package in psic_jobs]
-    # Waited for, unlike in gpw_pipeline: the GEMME output is parsed right after the
-    # sequence features are calculated.
-    proc_ids += [para_gemme.remote(chunk, config.msa_folder_path, proc_id, config.overwrite, False, 2) for proc_id, chunk in enumerate(gemme_chunks)]
-    ray.get(proc_ids)
+    job_refs = submit_psic_and_gemme_jobs(config, psic_jobs, gemme_jobs, seq_list_id)
 
-    return struct_map
+    return struct_map, job_refs
 
 
 def afdb_msa_pipeline(config, samples: SampleSpace):
@@ -1991,13 +1972,19 @@ def getSequenceFeatures(config, samples, n_of_processes=6, update_mode=False):
     #msa_map, gpw_map = local_ali_pipeline(config, samples, n_of_processes=n_of_processes, update_mode=update_mode)
 
     #msa_map, prot_id_back_map = afdb_msa_pipeline(config, samples)
-    msa_map, prot_id_back_map = gpw_pipeline(config, samples)
+    msa_map, prot_id_back_map, job_refs = gpw_pipeline(config, samples)
 
     if STRUCTURAL_ALIGNMENT_ID in config.msa_dbs:
-        for prot_key, db_paths in structural_alignment_pipeline(config, samples).items():
+        struct_map, struct_job_refs = structural_alignment_pipeline(config, samples)
+        job_refs += struct_job_refs
+        for prot_key, db_paths in struct_map.items():
             if prot_key not in msa_map:
                 msa_map[prot_key] = {}
             msa_map[prot_key].update(db_paths)
+
+    # One wait for the PSIC and GEMME jobs of all alignments, so their slowest jobs run at the same time
+    with util.log_timing(config, f'getSequenceFeatures: {len(job_refs)} PSIC and GEMME jobs'):
+        ray.get(job_refs)
     
     gpw_map = {}
 
@@ -2038,6 +2025,7 @@ def getSequenceFeatures(config, samples, n_of_processes=6, update_mode=False):
     if config.verbosity >= 1:
         config.logger.info("after paraCalcSeqFeat")
 
+    feature_values: dict[str, tuple[list, list]] = {}
     for result in results:
         for u_ac, prot_mut_map in result:
             if u_ac in prot_id_back_map:
@@ -2072,7 +2060,15 @@ def getSequenceFeatures(config, samples, n_of_processes=6, update_mode=False):
 
             for aac in prot_mut_map:
                 for value, feat_name in prot_mut_map[aac]:
-                    samples.addValue((prot_id, aac), value, feat_name, config=config)
+                    if feat_name not in feature_values:
+                        feature_values[feat_name] = ([], [])
+                    feature_values[feat_name][0].append((prot_id, aac))
+                    feature_values[feat_name][1].append(value)
+
+    # Column-wise, as value-wise insertion into the feature matrix is slow. The order per feature is kept,
+    # so a later value of a sample wins, as with addValue.
+    for feat_name, (sample_ids, values) in feature_values.items():
+        samples.set_feature_values(sample_ids, feat_name, values, config=config)
 
     return
 

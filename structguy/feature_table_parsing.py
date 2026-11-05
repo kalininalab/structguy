@@ -635,7 +635,11 @@ def add_results_to_samples(config, samples, results, reparsed_results, num_plan,
     if len(num_matrix_cols) > 0:
         for r, chunk_dest in zip(results, chunk_dests):
             if len(chunk_dest) > 0:
-                block[np.ix_(chunk_dest, num_matrix_cols)] = r['num_block'][:, keep_num]
+                # Whole rows: a 2D fancy index (np.ix_) into the full matrix is much slower
+                rows = block[chunk_dest]
+                rows[:, num_matrix_cols] = r['num_block'][:, keep_num]
+                block[chunk_dest] = rows
+            r['num_block'] = None
 
     def gather_strings(chunk_results, k):
         values = np.empty(n_rows, dtype=object)

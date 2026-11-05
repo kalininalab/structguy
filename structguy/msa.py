@@ -739,6 +739,25 @@ def parsePsicFile(infile):
 
 
 # called by sequence_feature_generation
+def window_bounds(pos, seq_len, radius=10):
+    """First and last position of the window of the window median dPSIC, shifted to stay inside the sequence."""
+    window_a = pos - radius
+    window_b = pos + radius
+
+    if window_a < 0 and window_b >= seq_len:
+        window_a = 0
+        window_b = seq_len - 1
+    if window_a < 0:
+        window_b -= window_a
+        window_a = 0
+    if window_b >= seq_len:
+        window_a -= window_b - (seq_len - 1)
+        window_b = seq_len - 1
+        if window_a < 0:
+            window_a = 0
+    return window_a, window_b
+
+
 def calcPsicProfiles(config, prot_id, aacs, seq, ref_db_id, gpw=False, psic_name = None):
 
     if psic_name is None:
@@ -788,20 +807,7 @@ def calcPsicProfiles(config, prot_id, aacs, seq, ref_db_id, gpw=False, psic_name
         aa_mut = aac[-1]
         pos = int(aac[1:-1]) - 1
 
-        window_a = pos - 10
-        window_b = pos + 10
-
-        if window_a < 0 and window_b >= len(seq):
-            window_a = 0
-            window_b = len(seq) - 1
-        if window_a < 0:
-            window_b -= window_a
-            window_a = 0
-        if window_b >= len(seq):
-            window_a -= window_b - (len(seq) - 1)
-            window_b = len(seq) - 1
-            if window_a < 0:
-                window_a = 0
+        window_a, window_b = window_bounds(pos, len(seq))
 
         if pos not in psic_profiles:
             config.logger.info(f"psic error {prot_id=} {aac=} {ref_db_id=} {gpw=}")

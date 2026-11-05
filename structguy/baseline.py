@@ -15,6 +15,7 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from structman.base_utils.base_utils import pack, unpack
 from structguy import featureGenerator, sampleSpace
 from structguy.featureSelection import filterCorrelatedFeats
+from structguy.measurements import base_protein_id
 from structguy.util import Config, calc_protein_wise_corr
 
 
@@ -84,7 +85,8 @@ def build_datasail_cv_splits(config, sample_id_list, regression):
 
     prot_fold = sampleSpace.get_datasail_protein_split_assignment(config)
 
-    sample_fold = numpy.array([prot_fold.get(sample_id[0], -1) for sample_id in sample_id_list])
+    # DataSAIL assigns the proteins of the sequence file; their function type samples belong to the same fold
+    sample_fold = numpy.array([prot_fold.get(base_protein_id(sample_id[0]), -1) for sample_id in sample_id_list])
     unassigned = int((sample_fold == -1).sum())
     if unassigned > 0:
         config.logger.warning(
