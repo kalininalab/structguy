@@ -24,6 +24,9 @@ from structman.base_utils.base_utils import Errorlog, resolve_path, pack, unpack
 from structguy.consts import feat_name_category_dict, feature_categories, INTERACTING_POSITIONS_CATEGORY
 from structguy.base_classes import Feature
 
+# StructMAn's search modes (structman.base_utils.config_class.SEARCH_MODES), the suffix of its output names
+STRUCTMAN_SEARCH_MODES = ('fast', 'balanced', 'deep')
+
 class OutputCapture:
     def __init__(self):
         self.captured_output = ""
@@ -800,7 +803,16 @@ class Config:
                 self.msa_folder_path = arg
 
         if self.path_to_structman_alignments is None and self.path_structural_feature_table is not None:
-            default_alignments = f'{os.path.dirname(self.path_structural_feature_table)}/alignments'
+            # StructMAn names the folder like the feature file: alignments_<search mode> next to
+            # <session>_<search mode>.features.tsv. A plain alignments folder is from before the
+            # search modes, and next to a feature file of a mode it is the output of an earlier run.
+            feature_dir = os.path.dirname(self.path_structural_feature_table)
+            stem = os.path.basename(self.path_structural_feature_table).split('.')[0]
+            search_mode = stem.rsplit('_', 1)[-1]
+            if search_mode in STRUCTMAN_SEARCH_MODES:
+                default_alignments = f'{feature_dir}/alignments_{search_mode}'
+            else:
+                default_alignments = f'{feature_dir}/alignments'
             if os.path.isdir(default_alignments):
                 self.path_to_structman_alignments = default_alignments
 
@@ -1197,6 +1209,14 @@ class Config:
 
         if not overwritten:
             new_lines.append(f'{field} = {value}\n')
+
+        f = open(self.path_to_project_file, 'w')
+        f.write(''.join(new_lines))
+        f.close()
+
+    def remove_entries_from_project_file(self, fields):
+        opt_args = parse_conf(self.path_to_project_file)
+        new_lines = [f'{opt} = {arg}\n' for opt, arg in opt_args if opt not in fields]
 
         f = open(self.path_to_project_file, 'w')
         f.write(''.join(new_lines))

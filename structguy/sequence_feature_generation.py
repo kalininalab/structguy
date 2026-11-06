@@ -1967,6 +1967,8 @@ def getSequenceFeatures(config, samples, n_of_processes=6, update_mode=False):
     config.msa_dbs = ['gpw_distant', 'gpw_close']
     if config.path_to_structman_alignments is not None:
         config.msa_dbs.append(STRUCTURAL_ALIGNMENT_ID)
+    else:
+        config.logger.warning(f'No StructMAn alignments folder (Path_to_structman_alignments_folder in the project file, or alignments_<search mode> next to {config.path_structural_feature_table}): no features of the structural alignments')
     config.gpw_dbs = []
     initFeatures(config, samples)
     #msa_map, gpw_map = local_ali_pipeline(config, samples, n_of_processes=n_of_processes, update_mode=update_mode)

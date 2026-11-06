@@ -22,6 +22,8 @@ def expand_structural_feature_table(config):
     samples.write(outfile)
 
     config.add_entry_to_project_file("path_to_features_file", outfile)
+    # Processed from the previous feature table; createTrainingSet processes the new one again
+    config.remove_entries_from_project_file({"path_to_processed_features_file", "path_to_imputed_features_file"})
     return
 
 def msa_bench(config):
