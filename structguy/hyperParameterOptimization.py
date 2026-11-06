@@ -70,6 +70,9 @@ class Parameter:
             val = self.possible_values[round(val)]
         elif self.log_scale:
             val = self.from_search_space(val)
+        if self.param_type == "integer" and val is not None and not isinstance(val, str):
+            # keep float noise such as 31.000000000000004 out of the config
+            val = int(round(val))
         config.setByString(self.name, val)
 
     def getValue(self, config):

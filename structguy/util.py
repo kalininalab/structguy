@@ -1119,6 +1119,10 @@ class Config:
                 setattr(self, parameter_name, round(value))
             elif str(target_type).count('float') > 0 and isinstance(value, float):
                 setattr(self, parameter_name, value)
+            elif target_type is float and isinstance(value, int) and not isinstance(value, bool):
+                # e.g. an integer hyperparameter loaded as 31.000000000000004 and then
+                # clipped onto its int search limit
+                setattr(self, parameter_name, float(value))
             else:
                 raise TypeError(f"Value for {parameter_name} should be typed as a {target_type}, but given was: {value} ({type(value)})")
         else:
